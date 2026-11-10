@@ -1,0 +1,12 @@
+# Editable DSLinux working tree (its own nested git clone of upstream); our changes are exported to patches/
+/work/
+# Build output
+/out/
+*.o
+# Never commit console dumps or emulator state
+/dumps/
+*nand*
+*bios*
+*firmware*
+dsisd*
+*.sav
