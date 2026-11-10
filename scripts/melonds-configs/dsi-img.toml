@@ -1,0 +1,29 @@
+# DSi-mode test config. The [DSi] paths point at the user's own dumps (opened by melonDS only; never read or copied by us).
+# Replace $HOME before use. DSi SD is off; DS-style DLDI is backed by a FAT image.
+[DSi]
+NANDPath = "$HOME/Documents/Claude/TwoPaneDSi/DSINAND/nand.bin"
+BIOS7Path = "$HOME/Documents/Claude/TwoPaneDSi/dsidump/bios7i.bin"
+BIOS9Path = "$HOME/Documents/Claude/TwoPaneDSi/dsidump/bios9i.bin"
+FirmwarePath = "$HOME/Documents/Claude/TwoPaneDSi/dsidump/dsfirmware.bin"
+FullBIOSBoot = true
+
+[DSi.SD]
+Enable = false
+ImageSize = 1
+ImagePath = "dsisd.bin"
+ReadOnly = false
+FolderSync = false
+FolderPath = ""
+
+[DLDI]
+FolderPath = ""
+FolderSync = false
+ReadOnly = false
+ImagePath = "$HOME/Documents/Claude/DSLinuxDSi/out/dldi-img-dsi/dldi.img"
+ImageSize = 0
+Enable = true
+
+[Emu]
+DirectBoot = true
+ExternalBIOSEnable = false
+ConsoleType = 1
