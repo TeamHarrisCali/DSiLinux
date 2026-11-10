@@ -1,6 +1,6 @@
 # Stage 2: 16 MB DSi-mode build
 
-Date: 2026-11-10. **Compiled, and checked only in DS mode as a negative control. The DSi-mode boot (melonDS or real console) has NOT been verified by me.**
+Date: 2026-11-10. **Compiled, and checked in DS mode as a negative control by me. The user ran it in melonDS DSi mode and reports it boots to the init prompt (screenshot). Not tested on a real console.**
 
 ## What changed (patch `patches/0001-*.patch`, from upstream `74f4eda53`)
 
@@ -19,7 +19,7 @@ Date: 2026-11-10. **Compiled, and checked only in DS mode as a negative control.
 | `make` for the DSI product exits 0; kernel has `CONFIG_NDS_DSI`, `DRAM_SIZE=0x00FF0000` | **Verified** (compile) |
 | The binary differs from the Stage 1 build only in a few dozen bytes (the constants above) | **Verified** (`cmp`) |
 | The 16 MB build does not run with 4 MB RAM | **Verified** in melonDS DS mode: the console floods with kernel fault messages ([shot](shots/stage2-16mb-build-in-ds-mode-faults.png)). This shows the build really depends on 16 MB; it is not a DSi result |
-| It boots in melonDS **DSi mode** with 16 MB | **Not verified.** You said you would run it. Expect the init prompt like Stage 1, and, if DLDI is on, no "Extra RAM NOT detected!" banner plus tty2/tty3 starting (the init scripts test `MemTotal > 4000 KB`) |
+| It boots in melonDS **DSi mode** with 16 MB | **Boot verified by the user** (their screenshot, [docs/shots/stage2-dsi-mode-user-run.png](shots/stage2-dsi-mode-user-run.png)): `dslinux-dsi.nds` reaches the init prompt in melonDS DSi mode. DLDI was off, so the card mount fails as expected. The TCP hash tables are 1024 entries (the 4 MB build had 256), which means the kernel sees more RAM, but the exact `MemTotal` has **not** been read. Original expectation was the init prompt like Stage 1, and, if DLDI is on, no "Extra RAM NOT detected!" banner plus tty2/tty3 starting (the init scripts test `MemTotal > 4000 KB`) |
 | It boots on a real DSi XL via TWiLight Menu++ | **Not tested** |
 | Third-party proof of concept boots in melonDS DSi mode | **Verified** (screenshot, DLDI off): same kernel family, TCP hash table sized for more RAM (1024 entries vs 256). So melonDS DSi mode with direct boot hands a unit-code-0 ROM the extra RAM |
 
