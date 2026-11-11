@@ -1,0 +1,430 @@
+From af085690025fcdcdfe1af894dbcc4d66ce80d9c4 Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 14:56:34 -0600
+Subject: [PATCH] 3D Dodge: a small game on the DS 3D engine (Start > Games), a
+ 3x3 tunnel with walls of blocks and a guaranteed free path, speed rising with
+ each wave, best score kept in /home/dodge.best
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ user/microwin/Makefile                 |   1 +
+ user/microwin/src/demos/nanox/Makefile |   9 +-
+ user/microwin/src/demos/nanox/dsdesk.c |   1 +
+ user/microwin/src/demos/nanox/dsgame.c | 339 +++++++++++++++++++++++++
+ vendors/Nintendo/DSI/Makefile          |   1 +
+ 5 files changed, 349 insertions(+), 2 deletions(-)
+ create mode 100644 user/microwin/src/demos/nanox/dsgame.c
+
+diff --git a/user/microwin/Makefile b/user/microwin/Makefile
+index 6d83fb680..b9808c430 100644
+--- a/user/microwin/Makefile
++++ b/user/microwin/Makefile
+@@ -19,6 +19,7 @@ real_romfs:
+ 	$(ROMFSINST) /bin/dsplay
+ 	$(ROMFSINST) /bin/dsmemo
+ 	$(ROMFSINST) /bin/dssettings
++	$(ROMFSINST) /bin/dsgame
+ 	$(ROMFSINST) /bin/dscam
+ 	$(ROMFSINST) /bin/dsgallery
+ 	$(ROMFSINST) -e CONFIG_USER_MICROWIN_BIN_LANDMINE    /bin/landmine
+diff --git a/user/microwin/src/demos/nanox/Makefile b/user/microwin/src/demos/nanox/Makefile
+index af1734dc0..dc05a6e13 100644
+--- a/user/microwin/src/demos/nanox/Makefile
++++ b/user/microwin/src/demos/nanox/Makefile
+@@ -88,10 +88,11 @@ OBJS =	demo.o \
+ 	dsmemo.o \
+ 	dscam.o \
+ 	dsgallery.o \
+-	dssettings.o
++	dssettings.o \
++	dsgame.o
+ 
+ TARGETS = \
+-	$(TOP)/bin/dsdesk $(TOP)/bin/dsnotes $(TOP)/bin/dsfiles $(TOP)/bin/dsbench $(TOP)/bin/dsgl3d $(TOP)/bin/dsgx $(TOP)/bin/dsplay $(TOP)/bin/dsmemo $(TOP)/bin/dscam $(TOP)/bin/dsgallery $(TOP)/bin/dssettings \
++	$(TOP)/bin/dsdesk $(TOP)/bin/dsnotes $(TOP)/bin/dsfiles $(TOP)/bin/dsbench $(TOP)/bin/dsgl3d $(TOP)/bin/dsgx $(TOP)/bin/dsplay $(TOP)/bin/dsmemo $(TOP)/bin/dscam $(TOP)/bin/dsgallery $(TOP)/bin/dssettings $(TOP)/bin/dsgame \
+ 	$(TOP)/bin/demo $(TOP)/bin/move $(TOP)/bin/landmine \
+ 	$(TOP)/bin/world $(TOP)/bin/nxclock \
+ 	$(TOP)/bin/nxlsclients $(TOP)/bin/nxev \
+@@ -198,6 +199,10 @@ $(TOP)/bin/dsgallery: dsgallery.o dsgx.h dsgx_win.h dsbmp.h $(NANOXCLIENTLIBS) $
+ 	@echo "Linking $@ ..."
+ 	$(CC) $(CFLAGS) $(LDFLAGS) $< -o $@ $(LD_NANOXCLIENTLIBS) $(LIBM)
+ 
++$(TOP)/bin/dsgame: dsgame.o dsgx.h dsgx_win.h dsgx_demo.h $(NANOXCLIENTLIBS) $(TOP)/config
++	@echo "Linking $@ ..."
++	$(CC) $(CFLAGS) $(LDFLAGS) $< -o $@ $(LD_NANOXCLIENTLIBS) $(LIBM)
++
+ $(TOP)/bin/dssettings: dssettings.o w95.h $(NANOXCLIENTLIBS) $(TOP)/config
+ 	@echo "Linking $@ ..."
+ 	$(CC) $(CFLAGS) $(LDFLAGS) dssettings.o -o $@ $(LD_NANOXCLIENTLIBS)
+diff --git a/user/microwin/src/demos/nanox/dsdesk.c b/user/microwin/src/demos/nanox/dsdesk.c
+index bac732f8e..a242b00f4 100644
+--- a/user/microwin/src/demos/nanox/dsdesk.c
++++ b/user/microwin/src/demos/nanox/dsdesk.c
+@@ -40,6 +40,7 @@ static const struct item multimedia[] = {
+ 	{ "3D gears", "/boot/dsgl3d" },
+ };
+ static const struct item games[] = {
++	{ "3D Dodge", "/boot/dsgame" },
+ 	{ "Minesweeper", "/boot/landmine" },
+ 	{ "Tetris", "/boot/ntetris" },
+ };
+diff --git a/user/microwin/src/demos/nanox/dsgame.c b/user/microwin/src/demos/nanox/dsgame.c
+new file mode 100644
+index 000000000..9d951ba85
+--- /dev/null
++++ b/user/microwin/src/demos/nanox/dsgame.c
+@@ -0,0 +1,339 @@
++/*
++ * dsgame - "3D Dodge": a small game for the DSLinuxDSi desktop on the DS 3D engine (dsgx.h, in a desktop window).
++ * You fly through a tunnel made of a 3x3 grid of cells. Walls of blocks come towards you, each with a gap: move your ship to a free
++ * cell before the wall reaches you. Every wall you pass is a point, and everything gets faster. A hit ends the game.
++ * Keys: the d-pad / the arrow buttons on the touch screen (or the keys w a s d) move the ship one cell; a tap in the window moves
++ * it towards the tapped side (left third, right third, upper or lower middle). Enter, space or a tap after a hit starts again; q or
++ * Esc quits. The best score is kept in /home/dodge.best.
++ * Each wave leaves a free path that is at most one cell away from the free path of the wave before, so it can always be dodged.
++ */
++#include <time.h>
++#include <sys/time.h>
++#include "dsgx_win.h"
++#include "dsgx_demo.h"
++
++#define CELL		2.0		/* cell size; the ship's cell centres are at -2, 0, 2 */
++#define CAMDIST		4.5		/* the camera is this far behind the ship */
++#define MAXWAVES	8
++#define SPAWN_Z		70.0		/* where new walls appear (ahead of the ship) */
++#define BEST_FILE	"/home/dodge.best"
++
++struct wave {
++	double z;			/* distance ahead of the ship, decreasing */
++	int mask;			/* bit (iy * 3 + ix): that cell is blocked */
++	int hue;
++	int hit_checked;
++	int active;
++};
++
++static struct wave waves[MAXWAVES];
++static struct gx_mesh cubem;
++static double px, py, tx, ty;		/* ship position, animated, and the cell it is moving to (in cell units -1..1) */
++static int score, best, dead, safe_x, safe_y, level_speed_steps;
++static double speed, spawn_in, track_pos;
++
++static long usec(void)
++{
++	struct timeval tv;
++
++	gettimeofday(&tv, NULL);
++	return tv.tv_sec * 1000000L + tv.tv_usec;
++}
++
++static void load_best(void)
++{
++	FILE *f = fopen(BEST_FILE, "r");
++
++	if (f) {
++		if (fscanf(f, "%d", &best) != 1)
++			best = 0;
++		fclose(f);
++	}
++}
++
++static void save_best(void)
++{
++	FILE *f = fopen(BEST_FILE, "w");
++
++	if (f) {
++		fprintf(f, "%d\n", best);
++		fclose(f);
++	}
++}
++
++static void new_game(void)
++{
++	int i;
++
++	for (i = 0; i < MAXWAVES; i++)
++		waves[i].active = 0;
++	px = py = tx = ty = 0.0;
++	score = 0;
++	dead = 0;
++	speed = 16.0;
++	spawn_in = 1.2;
++	safe_x = safe_y = 0;
++	level_speed_steps = 0;
++}
++
++static int rnd(int n)
++{
++	return rand() % n;
++}
++
++static void spawn_wave(void)
++{
++	int i, x, y, mask = 0;
++
++	for (i = 0; i < MAXWAVES && waves[i].active; i++)
++		;
++	if (i >= MAXWAVES)
++		return;
++	/* the free path moves by at most one cell, so the ship (which moves one cell per press) can follow it */
++	x = safe_x + rnd(3) - 1;
++	y = safe_y + rnd(3) - 1;
++	if (x < -1) x = -1;
++	if (x > 1) x = 1;
++	if (y < -1) y = -1;
++	if (y > 1) y = 1;
++	safe_x = x;
++	safe_y = y;
++	for (y = -1; y <= 1; y++)
++		for (x = -1; x <= 1; x++) {
++			if (x == safe_x && y == safe_y)
++				continue;
++			if (rnd(100) < 50)
++				mask |= 1 << ((y + 1) * 3 + (x + 1));
++		}
++	waves[i].z = SPAWN_Z;
++	waves[i].mask = mask;
++	waves[i].hue = rnd(5);
++	waves[i].hit_checked = 0;
++	waves[i].active = 1;
++}
++
++static int cell_of(double v)
++{
++	int c = (int)(v < 0 ? v - 0.5 : v + 0.5);
++
++	return c < -1 ? -1 : (c > 1 ? 1 : c);
++}
++
++static void move_ship(int dx, int dy)
++{
++	if (dead)
++		return;
++	tx += dx;
++	ty += dy;
++	if (tx < -1) tx = -1;
++	if (tx > 1) tx = 1;
++	if (ty < -1) ty = -1;
++	if (ty > 1) ty = 1;
++}
++
++static void update(double dt)
++{
++	int i;
++	double follow = dt * 16.0;
++
++	if (follow > 1.0)
++		follow = 1.0;
++	px += (tx - px) * follow;
++	py += (ty - py) * follow;
++	if (dead)
++		return;
++	track_pos += speed * dt;
++	spawn_in -= dt;
++	if (spawn_in <= 0.0) {
++		double gap = 1.15 - 0.02 * level_speed_steps;
++
++		spawn_wave();
++		spawn_in = gap < 0.55 ? 0.55 : gap;
++	}
++	for (i = 0; i < MAXWAVES; i++) {
++		struct wave *w = &waves[i];
++
++		if (!w->active)
++			continue;
++		w->z -= speed * dt;
++		if (!w->hit_checked && w->z < 0.9 && w->z > -0.9) {
++			int cx = cell_of(px), cy = cell_of(py);
++
++			if (w->mask & (1 << ((cy + 1) * 3 + (cx + 1)))) {
++				dead = 1;
++				if (score > best) {
++					best = score;
++					save_best();
++				}
++				return;
++			}
++		}
++		if (w->z <= -0.9 && !w->hit_checked) {
++			w->hit_checked = 1;
++			score++;
++			level_speed_steps++;
++			if (speed < 40.0)
++				speed += 1.0;
++		}
++		if (w->z < -6.0)
++			w->active = 0;
++	}
++}
++
++static const int hue_rgb[5][3] = { { 31, 8, 4 }, { 31, 18, 2 }, { 26, 4, 28 }, { 4, 22, 10 }, { 28, 28, 4 } };
++
++static void draw_box(double x, double y, double dist, double sx, double sy, double sz, int r, int g, int b)
++{
++	gx_push();
++	gx_translate(x, y, -dist);
++	gx_scale(sx, sy, sz);
++	gx_material(GX_RGB(r, g, b), GX_RGB(r / 3, g / 3, b / 3));
++	gx_mesh_draw(&cubem);
++	gx_pop(1);
++}
++
++static void draw_scene(void)
++{
++	int i, k, x, y;
++	double offs = track_pos - 4.0 * (int)(track_pos / 4.0);
++
++	gx_mode(GX_MODELVIEW);
++	gx_identity();
++	gx_light(0, 31, 31, 31, -0.4, -1.0, -0.6);
++	gx_polyattr(1, GX_CULL_NONE, 31);
++	gx_cmd(GXR_TEXIMAGE, 0);
++
++	/* the tunnel: strips on the floor and the walls, alternating colours, moving towards the camera */
++	for (k = 0; k < 13; k++) {
++		double zf = k * 4.0 - offs;
++		int alt = (((int)(track_pos / 4.0) + k) & 1);
++		int c1 = alt ? 6 : 3, c2 = alt ? 10 : 6;
++
++		draw_box(0.0, -3.2, CAMDIST + zf, 3.2, 0.15, 1.95, c1, c1, c2 + 6);	/* floor */
++		draw_box(-3.2, 0.0, CAMDIST + zf, 0.15, 3.2, 1.95, c1 + 2, c1, c2 + 4);	/* left wall */
++		draw_box(3.2, 0.0, CAMDIST + zf, 0.15, 3.2, 1.95, c1 + 2, c1, c2 + 4);	/* right wall */
++	}
++	/* the walls of blocks, far ones first is not needed: the depth buffer sorts them */
++	for (i = 0; i < MAXWAVES; i++) {
++		struct wave *w = &waves[i];
++
++		if (!w->active || w->z < -3.0)
++			continue;
++		for (y = -1; y <= 1; y++)
++			for (x = -1; x <= 1; x++)
++				if (w->mask & (1 << ((y + 1) * 3 + (x + 1))))
++					draw_box(x * CELL, y * CELL, CAMDIST + w->z, 0.92, 0.92, 0.7, hue_rgb[w->hue][0], hue_rgb[w->hue][1],
++						 hue_rgb[w->hue][2]);
++	}
++	/* the ship */
++	if (!dead)
++		draw_box(px * CELL, py * CELL, CAMDIST, 0.55, 0.38, 0.8, 4, 24, 31);
++	else
++		draw_box(px * CELL, py * CELL, CAMDIST, 0.9, 0.9, 0.9, 31, 4, 4);
++	gx_swap();
++	gx_flush();
++}
++
++int main(int argc, char **argv)
++{
++	GR_EVENT ev;
++	struct gxw w;
++	int running = 1, last_score = -1, last_dead = -1;
++	long last_us = 0;
++	char txt[32];
++
++	if (gx_open() < 0)
++		return 1;
++	if (GrOpen() < 0) {
++		fprintf(stderr, "dsgame: cannot connect to Nano-X\n");
++		return 1;
++	}
++	srand((unsigned)time(NULL));
++	load_best();
++	cube(&cubem);				/* a cube of side 2 (the textured cube mesh of dsgx_demo.h, used without a texture) */
++	new_game();
++	gxw_create(&w, "3D Dodge", 30, 8, 160, 120, 1.0, 100.0);
++	GrSelectEvents(w.win, GR_EVENT_MASK_EXPOSURE | GR_EVENT_MASK_KEY_DOWN | GR_EVENT_MASK_CLOSE_REQ | GR_EVENT_MASK_BUTTON_DOWN);
++	gx_control(GX_CTRL_AA);
++	gx_flush();
++
++	while (running) {
++		int key = 0;
++		long now;
++		double dt;
++
++		GrCheckNextEvent(&ev);
++		if (gxw_event(&w, &ev))
++			running = 0;
++		if (ev.type == GR_EVENT_TYPE_KEY_DOWN) {
++			key = ev.keystroke.ch;
++		} else if (ev.type == GR_EVENT_TYPE_BUTTON_DOWN) {
++			if (dead)
++				key = ' ';
++			else if (ev.button.x < w.rw / 3)
++				key = MWKEY_LEFT;
++			else if (ev.button.x > w.rw * 2 / 3)
++				key = MWKEY_RIGHT;
++			else if (ev.button.y < w.rh / 2)
++				key = MWKEY_UP;
++			else
++				key = MWKEY_DOWN;
++		}
++		switch (key) {
++		case MWKEY_ESCAPE:
++		case 'q':
++			running = 0;
++			break;
++		case MWKEY_LEFT:
++		case 'a':
++			move_ship(-1, 0);
++			break;
++		case MWKEY_RIGHT:
++		case 'd':
++			move_ship(1, 0);
++			break;
++		case MWKEY_UP:
++		case 'w':
++			move_ship(0, 1);
++			break;
++		case MWKEY_DOWN:
++		case 's':
++			move_ship(0, -1);
++			break;
++		case ' ':
++		case MWKEY_ENTER:
++			if (dead) {
++				new_game();
++				last_score = -1;
++			}
++			break;
++		}
++		gxw_update(&w);
++		if (!w.visible) {			/* minimised: nothing to draw, the game waits */
++			usleep(100000);
++			w.dirty = 1;
++			last_us = 0;
++			continue;
++		}
++		gx_vsync();				/* one frame per screen refresh */
++		now = usec();
++		dt = last_us ? (now - last_us) / 1e6 : 1.0 / 60.0;
++		last_us = now;
++		if (dt > 0.05)
++			dt = 0.05;
++		update(dt);
++		draw_scene();
++		if (score != last_score || dead != last_dead) {
++			sprintf(txt, "score %d", score);
++			gxw_text(&w, 0, txt);
++			sprintf(txt, "best  %d", best);
++			gxw_text(&w, 1, txt);
++			gxw_text(&w, 2, dead ? "HIT! Enter: again" : "move: arrows");
++			last_score = score;
++			last_dead = dead;
++		}
++	}
++	gx_close();
++	GrClose();
++	return 0;
++}
+diff --git a/vendors/Nintendo/DSI/Makefile b/vendors/Nintendo/DSI/Makefile
+index 1cd8bf894..e3d1c3a73 100644
+--- a/vendors/Nintendo/DSI/Makefile
++++ b/vendors/Nintendo/DSI/Makefile
+@@ -169,6 +169,7 @@ finishrom:
+ 	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/cmp $(ROMFSDIR)/boot/cmp
+ 	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/dsmemo $(ROMFSDIR)/boot/dsmemo
+ 	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/dssettings $(ROMFSDIR)/boot/dssettings
++	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/dsgame $(ROMFSDIR)/boot/dsgame
+ 	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/dscam $(ROMFSDIR)/boot/dscam
+ 	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/landmine $(ROMFSDIR)/boot/landmine
+ 	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/ntetris $(ROMFSDIR)/boot/ntetris
+-- 
+2.56.0
+
