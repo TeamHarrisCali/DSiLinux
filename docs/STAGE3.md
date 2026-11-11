@@ -172,6 +172,14 @@ Writes are still compiled out (`CONFIG_NDS_DSISD_WRITE` off).
 The live `dsitouch:` console lines printed a new line on every touch and made the shell unusable. They are now behind `CONFIG_NDS_DSISD_TOUCHDIAG` (default off, not set in the DSI product).
 The boot-time self-test and the two `dsisd:` lines stay (they appear once at boot). ROMs: `out/dsi-mode/dslinux-dsimode-i-uc3.nds` and `-uc2`. Built; not run.
 
+## SD card mounted and listed on the console (user's photos, "h"/"i" build, DSi mode)
+- `grep dldi /proc/partitions`: `dldi` 3,872,256 KB and `dldi1` 3,860,160 KB. The kernel read the card's partition table (sector 0) through the ARM7 driver.
+- `ls /media` listed the real FAT32 filesystem of the user's DSi SD card: long names, mixed case and the usual DSi/TWiLight folders (names only; the driver is read-only and nothing was opened).
+  So reads, the FAT mount and directory listing work on real hardware.
+- `free: not found` and `ls /usr/bin: Unknown error 2` are expected without the `linux/` userland on the card. `ls /media/linux` printed nothing: a `linux` folder exists on the card but the kernel listed it **empty**.
+  Most likely the folder was created but its contents were not copied (to be confirmed on a PC). The tree to copy is `out/dsi-card/sd-root/linux` (subfolders `etc home lib usr var`, about 109 MB).
+- Note for the repository: the listing showed a folder named after the console's ID; it is not recorded here.
+
 ## 3c. Faster ARM9 clock, 3d. Wi-Fi/cameras/DSP
 Not started. 3c is small but needs the SD result first; 3d unchanged from the feasibility finding.
 
