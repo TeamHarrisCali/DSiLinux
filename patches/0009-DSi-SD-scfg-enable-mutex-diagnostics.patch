@@ -1,0 +1,137 @@
+From e568dfa930624af25b1b746425510b4aedcad256 Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <noreply@example.invalid>
+Date: Tue, 10 Nov 2026 20:44:16 -0600
+Subject: [PATCH] DSi SD: enable the SCFG_EXT bits libnds enables
+ (SDMMC|INTERRUPT|AES|DMA); serialize ARM7 requests; richer failure
+ diagnostics
+
+The first hardware SD init timed out on CMD0 with SCFG_EXT 0x93fffb06 (bit 0, DMA, clear). The periodic touch-diagnostics request
+also overwrote the shared request block during the init request, which made a failed init look successful.
+---
+ linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c | 17 +++++++++++------
+ linux-2.6.x/drivers/block/dldi_c.c         | 20 ++++++++++++++++----
+ 2 files changed, 27 insertions(+), 10 deletions(-)
+
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c b/linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c
+index 4f683144c..1ac495b56 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c
+@@ -161,6 +161,7 @@ static u32 g_sectors;
+ static u32 g_last_cmd;
+ static u32 g_ncmd;
+ static u32 g_last_status;
++static u32 g_last_seen;
+ 
+ static void delay_loops(u32 n)
+ {
+@@ -234,6 +235,7 @@ static u32 tmio_cmd(u16 cmd, u32 arg, u16 blocks, void *buf)
+ 	}
+ 	if (cap == 3000000) {
+ 		g_last_status = 0xFFFFFFFFu;
++		g_last_seen = g_status;
+ 		return 0xFFFFFFFFu;
+ 	}
+ 	get_response(cmd);
+@@ -272,6 +274,7 @@ static u32 tmio_cmd(u16 cmd, u32 arg, u16 blocks, void *buf)
+ 			return 0xFFFFFFFFu;
+ 	}
+ 	g_last_status = g_status;
++	g_last_seen = g_status;
+ 	return g_status & ERR_BITS;
+ }
+ 
+@@ -330,11 +333,13 @@ static u32 card_init_steps(struct nds_sd_block *b)
+ 	b->diag[3] = R16(REVISION);
+ 	g_ncmd = 0;
+ 
+-	/* If the ARM7 may still write SCFG_EXT (bit 31 set) but the SD/MMC
+-	 * interface (bit 18) is off, switch it on. If SCFG is locked (reads as
+-	 * 0, DS compatibility mode) nothing is written. */
+-	if ((SCFG_EXT7 & 0x80000000u) && !(SCFG_EXT7 & (1u << 18)))
+-		SCFG_EXT7 = SCFG_EXT7 | (1u << 18);
++	/* Same as BlocksDS libnds (tmio.twl.c): "if we have access to the SCFG registers we need to enable a few
++	 * things, just in case; some loaders and emulators don't set the SCFG bits correctly".
++	 * ARM7 SCFG_EXT: bit 0 DMA, bit 8 interrupt, bit 17 AES, bit 18 SD/MMC. If SCFG is locked nothing is written. */
++	if (SCFG_EXT7 & 0x80000000u)
++		SCFG_EXT7 |= (1u << 18) | (1u << 8) | (1u << 17) | (1u << 0);
++	b->diag[2] = SCFG_ROM7;
++	b->info[0] = SCFG_EXT7;	/* after enabling */
+ 
+ 	tmio_reset();
+ 
+@@ -467,7 +472,7 @@ static u32 card_init(struct nds_sd_block *b)
+ 	if (ret != NDS_SD_OK) {
+ 		b->diag[4] = g_last_status;
+ 		b->diag[5] = R32(SD_STATUS);
+-		b->diag[6] = g_resp[0];
++		b->diag[6] = g_last_seen;
+ 		b->diag[7] = (g_last_cmd << 8) | (g_ncmd & 0xff);
+ 	}
+ 	return ret;
+diff --git a/linux-2.6.x/drivers/block/dldi_c.c b/linux-2.6.x/drivers/block/dldi_c.c
+index e5f718caa..4cf629ddd 100644
+--- a/linux-2.6.x/drivers/block/dldi_c.c
++++ b/linux-2.6.x/drivers/block/dldi_c.c
+@@ -28,6 +28,7 @@
+ #include <asm/cacheflush.h>
+ #include <asm/arch/fifo.h>
+ #include <asm/arch/dsisd.h>
++#include <asm/semaphore.h>
+ #endif
+ 
+ MODULE_LICENSE("GPL");
+@@ -108,6 +109,7 @@ static struct dldi_dev *Devices = NULL;
+ static struct nds_sd_block sd_block;	/* 32 byte aligned, see dsisd.h */
+ static DECLARE_WAIT_QUEUE_HEAD(sd_wait);
+ static volatile int sd_done;
++static DECLARE_MUTEX(sd_mutex);	/* one request block, one request at a time */
+ static int dldi_xfer_err;
+ 
+ static void sd_fifo_cb(u8 cmd)
+@@ -124,7 +126,7 @@ static struct fifo_cb sd_cb = {
+ };
+ 
+ /* Returns the ARM7's result code (0 = ok), or -1 if it did not answer. */
+-static int sd_request(unsigned int cmd, unsigned int sector, unsigned int count)
++static int sd_request_locked(unsigned int cmd, unsigned int sector, unsigned int count)
+ {
+ 	sd_block.cmd = cmd;
+ 	sd_block.sector = sector;
+@@ -144,6 +146,16 @@ static int sd_request(unsigned int cmd, unsigned int sector, unsigned int count)
+ 	return (int)sd_block.result;
+ }
+ 
++static int sd_request(unsigned int cmd, unsigned int sector, unsigned int count)
++{
++	int ret;
++
++	down(&sd_mutex);
++	ret = sd_request_locked(cmd, sector, count);
++	up(&sd_mutex);
++	return ret;
++}
++
+ /* Print the ARM7's DSi touch counters every 2 s while they change (no userland tool needed). */
+ static struct work_struct tdiag_work;
+ static u32 tdiag_last[3];
+@@ -175,14 +187,14 @@ static int dsisd_start(void)
+ 	register_fifocb(&sd_cb);
+ 	nds_fifo_send(FIFO_FIRMWARE_CMD(FIFO_FIRMWARE_CMD_SD_ADDRESS,
+ 					(u32)&sd_block));
+-	INIT_WORK(&tdiag_work, tdiag_fn, NULL);
+-	schedule_delayed_work(&tdiag_work, 3 * HZ);
+ 	ret = sd_request(NDS_SD_CMD_INIT, 0, 0);
++	INIT_WORK(&tdiag_work, tdiag_fn, NULL);
++	schedule_delayed_work(&tdiag_work, 2 * HZ);
+ 	printk(KERN_INFO "dsisd: init result %d, SCFG_EXT %08x, TMIO rev %04x, "
+ 	       "info %08x, sectors %u\n", ret, sd_block.info[0],
+ 	       sd_block.info[1], sd_block.info[2], sd_block.sectors);
+ 	printk(KERN_INFO "dsisd: diag ext %08x clk %08x rom %08x rev %08x "
+-	       "st@fail %08x st %08x resp %08x cmd/n %04x\n",
++	       "st@fail %08x st %08x seen %08x cmd/n %04x\n",
+ 	       sd_block.diag[0], sd_block.diag[1], sd_block.diag[2],
+ 	       sd_block.diag[3], sd_block.diag[4], sd_block.diag[5],
+ 	       sd_block.diag[6], sd_block.diag[7]);
+-- 
+2.56.0
+

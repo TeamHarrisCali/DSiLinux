@@ -139,6 +139,16 @@ Builds clean; not run anywhere.
 - The self-test never printed: `rc` ended with `. /etc/rc.common`, and sourcing the missing file aborts the script. Fixed in "f": the self-test now runs before it.
 "f" ROMs: `out/dsi-mode/dslinux-dsimode-f-uc3.nds` (and `-uc2`). Built; not run.
 
+## Results of the "f" build on the console (user's photo, DSi mode, uc3)
+- **Touch works** (the user is pressing the on-screen keyboard). Cause was the calibration address (see above).
+- Self-test: `MemTotal: 14084 kB`, `RAM : PASS - 16 MB real`. So the console really runs the ROM in DSi mode with 16 MB. (14084 kB = 16320 kB minus the kernel image and built-in filesystem.)
+- The SD line said `PASS - card found`, `init result 0`, but the same lines showed `info 00000001, sectors 0` and a diag line with `st@fail ffffffff`, `cmd/n 0001`. These contradict each other. Explanation:
+  the touch-diagnostics work item (scheduled 3 s before the SD init request) used the same shared request block with no locking, so its reply overwrote `result` (0 = OK) while the SD init had actually
+  failed (`info 1` = failing step CMD0, `sectors 0` never set, `st@fail ffffffff` = software timeout, `cmd/n 0001` = one command sent). So **the SD init really failed at CMD0 (no response), and the PASS was wrong.**
+  Status after the failure `208004a0`: card detected (bit 5), not write protected (bit 7), idle.
+- BlocksDS's own TMIO init enables four ARM7 SCFG_EXT bits first (`SDMMC|INTERRUPT|AES|DMA`, bits 18, 8, 17, 0; "some loaders ... don't set the SCFG bits correctly"). The console read `93fffb06`: bits 18, 8, 17 set, **bit 0 (DMA) clear**; my driver never set it. Plausible cause; not confirmed.
+"g" ROMs (`out/dsi-mode/dslinux-dsimode-g-uc3.nds`, `-uc2`): sets those four bits before touching the controller; a mutex now serializes all ARM7 requests; the failure diagnostics now include the OR of all status bits seen (`seen`). Built; not run.
+
 ## 3c. Faster ARM9 clock, 3d. Wi-Fi/cameras/DSP
 Not started. 3c is small but needs the SD result first; 3d unchanged from the feasibility finding.
 
