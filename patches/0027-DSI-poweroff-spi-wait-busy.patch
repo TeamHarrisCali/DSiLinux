@@ -1,0 +1,198 @@
+From 6acf328ba07c0f557b4bd18da2e9be250e537d3a Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 03:25:58 -0600
+Subject: [PATCH] nds ARM7: power_write waits for the data byte before
+ switching the SPI off (power-off bit never arrived); drop the I2C power-off
+ attempt, diagnostics now use the SPI power chip
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ linux-2.6.x/arch/arm/mach-nds/arm7/main.c | 115 ++--------------------
+ linux-2.6.x/arch/arm/mach-nds/arm7/spi.c  |   4 +
+ linux-2.6.x/drivers/block/dldi_c.c        |   9 +-
+ 3 files changed, 17 insertions(+), 111 deletions(-)
+
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/main.c b/linux-2.6.x/arch/arm/mach-nds/arm7/main.c
+index bdbe536f3..1c818d798 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/arm7/main.c
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/main.c
+@@ -25,113 +25,21 @@ static struct nds_firmware_block *firmware_block;
+ static struct nds_sd_block *sd_block;
+ 
+ /*
+- * DSi mode power off: the DS power register (SPI) does nothing there; the DSi's
+- * power management chip (I2C device 0x4A) shuts the console down when register
+- * 0x11 gets 0x40. Same byte sequence as libnds' i2cWriteRegister()/systemShutDown().
+- */
+-#define REG_I2CDATA	(*(volatile u8 *)0x04004500)
+-#define REG_I2CCNT	(*(volatile u8 *)0x04004501)
+-
+-static void i2c_delay(void)
+-{
+-	volatile int n = 3000;
+-	while (n--)
+-		;
+-}
+-
+-static int i2c_wait(void)
+-{
+-	int n = 200000;
+-	while ((REG_I2CCNT & 0x80) && --n)
+-		;
+-	return n;
+-}
+-
+-static int i2c_ack(void)
+-{
+-	i2c_wait();
+-	return (REG_I2CCNT >> 4) & 1;
+-}
+-
+-static int i2c_select(u8 v, u8 cnt)
+-{
+-	i2c_wait();
+-	i2c_delay();
+-	REG_I2CDATA = v;
+-	REG_I2CCNT = cnt;
+-	return i2c_ack();
+-}
+-
+-/* returns 1 when the chip acknowledged every byte */
+-static int i2c_pm_write(u8 reg, u8 data)
+-{
+-	int tries;
+-	for (tries = 0; tries < 8; tries++) {
+-		if (!i2c_select(0x4A, 0xC2)) {
+-			REG_I2CCNT = 0xC5;
+-			continue;
+-		}
+-		if (!i2c_select(reg, 0xC0)) {
+-			REG_I2CCNT = 0xC5;
+-			continue;
+-		}
+-		i2c_delay();
+-		REG_I2CDATA = data;
+-		REG_I2CCNT = 0xC0;
+-		i2c_delay();
+-		REG_I2CCNT = 0xC5;
+-		if (i2c_ack())
+-			return 1;
+-	}
+-	return 0;
+-}
+-
+-/* register value, or 0x1ff when the chip never answered */
+-static int i2c_pm_read(u8 reg)
+-{
+-	int tries;
+-	for (tries = 0; tries < 8; tries++) {
+-		if (!i2c_select(0x4A, 0xC2)) {
+-			REG_I2CCNT = 0xC5;
+-			continue;
+-		}
+-		if (!i2c_select(reg, 0xC0)) {
+-			REG_I2CCNT = 0xC5;
+-			continue;
+-		}
+-		i2c_delay();
+-		if (!i2c_select(0x4B, 0xC2)) {
+-			REG_I2CCNT = 0xC5;
+-			continue;
+-		}
+-		i2c_delay();
+-		REG_I2CCNT = 0xE0;
+-		i2c_delay();
+-		REG_I2CCNT = 0xC5;
+-		i2c_wait();
+-		return REG_I2CDATA;
+-	}
+-	return 0x1ff;
+-}
+-
+-/*
+- * NDS_SD_CMD_POWEROFF: ask the DSi power chip to shut the console off. Only returns if that did not
+- * work; then diag[] says what the chip answered (register values 0x1ff = no answer).
++ * NDS_SD_CMD_POWEROFF: switch the console off through the power chip's SPI control register (bit 6), as
++ * libnds and the Nintendo SDK do. Only returns if that did not work; diag[] then says what the chip showed.
+  */
+ void dsi_poweroff_diag(unsigned int *diag)
+ {
+ 	int k;
+ 
+ 	diag[0] = *(volatile unsigned int *)0x04004008;		/* SCFG_EXT */
+-	diag[1] = i2c_pm_read(0x00);	/* chip version, 0x1ff if I2C does not work at all */
+-	diag[2] = i2c_pm_read(0x11);	/* power control before */
+-	diag[3] = i2c_pm_read(0x10);	/* power interrupt flags */
+-	diag[4] = i2c_pm_read(0x20);	/* battery */
+-	diag[5] = i2c_pm_write(0x11, 0x40);	/* 1 = acknowledged */
+-	for (k = 0; k < 20; k++)	/* give the chip time to cut the power */
+-		i2c_delay();
+-	diag[6] = REG_I2CCNT;
+-	diag[7] = i2c_pm_read(0x11);	/* power control after */
++	diag[1] = power_read(POWER_CONTROL);			/* control register before */
++	diag[2] = power_read(POWER_BATTERY);
++	diag[3] = power_read(POWER_BACKLIGHT);
++	power_write(POWER_CONTROL, POWER0_SYSTEM_POWER);
++	for (k = 0; k < 200000; k++)	/* give the chip time to cut the power */
++		asm volatile("" ::: "memory");
++	diag[4] = power_read(POWER_CONTROL);			/* control register after */
+ }
+ 
+ int isDSPhat(void)
+@@ -229,11 +137,6 @@ static void recieveFIFOCommand(void)
+ 					}
+ 			break;
+ 			case FIFO_POWER_CMD_SYSTEM_POWER:
+-					if (dsitouch_active()) {	/* DSi mode */
+-						int k;
+-						for (k = 0; k < 4; k++)
+-							i2c_pm_write(0x11, 0x40);
+-					}
+ 					power_write(POWER_CONTROL, POWER0_SYSTEM_POWER);
+ 				break;
+ 				}
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/spi.c b/linux-2.6.x/arch/arm/mach-nds/arm7/spi.c
+index 7f75655e9..a7b857c97 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/arm7/spi.c
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/spi.c
+@@ -126,6 +126,10 @@ void power_write( enum power_reg reg, u8 val )
+ 	REG_SPI_CR = SPI_ENABLE | SPI_SINGLE | SPI_POWER | SPI_8CLOCKS | SPI_1MHZ ;
+ 	REG_SPI_DATA = val;
+ 
++	/* let the data byte finish before the bus is switched off, else the write is cut short
++	 * (the power-off bit never reached the power chip) */
++	WAIT_FOR_NOT_BUSY();
++
+ 	REG_SPI_CR = 0 ;
+ }
+ 
+diff --git a/linux-2.6.x/drivers/block/dldi_c.c b/linux-2.6.x/drivers/block/dldi_c.c
+index f1cf0ae1d..01a588aae 100644
+--- a/linux-2.6.x/drivers/block/dldi_c.c
++++ b/linux-2.6.x/drivers/block/dldi_c.c
+@@ -170,7 +170,7 @@ static int sd_request(unsigned int cmd, unsigned int sector, unsigned int count)
+ 
+ #ifdef CONFIG_NDS_DSI
+ /*
+- * Power off through the DSi power chip (ARM7 does it over I2C). If the console is still on afterwards the ARM7
++ * Power off through the power chip's SPI control register (the ARM7 does it). If the console is still on afterwards the ARM7
+  * answers with what the chip said, which is printed so a failure can be diagnosed from a photo.
+  */
+ void dsisd_poweroff(void)
+@@ -179,10 +179,9 @@ void dsisd_poweroff(void)
+ 
+ 	sd_timeout = 3 * HZ;
+ 	if (sd_request(NDS_SD_CMD_POWEROFF, 0, 0) == NDS_SD_OK)
+-		printk(KERN_ERR "dsi poweroff: still on. scfg %08x ver %02x pwrcnt %02x pwrif %02x batt %02x "
+-		       "wr_ack %u i2ccnt %02x pwrcnt-after %02x\n",
+-		       sd_block.diag[0], sd_block.diag[1], sd_block.diag[2], sd_block.diag[3], sd_block.diag[4],
+-		       sd_block.diag[5], sd_block.diag[6], sd_block.diag[7]);
++		printk(KERN_ERR "dsi poweroff: still on. scfg %08x pwrctl-before %02x batt %02x backlight %02x "
++		       "pwrctl-after %02x\n", sd_block.diag[0], sd_block.diag[1], sd_block.diag[2],
++		       sd_block.diag[3], sd_block.diag[4]);
+ 	sd_timeout = save;
+ }
+ #endif
+-- 
+2.56.0
+
