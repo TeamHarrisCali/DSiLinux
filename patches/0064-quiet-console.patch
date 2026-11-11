@@ -1,0 +1,100 @@
+From 42699a4b643f3727d490b3442da7a297526eac9f Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 08:30:20 -0600
+Subject: [PATCH] Stop console text from being drawn over the desktop: desktop
+ lowers the kernel console log level, autolog/savelog print nothing, savelog
+ compares without cmp -s (this cmp treated -s as a file name: 'Unknown error
+ 2' every 10 s), nds-sound debug printks removed (the cause of the mic is
+ fixed)
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ linux-2.6.x/sound/arm/nds-sound.c | 6 ------
+ vendors/Nintendo/DSI/autolog      | 3 ++-
+ vendors/Nintendo/DSI/desktop      | 4 ++++
+ vendors/Nintendo/DSI/savelog      | 3 ++-
+ 4 files changed, 8 insertions(+), 8 deletions(-)
+
+diff --git a/linux-2.6.x/sound/arm/nds-sound.c b/linux-2.6.x/sound/arm/nds-sound.c
+index a2be4004d..16950e7b5 100644
+--- a/linux-2.6.x/sound/arm/nds-sound.c
++++ b/linux-2.6.x/sound/arm/nds-sound.c
+@@ -315,8 +315,6 @@ static int snd_nds_capture_prepare(snd_pcm_substream_t * substream)
+ 
+ 	//pointer to the chip so we can log the period that are finished by the arm7.
+ 	capture_chip = chip;
+-	printk(KERN_INFO "nds-sound: capture prepare rate %u fmt %d buffer %u period %u\n", runtime->rate,
+-	       (int)runtime->format, (unsigned)chip->buffer_size, (unsigned)chip->period_size);
+ 	return 0;
+ }
+ 
+@@ -367,7 +365,6 @@ static int snd_nds_playback_trigger(snd_pcm_substream_t * substream, int cmd)
+  *************************************/
+ static int snd_nds_capture_trigger(snd_pcm_substream_t * substream, int cmd)
+ {
+-	printk(KERN_INFO "nds-sound: capture trigger %d\n", cmd);
+ 
+ 	switch (cmd) 
+ 	{
+@@ -500,12 +497,9 @@ static int __devinit snd_nds_new_pcm(struct nds *chip)
+ static void nds_mic_handler(void) 
+ {
+ 	struct nds *chip = capture_chip;
+-	static unsigned int nmsg;
+ 	snd_pcm_substream_t *substream;
+ 	snd_pcm_runtime_t *runtime;
+ 	u8 period;
+-	if (++nmsg <= 3 || nmsg % 200 == 0)
+-		printk(KERN_INFO "nds-sound: mic period message %u (chip %p)\n", nmsg, chip);
+ 	if (chip)
+ 	{
+ 		substream = chip->substream;
+diff --git a/vendors/Nintendo/DSI/autolog b/vendors/Nintendo/DSI/autolog
+index 2fcec16ab..27a98f55d 100644
+--- a/vendors/Nintendo/DSI/autolog
++++ b/vendors/Nintendo/DSI/autolog
+@@ -2,8 +2,9 @@
+ # Testing aid: save the log to sd:/linux/DSILOG.TXT every 10 seconds (only when something changed), so the card always
+ # holds what happened up to a few seconds before a hang or a power-off. Started by /boot/rc. To stop it: remove the
+ # line that starts it from /boot/rc (or kill this script).
++# Nothing may be printed: text from a background program is drawn on the text console, i.e. over the desktop.
+ while :
+ do
+ 	sleep 10
+-	/boot/savelog quiet
++	/boot/savelog quiet > /dev/null 2>&1
+ done
+diff --git a/vendors/Nintendo/DSI/desktop b/vendors/Nintendo/DSI/desktop
+index 79b47a5d1..9573b1fdf 100644
+--- a/vendors/Nintendo/DSI/desktop
++++ b/vendors/Nintendo/DSI/desktop
+@@ -13,6 +13,10 @@ if [ "$1" = "stop" ]; then
+ 	exit 0
+ fi
+ 
++# Kernel messages (and error text from background programs) go to the text console, which is drawn on the same screen:
++# keep the console quiet while the desktop runs. They are still kept in dmesg (and in the card log).
++[ -w /proc/sys/kernel/printk ] && echo 1 > /proc/sys/kernel/printk
++dmesg -n 1 > /dev/null 2>&1
+ export FRAMEBUFFER=/dev/fb0
+ echo "desktop: start (fb0, trackpad on the bottom screen)" > $LOG
+ [ -c /dev/fb0 ] || { echo "desktop: no /dev/fb0" >> $LOG; echo "desktop: no /dev/fb0"; exit 1; }
+diff --git a/vendors/Nintendo/DSI/savelog b/vendors/Nintendo/DSI/savelog
+index 4b2687f9d..0b0264f1f 100644
+--- a/vendors/Nintendo/DSI/savelog
++++ b/vendors/Nintendo/DSI/savelog
+@@ -13,9 +13,10 @@ then
+ fi
+ B=/tmp/bootlog.body
+ L=/tmp/bootlog.txt
++# (everything savelog quiet runs must print nothing: console text is drawn over the desktop)
+ /bin/sh /boot/logbody > $B 2>&1
+ # cmp comes with the ROM (/boot/cmp): the root image on the card may be older than the build and lack it
+-if [ $Q = 1 ] && [ -x /boot/cmp ] && [ -f $B.prev ] && /boot/cmp -s $B $B.prev
++if [ $Q = 1 ] && [ -x /boot/cmp ] && [ -f $B.prev ] && /boot/cmp $B $B.prev > /dev/null 2>&1
+ then
+ 	exit 0
+ fi
+-- 
+2.56.0
+
