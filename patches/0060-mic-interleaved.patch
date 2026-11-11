@@ -1,0 +1,160 @@
+From e7ebf3bcf6d2f9b84f0982302da607554807c10b Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 08:08:23 -0600
+Subject: [PATCH] Mic: offer interleaved access on the capture stream
+ (snd_pcm_lib_read returns EINVAL for non interleaved streams, which is why
+ every read failed with errno 22); mic counters also report the lowest and
+ highest sample
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ linux-2.6.x/arch/arm/mach-nds/arm7/microphone.c | 14 ++++++++++++--
+ linux-2.6.x/arch/arm/mach-nds/arm7/microphone.h |  2 +-
+ linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c      |  2 +-
+ linux-2.6.x/arch/arm/mach-nds/volume.c          |  8 +++++---
+ linux-2.6.x/drivers/block/dldi_c.c              |  6 +++++-
+ linux-2.6.x/sound/arm/nds-sound.c               |  3 +++
+ 6 files changed, 27 insertions(+), 8 deletions(-)
+
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/microphone.c b/linux-2.6.x/arch/arm/mach-nds/arm7/microphone.c
+index aa0dea01a..67bad9010 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/arm7/microphone.c
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/microphone.c
+@@ -33,6 +33,7 @@
+ static s16 dsi_last;
+ 
+ /* diagnostics, fetched by the ARM9 (mic_diag, /proc/dsimic) */
++static s16 dbg_smin = 0x7fff, dbg_smax = -0x8000;
+ static u32 dbg_on, dbg_start, dbg_stop, dbg_irq, dbg_full, dbg_empty, dbg_have, dbg_wraps;
+ 
+ 
+@@ -74,8 +75,13 @@ static s16 dsi_sample(void)
+ 		dbg_empty++;
+ 	else
+ 		dbg_full++;
+-	while (!(REG_MICCNT & MICCNT_EMPTY) && n--)
++	while (!(REG_MICCNT & MICCNT_EMPTY) && n--) {
+ 		dsi_last = (s16)(REG_MICDATA & 0xffff);
++		if (dsi_last < dbg_smin)
++			dbg_smin = dsi_last;
++		if (dsi_last > dbg_smax)
++			dbg_smax = dsi_last;
++	}
+ 	return dsi_last;
+ }
+ 
+@@ -185,6 +191,8 @@ void mic_start()
+ 		REG_MICCNT = MICCNT_CLEAR_FIFO | MICCNT_FORMAT_NORMAL;
+ 		REG_MICCNT |= MICCNT_ENABLE;
+ 		dsi_last = 0;
++		dbg_smin = 0x7fff;
++		dbg_smax = -0x8000;
+ 	}
+ 	REG_TM3CNT_L = MIC_FREQ(mic_rate);
+ 	REG_TM3CNT_H = NDS_TCR_ENB | NDS_TCR_CLK | NDS_TCR_IRQ;
+@@ -251,8 +259,10 @@ void mic_timer_handler(void)
+ }
+ 
+ /* counters for /proc/dsimic: touch[] = events, diag[] = settings */
+-void mic_diag(u32 *touch, u32 *diag)
++void mic_diag(u32 *touch, u32 *diag, u32 *info)
+ {
++	info[0] = (u32)(s32)dbg_smin;
++	info[1] = (u32)(s32)dbg_smax;
+ 	touch[0] = dbg_on;
+ 	touch[1] = dbg_start;
+ 	touch[2] = dbg_stop;
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/microphone.h b/linux-2.6.x/arch/arm/mach-nds/arm7/microphone.h
+index 7ac7634ea..e5398c9b8 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/arm7/microphone.h
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/microphone.h
+@@ -32,4 +32,4 @@ int mic_stop(void);
+ void mic_timer_handler(void);
+ 
+ /* counters for the ARM9 (NDS_SD_CMD_MICDIAG) */
+-void mic_diag(u32 *touch, u32 *diag);
++void mic_diag(u32 *touch, u32 *diag, u32 *info);
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c b/linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c
+index 81b595197..6ebeabe4b 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c
+@@ -864,7 +864,7 @@ static void nds_sd_request_inner(struct nds_sd_block *b)
+ 		return;
+ 
+ 	case NDS_SD_CMD_MICDIAG:
+-		mic_diag(b->touch, b->diag);
++		mic_diag(b->touch, b->diag, b->info);
+ 		b->result = NDS_SD_OK;
+ 		return;
+ 
+diff --git a/linux-2.6.x/arch/arm/mach-nds/volume.c b/linux-2.6.x/arch/arm/mach-nds/volume.c
+index 7d141de7c..7c8ccd658 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/volume.c
++++ b/linux-2.6.x/arch/arm/mach-nds/volume.c
+@@ -38,15 +38,17 @@ extern int dsisd_micdiag(unsigned int *out);
+ /* /proc/dsimic: the microphone's counters from the ARM7 (for finding out where the data stops) */
+ static int mic_read_proc(char *page, char **start, off_t off, int count, int *eof, void *data)
+ {
+-	unsigned int d[16];
++	unsigned int d[18];
+ 	int len;
+ 
+ 	if (dsisd_micdiag(d) != 0)
+ 		len = sprintf(page, "ARM7 did not answer\n");
+ 	else
+ 		len = sprintf(page, "mic_on=%u start=%u stop=%u irq=%u fifo_full=%u fifo_empty=%u period_msgs=%u wraps=%u\n"
+-			      "buf=%08x size=%u period=%u rate=%u fmt=%u last=%08x miccnt/tm3=%08x ie=%08x\n",
+-			      d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7], d[8], d[9], d[10], d[11], d[12], d[13], d[14], d[15]);
++			      "buf=%08x size=%u period=%u rate=%u fmt=%u last=%08x miccnt/tm3=%08x ie=%08x\n"
++			      "samples: lowest %d highest %d\n",
++			      d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7], d[8], d[9], d[10], d[11], d[12], d[13], d[14], d[15],
++			      (int)d[16], (int)d[17]);
+ 	*eof = 1;
+ 	if (off >= len)
+ 		return 0;
+diff --git a/linux-2.6.x/drivers/block/dldi_c.c b/linux-2.6.x/drivers/block/dldi_c.c
+index 186c489ae..14e97d538 100644
+--- a/linux-2.6.x/drivers/block/dldi_c.c
++++ b/linux-2.6.x/drivers/block/dldi_c.c
+@@ -210,7 +210,7 @@ int dsisd_camera_cmd(unsigned int sub, unsigned int arg, unsigned int *value, un
+ 	return ret;
+ }
+ 
+-/* The ARM7's microphone counters (arm7/microphone.c): out[0..7] events, out[8..15] settings. 0 = ok. */
++/* The ARM7's microphone counters (arm7/microphone.c): out[0..7] events, out[8..15] settings, out[16..17] lowest/highest sample. 0 = ok. */
+ int dsisd_micdiag(unsigned int *out)
+ {
+ 	int ret, i;
+@@ -218,10 +218,14 @@ int dsisd_micdiag(unsigned int *out)
+ 	down(&sd_mutex);
+ 	ret = sd_request_locked(NDS_SD_CMD_MICDIAG, 0, 0);
+ 	if (ret == NDS_SD_OK)
++	{
+ 		for (i = 0; i < 8; i++) {
+ 			out[i] = sd_block.touch[i];
+ 			out[8 + i] = sd_block.diag[i];
+ 		}
++		out[16] = sd_block.info[0];
++		out[17] = sd_block.info[1];
++	}
+ 	up(&sd_mutex);
+ 	return ret;
+ }
+diff --git a/linux-2.6.x/sound/arm/nds-sound.c b/linux-2.6.x/sound/arm/nds-sound.c
+index 8c418226e..fa5283d10 100644
+--- a/linux-2.6.x/sound/arm/nds-sound.c
++++ b/linux-2.6.x/sound/arm/nds-sound.c
+@@ -75,7 +75,10 @@ static snd_pcm_hardware_t snd_nds_playback_hw = {
+ 
+ /* hardware definition */
+ static snd_pcm_hardware_t snd_nds_capture_hw = {
++	/* one channel only: interleaved and non interleaved are the same layout. snd_pcm_lib_read() refuses every stream that is not
++	 * RW_INTERLEAVED (errno 22), so this has to be offered or no program can ever read a recording */
+ 	.info = (SNDRV_PCM_INFO_MMAP |
++		 SNDRV_PCM_INFO_INTERLEAVED |
+ 		 SNDRV_PCM_INFO_NONINTERLEAVED |
+ 		 SNDRV_PCM_INFO_BLOCK_TRANSFER | SNDRV_PCM_INFO_MMAP_VALID),
+ 	.formats =  SNDRV_PCM_FMTBIT_U8 | 
+-- 
+2.56.0
+
