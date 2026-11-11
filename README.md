@@ -35,7 +35,7 @@ the changes are in `patches/` (22 small patches, in order) and explained in `doc
 - **`fwver` (DS firmware version at boot):** skipped by default; its firmware read could wait forever in DSi mode.
 - **General SD writing:** deliberately not provided (see below).
 - **DS and DS-Lite builds:** the original DSLinux builds are unchanged here; only the Stage 1 build was run (in melonDS).
-- The `s` and `t-fast` ROMs are newer than the last console run (see "Which file to use").
+- The `t-fast` ROM has no confirmed console result yet. The `s` change (tar-only RAM copies, no time-stamp warnings) ran on the console: the log is clean and all self-test lines pass (photo: `tar etc`, `bound etc`, `Savelog: written`). It is not known whether that run was the `s` or the `t-fast` file.
 
 ## Writing to the card (the only way it can happen)
 
@@ -57,7 +57,7 @@ The NAND is never selected (the driver only uses SD port 0).
 All ROMs are built into `out/dsi-mode/` (git-ignored; rebuild with the scripts below). See `out/dsi-mode/README.txt`.
 
 - `dslinux-dsimode-s-uc3.nds`: the current build (DSi-only header). `-uc2` is the same with a "DS or DSi" header; use it only if uc3 will not launch.
-- `old/r-log-file-works/`: the last build that was confirmed on the console (boots to a prompt, writes the log). `s` differs only by quieter log output (`tar -m`), but has not been run.
+- `old/r-log-file-works/`: the last build that was confirmed on the console (boots to a prompt, writes the log). `s` differs only by quieter log output (`tar -m`); a photo of a run with that change shows a clean log and all checks passing.
 - `dslinux-dsimode-t-fast-uc3.nds`: `s` plus the 134 MHz clock. Experimental.
 
 ## Installing on the SD card

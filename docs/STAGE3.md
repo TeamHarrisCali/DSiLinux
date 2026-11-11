@@ -275,6 +275,11 @@ So the ARM7's FAT32 parser, the sector guard, the real write command (CMD24/25),
 Noise seen in that log, fixed in "s": `cp -a` of a folder always fails here ("not a directory") so tar did the copy, and tar printed a "time stamp ... in the future" warning per file (the console's clock is years behind the PC's).
 "s" (`out/dsi-mode/dslinux-dsimode-s-uc3.nds`, `-uc2`) uses `tar -xmf` only (no restored dates, no failing cp). Built; not run. The "r" ROMs are kept in `old/r-log-file-works/` as the known-good build.
 
+## "s"/"t-fast" first console photo
+A boot of one of the tar-only builds: log lines `tar etc`, `bound etc`, `tar var`, `bound var`, `tar home`, `bound home (empty)` with no time-stamp warnings and no failing `cp`; self-test RAM/SD/CONF all PASS; `MemTotal: 14072 kB`; `dsisd: log file ... 2048 sectors in 1 extents`; `Savelog: written to sd:/linux/DSILOG.TXT`;
+`rc: done`. `dmesg | grep Cal` printed `Calibrating delay loop... 66.76 BogoMIPS (lpj=333824)`. That is the expected value for the normal `s` ROM; for `t-fast` it would mean the 134 MHz request was not accepted (or not made).
+Which file was run was not stated; the next step is `dmesg | grep SCFG_CLK`, which only the `t-fast` build prints.
+
 ## 3c. Faster ARM9 clock (compiled only)
 `CONFIG_NDS_DSI_FASTCPU` (default off, not part of the normal ROM): sets `SCFG_CLK` (0x04004004) bit 0 to run the ARM9 at 134 MHz instead of 67 MHz.
 It runs in the same early hook as the RAM test, only when that test proves real DSi mode, and before `calibrate_delay()` so `udelay()` loops are calibrated at the final speed.
