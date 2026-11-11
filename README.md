@@ -6,7 +6,7 @@ Attempt to boot DSLinux (uClinux 2.6.14 for the Nintendo DS) on a Nintendo DSi X
 |---|---|
 | 0 Research and feasibility | Done: [docs/FEASIBILITY.md](docs/FEASIBILITY.md) |
 | 1 Unmodified build, boot in melonDS DS mode | Done and emulator-verified: [docs/STAGE1.md](docs/STAGE1.md) |
-| 2 16 MB DSi-mode build | Boots in melonDS DSi mode (user-run); not on real hardware; `MemTotal` not yet read: [docs/STAGE2.md](docs/STAGE2.md) |
+| 2 16 MB DSi-mode build | Boots in melonDS DSi mode (user-run); not on real hardware; `MemTotal: 14072 kB` read in melonDS: [docs/STAGE2.md](docs/STAGE2.md) |
 | 3 DSi features (16 MB RAM, SD, clocks) | Not started |
 
 Nothing in this repo has been run on real hardware yet. A final README replaces this one at the end.
