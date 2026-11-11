@@ -278,10 +278,10 @@ Noise seen in that log, fixed in "s": `cp -a` of a folder always fails here ("no
 ## "s"/"t-fast" first console photo
 A boot of one of the tar-only builds: log lines `tar etc`, `bound etc`, `tar var`, `bound var`, `tar home`, `bound home (empty)` with no time-stamp warnings and no failing `cp`; self-test RAM/SD/CONF all PASS; `MemTotal: 14072 kB`; `dsisd: log file ... 2048 sectors in 1 extents`; `Savelog: written to sd:/linux/DSILOG.TXT`;
 `rc: done`. `dmesg | grep Cal` printed `Calibrating delay loop... 66.76 BogoMIPS (lpj=333824)`. That is the expected value for the normal `s` ROM; for `t-fast` it would mean the 134 MHz request was not accepted (or not made).
-Which file was run was not stated; the next step is `dmesg | grep SCFG_CLK`, which only the `t-fast` build prints.
+The user later confirmed that the second photo (the one with the `SCFG_CLK` line) was the `t-fast` ROM.
 
 ## 3c. Faster ARM9 clock: nothing to do (measured on the console)
 `CONFIG_NDS_DSI_FASTCPU` writes `SCFG_CLK` (0x04004004) bit 0 early in boot. On the console the t-fast ROM printed `NDS: ARM9 SCFG_CLK 0001 -> 0001: 134 MHz requested and accepted`: the register already held `0001` before the write, so the loader had
 already put the ARM9 at 134 MHz and the option changes nothing. All DSi-mode boots show `66.76 BogoMIPS (lpj=333824)`: with the ARM946E's delay loop taking about 4 cycles per iteration (sub plus a taken branch), 33.4 M iterations per second means roughly 134 MHz.
-That is an inference from the cycle count, not a direct measurement. The ARM7 has no comparable switch as far as I know. The option stays in the tree (default off); `t-fast` ROMs are in `out/dsi-mode/old/t-fast-noop/`.
+The normal `r` ROM's saved log (`DSILOG.TXT`) shows the identical `lpj=333824`, so the t-fast write changed nothing. The step from lpj to 134 MHz is an inference from the cycle count, not a direct measurement. The ARM7 has no comparable switch as far as I know. The option stays in the tree (default off); `t-fast` ROMs are in `out/dsi-mode/old/t-fast-noop/`.
 
