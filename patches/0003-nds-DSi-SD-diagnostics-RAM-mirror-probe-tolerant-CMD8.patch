@@ -1,0 +1,234 @@
+From 7b498a4ba2d94e9cdf6ac22b0cc168a4189cd8d7 Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <noreply@example.invalid>
+Date: Tue, 10 Nov 2026 19:40:51 -0600
+Subject: [PATCH] nds: DSi SD diagnostics, RAM mirror probe, tolerant CMD8
+ timeout test
+
+First real-hardware run: init failed at CMD8 with SCFG_EXT7 reading 0. Report SCFG/TMIO state and
+the failing command's status, accept a CMD8 timeout that carries other error bits, enable the SD
+interface only if SCFG is writable, and probe at boot whether RAM above 4 MB is real or mirrored.
+---
+ linux-2.6.x/arch/arm/mach-nds/arch.c         | 36 +++++++++++++++++
+ linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c   | 42 ++++++++++++++++++--
+ linux-2.6.x/drivers/block/dldi_c.c           |  5 +++
+ linux-2.6.x/include/asm-arm/arch-nds/dsisd.h |  8 +++-
+ 4 files changed, 87 insertions(+), 4 deletions(-)
+
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arch.c b/linux-2.6.x/arch/arm/mach-nds/arch.c
+index e41f8f049..3cd1b40a0 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/arch.c
++++ b/linux-2.6.x/arch/arm/mach-nds/arch.c
+@@ -44,6 +44,7 @@
+ #include <asm/arch/power.h>
+ #include <asm/arch/fifo.h>
+ #include <asm/arch/gbaram.h>
++#include <asm/cacheflush.h>
+ 
+ #define WAIT_CR 	0x04000204
+ 
+@@ -56,8 +57,40 @@ static void poweroff(void)
+ 	nds_fifo_send(FIFO_POWER_CMD(FIFO_POWER_CMD_SYSTEM_POWER, 0));
+ }
+ 
++#ifdef CONFIG_NDS_DSI
++/*
++ * Is main RAM really 16 MB? On a DSi launched in DS mode it is 4 MB mirrored
++ * every 4 MB, and a 16 MB kernel would then hand out the same memory several
++ * times. Write two different values 12 MB apart (the same cell if mirrored),
++ * push them to RAM through the cache and see whether the first survived.
++ * Both addresses are above the kernel image and unused this early.
++ */
++static int nds_ram_is_mirrored = -1;
++
++static void nds_probe_ram(void)
++{
++	volatile u32 *p0 = (volatile u32 *)0x02300000;
++	volatile u32 *p1 = (volatile u32 *)0x02F00000;	/* p0 + 12 MB */
++	u32 s0 = *p0, s1 = *p1;
++
++	*p0 = 0x12345678;
++	*p1 = 0xA5A5A5A5;
++	dmac_flush_range((unsigned long)p0, (unsigned long)p0 + 4);
++	dmac_flush_range((unsigned long)p1, (unsigned long)p1 + 4);
++	nds_ram_is_mirrored = (*p0 != 0x12345678);
++	*p0 = s0;
++	*p1 = s1;
++	dmac_flush_range((unsigned long)p0, (unsigned long)p0 + 4);
++	dmac_flush_range((unsigned long)p1, (unsigned long)p1 + 4);
++}
++#endif
++
+ static void nds_machine_init(void)
+ {
++#ifdef CONFIG_NDS_DSI
++	printk(KERN_INFO "NDS: main RAM above 4 MB is %s\n",
++	       nds_ram_is_mirrored ? "MIRRORED (only 4 MB real!)" : "real (16 MB)");
++#endif
+ 	POWER_CR = POWER_2D | POWER_2D_SUB | POWER_LCD | POWER_SWAP_LCDS ;
+ 
+ 	/* Note: initial setup of wait_cr in head.S */
+@@ -76,6 +109,9 @@ static void __init
+ fixup_nds(struct machine_desc *desc, struct tag *tags,
+ 	      char **cmdline, struct meminfo *mi)
+ {
++#ifdef CONFIG_NDS_DSI
++	nds_probe_ram();
++#endif
+ 	mi->bank[0].start = CONFIG_DRAM_BASE;
+ 	mi->bank[0].size  = CONFIG_DRAM_SIZE;
+ 	mi->bank[0].node  = 0;
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c b/linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c
+index 3245f6b13..18d2302af 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c
+@@ -41,6 +41,8 @@
+ typedef volatile u16 vu16;
+ typedef volatile u32 vu32;
+ 
++#define SCFG_ROM7	(*(vu32 *)0x04004000)
++#define SCFG_CLK7	(*(vu16 *)0x04004004)
+ #define SCFG_EXT7	(*(vu32 *)0x04004008)
+ 
+ /* TMIO controller 1 (SD card port 0), register offsets from the base */
+@@ -155,6 +157,9 @@ static u16 g_option;
+ static u32 g_rca;
+ static int g_inited;	/* 0 = no, 1 = SDSC (byte addressing), 2 = SDHC */
+ static u32 g_sectors;
++static u32 g_last_cmd;
++static u32 g_ncmd;
++static u32 g_last_status;
+ 
+ static void delay_loops(u32 n)
+ {
+@@ -212,6 +217,8 @@ static u32 tmio_cmd(u16 cmd, u32 arg, u16 blocks, void *buf)
+ 	u32 *p = (u32 *)buf;
+ 
+ 	g_status = 0;
++	g_last_cmd = cmd & 0xff;
++	g_ncmd++;
+ 	set_port();
+ 	R16(SD_BLOCKCOUNT) = blocks;
+ 	R16(SD_STOP) = STOP_AUTO_STOP;
+@@ -224,8 +231,10 @@ static u32 tmio_cmd(u16 cmd, u32 arg, u16 blocks, void *buf)
+ 		if (g_status & STATUS_RESP_END)
+ 			break;
+ 	}
+-	if (cap == 3000000)
++	if (cap == 3000000) {
++		g_last_status = 0xFFFFFFFFu;
+ 		return 0xFFFFFFFFu;
++	}
+ 	get_response(cmd);
+ 
+ 	if (cmd & CMD_DATA_EN) {
+@@ -261,6 +270,7 @@ static u32 tmio_cmd(u16 cmd, u32 arg, u16 blocks, void *buf)
+ 		if (cap == 6000000)
+ 			return 0xFFFFFFFFu;
+ 	}
++	g_last_status = g_status;
+ 	return g_status & ERR_BITS;
+ }
+ 
+@@ -305,7 +315,7 @@ static void tmio_reset(void)
+ 	R16(EXT_SDIO_IRQ) = (7u << 8);
+ }
+ 
+-static u32 card_init(struct nds_sd_block *b)
++static u32 card_init_steps(struct nds_sd_block *b)
+ {
+ 	u32 res, tries, ocr, op_arg;
+ 	u32 ccs = 0;
+@@ -313,6 +323,17 @@ static u32 card_init(struct nds_sd_block *b)
+ 	g_inited = 0;
+ 	b->info[0] = SCFG_EXT7;
+ 	b->info[1] = R16(REVISION);
++	b->diag[0] = SCFG_EXT7;
++	b->diag[1] = SCFG_CLK7;
++	b->diag[2] = SCFG_ROM7;
++	b->diag[3] = R16(REVISION);
++	g_ncmd = 0;
++
++	/* If the ARM7 may still write SCFG_EXT (bit 31 set) but the SD/MMC
++	 * interface (bit 18) is off, switch it on. If SCFG is locked (reads as
++	 * 0, DS compatibility mode) nothing is written. */
++	if ((SCFG_EXT7 & 0x80000000u) && !(SCFG_EXT7 & (1u << 18)))
++		SCFG_EXT7 = SCFG_EXT7 | (1u << 18);
+ 
+ 	tmio_reset();
+ 
+@@ -344,7 +365,9 @@ static u32 card_init(struct nds_sd_block *b)
+ 			b->info[2] = STEP_CMD8_ECHO;
+ 			return NDS_SD_ERR_INIT;
+ 		}
+-	} else if (res != STATUS_ERR_CMD_TIMEOUT) {
++	} else if (!(res & STATUS_ERR_CMD_TIMEOUT)) {
++		/* upstream tests res == TIMEOUT exactly; a timeout may come with
++		 * other error bits set, so test the bit (v1 cards ignore CMD8) */
+ 		b->info[2] = STEP_CMD8;
+ 		return NDS_SD_ERR_INIT;
+ 	}
+@@ -436,6 +459,19 @@ static u32 card_init(struct nds_sd_block *b)
+ 	return NDS_SD_OK;
+ }
+ 
++static u32 card_init(struct nds_sd_block *b)
++{
++	u32 ret = card_init_steps(b);
++
++	if (ret != NDS_SD_OK) {
++		b->diag[4] = g_last_status;
++		b->diag[5] = R32(SD_STATUS);
++		b->diag[6] = g_resp[0];
++		b->diag[7] = (g_last_cmd << 8) | (g_ncmd & 0xff);
++	}
++	return ret;
++}
++
+ static void wait_not_busy(void)
+ {
+ 	u32 cap;
+diff --git a/linux-2.6.x/drivers/block/dldi_c.c b/linux-2.6.x/drivers/block/dldi_c.c
+index e55a588a1..2d53af4f9 100644
+--- a/linux-2.6.x/drivers/block/dldi_c.c
++++ b/linux-2.6.x/drivers/block/dldi_c.c
+@@ -155,6 +155,11 @@ static int dsisd_start(void)
+ 	printk(KERN_INFO "dsisd: init result %d, SCFG_EXT %08x, TMIO rev %04x, "
+ 	       "info %08x, sectors %u\n", ret, sd_block.info[0],
+ 	       sd_block.info[1], sd_block.info[2], sd_block.sectors);
++	printk(KERN_INFO "dsisd: diag ext %08x clk %08x rom %08x rev %08x "
++	       "st@fail %08x st %08x resp %08x cmd/n %04x\n",
++	       sd_block.diag[0], sd_block.diag[1], sd_block.diag[2],
++	       sd_block.diag[3], sd_block.diag[4], sd_block.diag[5],
++	       sd_block.diag[6], sd_block.diag[7]);
+ 	if (ret != NDS_SD_OK)
+ 		return -EIO;
+ 	nsectors = sd_block.sectors;
+diff --git a/linux-2.6.x/include/asm-arm/arch-nds/dsisd.h b/linux-2.6.x/include/asm-arm/arch-nds/dsisd.h
+index 9d7eea553..0577861dc 100644
+--- a/linux-2.6.x/include/asm-arm/arch-nds/dsisd.h
++++ b/linux-2.6.x/include/asm-arm/arch-nds/dsisd.h
+@@ -7,7 +7,7 @@
+  * flushes its data cache and sends FIFO_FIRMWARE_CMD_SD_REQUEST; the ARM7
+  * answers with the same command after it has written the result.
+  *
+- * The block is 32 byte aligned and a multiple of 32 bytes so that the ARM9
++ * The block is 32 byte aligned and its header is 64 bytes, a multiple of 32, so that the ARM9
+  * can flush/invalidate it without touching neighbouring data.
+  */
+ #ifndef __ASM_ARCH_DSISD_H
+@@ -39,6 +39,12 @@ struct nds_sd_block {
+ 				 *       [2] card type, 1=SDSC 2=SDHC
+ 				 * (on error info[2] = failing step, see sdmmc.c)
+ 				 * ERR_RW: [0] TMIO status bits */
++	/* INIT diagnostics (raw hardware state seen by the ARM7):
++	 * [0] SCFG_EXT7 [1] SCFG_CLK7 [2] SCFG_ROM [3] TMIO revision
++	 * [4] TMIO status at the failing command (0xFFFFFFFF = software timeout)
++	 * [5] TMIO status register right now [6] last response word
++	 * [7] failing command index (low 8 bits) / number of commands sent */
++	unsigned int diag[8];
+ 	unsigned char data[NDS_SD_MAX_SECTORS * NDS_SD_SECTOR_SIZE];
+ } __attribute__((aligned(32)));
+ 
+-- 
+2.56.0
+
