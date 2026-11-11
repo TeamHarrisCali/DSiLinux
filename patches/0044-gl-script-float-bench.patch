@@ -1,0 +1,105 @@
+From 1179f7c13db6610bc323b81f089f49007ce50118 Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 05:47:55 -0600
+Subject: [PATCH] 3D step 1: /boot/gl runs TinySDGL's gears on the text screen;
+ dsbench times float versus integer multiply-adds (no FPU on the DS)
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ user/microwin/src/demos/nanox/dsbench.c | 24 +++++++++++++++++++++---
+ vendors/Nintendo/DSI/Makefile           |  1 +
+ vendors/Nintendo/DSI/gl                 | 11 +++++++++++
+ 3 files changed, 33 insertions(+), 3 deletions(-)
+ create mode 100644 vendors/Nintendo/DSI/gl
+
+diff --git a/user/microwin/src/demos/nanox/dsbench.c b/user/microwin/src/demos/nanox/dsbench.c
+index a7e8d80a6..fd9bbca26 100644
+--- a/user/microwin/src/demos/nanox/dsbench.c
++++ b/user/microwin/src/demos/nanox/dsbench.c
+@@ -84,7 +84,7 @@ static long ipc_pingpong(void)
+ 	return i == 100 ? t : -3;
+ }
+ 
+-#define NTESTS 11
++#define NTESTS 13
+ static const char *names[NTESTS] = {
+ 	"20 fills of 10000 px",
+ 	"200 set-colour requests",
+@@ -97,6 +97,8 @@ static const char *names[NTESTS] = {
+ 	"100 process ping-pongs",
+ 	"100 drag steps, new GC each",
+ 	"100 drag steps, one GC",
++	"100000 float multiply-adds",
++	"100000 integer multiply-adds",
+ };
+ 
+ int main(int argc, char **argv)
+@@ -185,6 +187,22 @@ int main(int argc, char **argv)
+ 				GrDestroyGC(x);
+ 			}
+ 			break;
++		case 11:	/* the DS has no floating point hardware: TinyGL (software OpenGL) does all its maths in float */
++			{
++				volatile float a = 1.0f, b2 = 1.0001f, c = 0.5f;
++
++				for (i = 0; i < 100000; i++)
++					a = a * b2 + c * 0.0001f;
++			}
++			break;
++		case 12:	/* the same with 16.16 fixed point integers */
++			{
++				volatile int a = 65536, b2 = 65537;
++
++				for (i = 0; i < 100000; i++)
++					a = (int)(((long long)a * b2) >> 16) + 1;
++			}
++			break;
+ 		case 10:	/* and what it does now */
+ 			{
+ 				GR_GC_ID x = GrNewGC();
+@@ -208,11 +226,11 @@ int main(int argc, char **argv)
+ 	w95_fill(w, gc, W95_FACE, 0, 0, 232, 150);
+ 	for (k = 0; k < NTESTS; k++) {
+ 		sprintf(line, "%s: %ld ms", names[k], r[k]);
+-		w95_text(w, gc, W95_DARK, 4, 3 + k * 11, line);
++		w95_text(w, gc, W95_DARK, 4, 3 + k * 10, line);
+ 		if (f)
+ 			fprintf(f, "%s\n", line);
+ 	}
+-	w95_text(w, gc, W95_SHADOW, 4, 3 + NTESTS * 11 + 4, "(saved in /tmp/bench.log)");
++	w95_text(w, gc, W95_SHADOW, 4, 3 + NTESTS * 10 + 3, "(saved in /tmp/bench.log)");
+ 	if (f)
+ 		fclose(f);
+ 
+diff --git a/vendors/Nintendo/DSI/Makefile b/vendors/Nintendo/DSI/Makefile
+index 80998fb9d..07548776d 100644
+--- a/vendors/Nintendo/DSI/Makefile
++++ b/vendors/Nintendo/DSI/Makefile
+@@ -110,6 +110,7 @@ romfs:
+ 	$(ROMFSINST) -p +x /boot/desktop
+ 	$(ROMFSINST) -p +x /boot/desktop-apps
+ 	$(ROMFSINST) -p +x /boot/shutdown
++	$(ROMFSINST) -p +x /boot/gl
+ 	$(ROMFSINST) /$(FATFS)/linux/etc/issue
+ 	# copy some Nintendo specific files to romfs
+ 	$(ROMFSINST) $(NDS_COMMON)/rc.common /$(FATFS)/linux/etc/rc.common
+diff --git a/vendors/Nintendo/DSI/gl b/vendors/Nintendo/DSI/gl
+new file mode 100644
+index 000000000..17818ebe1
+--- /dev/null
++++ b/vendors/Nintendo/DSI/gl
+@@ -0,0 +1,11 @@
++#!/bin/sh
++# 3D speed test on the text screen: TinySDGL's "gears" (a software OpenGL, no 3D hardware used).
++# The desktop owns the screen: stop it first (Start menu > Exit desktop, or /boot/desktop stop).
++# It prints frames per second every few seconds. Esc or q ends it, the arrow keys turn the gears.
++if [ -n "`pidof nano-X`" ]; then
++	echo "gl: stop the desktop first (Start menu > Exit desktop)"
++	exit 1
++fi
++echo "gears: Esc or q to quit"
++/usr/bin/gears
++echo "gl: done"
+-- 
+2.56.0
+
