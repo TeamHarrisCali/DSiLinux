@@ -89,6 +89,15 @@ dsisd: init result ...           (+ the diag line)
 ```
 It sits just above the prompt, so a single photo of the top screen is enough.
 
+## First DSi-mode boot (user report): hang after the "NDS Wireless <bthaeler@aol.com>" banner
+The DSi-header ROM got further than any build before, which suggests the loader honoured the header. The boot then stopped right after the DS Wi-Fi driver's banner.
+Cause (from the source, not yet confirmed on the console): the DS Wi-Fi chip does not exist in DSi mode (the DSi has a different Wi-Fi chip). The ARM7's `wifi_init()` spins
+in `while (WIFI_BBSIOBUSY & 1);` loops on the absent hardware, so the ARM7 never answers; the ARM9 driver sends a MAC query and waits with no timeout
+(`wait_event_interruptible`, drivers/net/wireless/nds.c).
+Fix: the DSI product builds without `CONFIG_NDS_WIFI`, and the ARM7 skips Wi-Fi init and Wi-Fi interrupt handling in that case. DS builds are unchanged.
+Files: `out/dsi-mode/dslinux-dsimode-b-uc3.nds` and `-b-uc2.nds` (the "b" build). Verified: it builds, the Wi-Fi banner string is gone from the image. Not verified on the console.
+Wi-Fi in DSi mode would need a driver for the Atheros chip (out of scope).
+
 ## 3c. Faster ARM9 clock, 3d. Wi-Fi/cameras/DSP
 Not started. 3c is small but needs the SD result first; 3d unchanged from the feasibility finding.
 

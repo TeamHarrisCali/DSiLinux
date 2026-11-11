@@ -1,0 +1,80 @@
+From 28eeb60f8af8bb7bcfd8f6935ebaead2435a3892 Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <noreply@example.invalid>
+Date: Tue, 10 Nov 2026 20:12:09 -0600
+Subject: [PATCH] DSI product: no DS Wi-Fi driver; ARM7 skips wifi init when
+ CONFIG_NDS_WIFI is off
+
+On a DSi in DSi mode the DS Wi-Fi hardware is absent: the ARM7's wifi_init() spins on it, so the ARM9's
+Wi-Fi MAC query (no timeout) hangs boot right after the 'NDS Wireless' banner.
+---
+ linux-2.6.x/arch/arm/mach-nds/arm7/main.c | 11 +++++++++++
+ vendors/Nintendo/DSI/config.linux-2.6.x   |  2 +-
+ 2 files changed, 12 insertions(+), 1 deletion(-)
+
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/main.c b/linux-2.6.x/arch/arm/mach-nds/arm7/main.c
+index 288a5aa6b..8c1da5a62 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/arm7/main.c
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/main.c
+@@ -1,6 +1,8 @@
+ 
+ #define __DSLINUX_ARM7__
+ 
++#include "linux/config.h"
++
+ #include "asm/types.h"
+ #include "asm/arch/fifo.h"
+ #include "asm/arch/wifi.h"
+@@ -372,12 +374,14 @@ void InterruptHandler(void)
+ 		wif &= ~IRQ_ARM9;
+ 	}
+ 
++#ifdef CONFIG_NDS_WIFI
+ 	if ((wif & IRQ_WIFI) || WIFI_IF)  {
+ 		NDS_IF = IRQ_WIFI;
+ 		wif &= ~IRQ_WIFI;
+ 
+ 		wifi_interrupt();
+ 	}
++#endif
+ 
+ 	/* Acknowledge unhandled Interrupts */
+ 	NDS_IF = wif;
+@@ -403,7 +407,12 @@ int main(void)
+ 	DISP_SR = DISP_VBLANK_IRQ;
+ 
+ 	/* Set the INT enable flags */
++#ifdef CONFIG_NDS_WIFI
+ 	NDS_IE = IRQ_VBLANK | IRQ_RECV | IRQ_ARM9 | IRQ_WIFI;
++#else
++	/* no DS Wi-Fi (the DSi has a different chip; the old init spins forever on it) */
++	NDS_IE = IRQ_VBLANK | IRQ_RECV | IRQ_ARM9;
++#endif
+ 
+ 	/* Set the INT bitmask for the swi wait call */
+ 	VBLANK_INTR_WAIT_FLAGS = IRQ_VBLANK;
+@@ -415,7 +424,9 @@ int main(void)
+ 	IRQ_HANDLER = (u32) &InterruptHandler;
+ 
+ 	/* init the wifi stuff */
++#ifdef CONFIG_NDS_WIFI
+ 	wifi_init();
++#endif
+ 
+ 	/* Enable Interrupts */
+ 	NDS_IF = ~0;
+diff --git a/vendors/Nintendo/DSI/config.linux-2.6.x b/vendors/Nintendo/DSI/config.linux-2.6.x
+index bbbb9bbab..ff90eead7 100644
+--- a/vendors/Nintendo/DSI/config.linux-2.6.x
++++ b/vendors/Nintendo/DSI/config.linux-2.6.x
+@@ -435,7 +435,7 @@ CONFIG_NET_RADIO=y
+ #
+ # Nintendo DS Wireless interface (802.11)
+ #
+-CONFIG_NDS_WIFI=y
++# CONFIG_NDS_WIFI is not set
+ # CONFIG_HOSTAP is not set
+ 
+ #
+-- 
+2.56.0
+
