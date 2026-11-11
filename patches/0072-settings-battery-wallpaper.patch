@@ -1,0 +1,1093 @@
+From 4b6d18ab430414a5fc898065076617a7763c20f2 Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 14:44:04 -0600
+Subject: [PATCH] Settings app (System > Settings): brightness, pointer speed,
+ desktop colour/pattern/wallpaper (BMP files, photos), clock,
+ battery/volume/memory info; /proc/dsisettings (ARM7 reads the power chip,
+ backlight 1..5 never off, trackpad gain); wallpaper and colour handled by
+ dsdesk (long running owner of the background pixmap, SIGUSR1); battery
+ indicator in the taskbar tray; saved in /home/settings.conf and re-applied at
+ desktop start
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ linux-2.6.x/arch/arm/mach-nds/arm7/dsivol.c   |   6 +
+ linux-2.6.x/arch/arm/mach-nds/arm7/dsivol.h   |   1 +
+ linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c    |  14 +
+ linux-2.6.x/arch/arm/mach-nds/volume.c        |  63 ++
+ linux-2.6.x/drivers/block/dldi_c.c            |  17 +
+ .../drivers/input/touchscreen/nds_ts.c        |   6 +-
+ linux-2.6.x/include/asm-arm/arch-nds/dsisd.h  |   1 +
+ user/microwin/Makefile                        |   1 +
+ user/microwin/src/demos/nanox/Makefile        |   9 +-
+ user/microwin/src/demos/nanox/dsdesk.c        | 164 ++++-
+ user/microwin/src/demos/nanox/dssettings.c    | 558 ++++++++++++++++++
+ user/microwin/src/demos/nanox/w95.h           |   2 +-
+ vendors/Nintendo/DSI/Makefile                 |   1 +
+ vendors/Nintendo/DSI/desktop-apps             |   1 +
+ 14 files changed, 837 insertions(+), 7 deletions(-)
+ create mode 100644 user/microwin/src/demos/nanox/dssettings.c
+
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/dsivol.c b/linux-2.6.x/arch/arm/mach-nds/arm7/dsivol.c
+index 1beeba7e6..0b5c46d2e 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/arm7/dsivol.c
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/dsivol.c
+@@ -134,6 +134,12 @@ static int i2c_read_reg(u8 dev, u8 reg)
+ 	return -1;
+ }
+ 
++/* one power management chip register read over I2C; the value, or -1 */
++int dsivol_pm_read(u8 reg)
++{
++	return i2c_read_reg(I2C_PM, reg);
++}
++
+ /* one power management chip register write over I2C (libnds i2cWriteRegister sequence); 1 = done */
+ int dsivol_pm_write(u8 reg, u8 value)
+ {
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/dsivol.h b/linux-2.6.x/arch/arm/mach-nds/arm7/dsivol.h
+index 438df9dd1..3f9779794 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/arm7/dsivol.h
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/dsivol.h
+@@ -4,5 +4,6 @@
+ void dsivol_sound_power(int on);
+ void dsivol_poll(void);
+ int dsivol_pm_write(unsigned char reg, unsigned char value);
++int dsivol_pm_read(unsigned char reg);
+ 
+ #endif
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c b/linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c
+index 6ebeabe4b..b3cc9ac0b 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c
+@@ -39,6 +39,7 @@
+ #include "sdmmc.h"
+ #include "dsitouch.h"
+ #include "dsicam.h"
++#include "dsivol.h"
+ #include "microphone.h"
+ 
+ typedef volatile u16 vu16;
+@@ -863,6 +864,19 @@ static void nds_sd_request_inner(struct nds_sd_block *b)
+ 		b->result = NDS_SD_OK;
+ 		return;
+ 
++	case NDS_SD_CMD_PM:
++		if (!dsitouch_active()) {			/* DS mode: no I2C power chip */
++			b->result = NDS_SD_ERR_PARAM;
++			return;
++		}
++		if (b->count == 1 && b->sector <= 4)		/* the only thing that can be set: backlight level 0..4 (never off) */
++			dsivol_pm_write(0x41, (u8)b->sector);
++		b->info[0] = (u32)dsivol_pm_read(0x20);
++		b->info[1] = (u32)dsivol_pm_read(0x40);
++		b->info[2] = (u32)dsivol_pm_read(0x41);
++		b->result = NDS_SD_OK;
++		return;
++
+ 	case NDS_SD_CMD_MICDIAG:
+ 		mic_diag(b->touch, b->diag, b->info);
+ 		b->result = NDS_SD_OK;
+diff --git a/linux-2.6.x/arch/arm/mach-nds/volume.c b/linux-2.6.x/arch/arm/mach-nds/volume.c
+index 8c3adfbf3..f26ddef69 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/volume.c
++++ b/linux-2.6.x/arch/arm/mach-nds/volume.c
+@@ -8,6 +8,8 @@
+ #include <linux/kernel.h>
+ #include <linux/init.h>
+ #include <linux/proc_fs.h>
++#include <linux/string.h>
++#include <asm/uaccess.h>
+ 
+ static int vol_level = -1;
+ static int vol_status = 5;
+@@ -56,8 +58,69 @@ static int mic_read_proc(char *page, char **start, off_t off, int count, int *eo
+ 	return len - off;
+ }
+ 
++extern int dsisd_pm(unsigned int op, unsigned int val, unsigned int *out);
++extern int ndspad_gain;
++
++/*
++ * /proc/dsisettings: battery, volume, backlight and trackpad speed.
++ *   read:  battery=N charger=0|1 volume=N backlight=N padgain=N    (battery 0..15, volume 0..31, backlight 1..5; -1 = unknown)
++ *   write: "backlight N" (1..5, never off) or "padgain N" (1..8)
++ */
++static int settings_read_proc(char *page, char **start, off_t off, int count, int *eof, void *data)
++{
++	unsigned int o[3] = { 0xffffffff, 0xffffffff, 0xffffffff };
++	int len, bat, chg, vol, bl;
++
++	if (dsisd_pm(0, 0, o) != 0)
++		o[0] = o[1] = o[2] = 0xffffffff;
++	bat = o[0] == 0xffffffff ? -1 : (int)(o[0] & 15);
++	chg = o[0] == 0xffffffff ? 0 : (int)((o[0] >> 7) & 1);
++	vol = o[1] == 0xffffffff ? -1 : (int)(o[1] & 0x1f);
++	bl = o[2] == 0xffffffff ? -1 : (int)(o[2] & 7) + 1;
++	len = sprintf(page, "battery=%d charger=%d volume=%d backlight=%d padgain=%d\n", bat, chg, vol, bl, ndspad_gain);
++	*eof = 1;
++	if (off >= len)
++		return 0;
++	*start = page + off;
++	return len - off;
++}
++
++static int settings_write_proc(struct file *file, const char __user *buffer, unsigned long count, void *data)
++{
++	char buf[32];
++	unsigned int o[3];
++	unsigned long n;
++
++	if (count > sizeof(buf) - 1)
++		count = sizeof(buf) - 1;
++	if (copy_from_user(buf, buffer, count))
++		return -EFAULT;
++	buf[count] = 0;
++	if (!strncmp(buf, "backlight ", 10)) {
++		n = simple_strtoul(buf + 10, NULL, 10);
++		if (n < 1 || n > 5)
++			return -EINVAL;
++		dsisd_pm(1, n - 1, o);
++	} else if (!strncmp(buf, "padgain ", 8)) {
++		n = simple_strtoul(buf + 8, NULL, 10);
++		if (n < 1 || n > 8)
++			return -EINVAL;
++		ndspad_gain = n;
++	} else {
++		return -EINVAL;
++	}
++	return count;
++}
++
+ static int __init nds_volume_init(void)
+ {
++	struct proc_dir_entry *e;
++
++	e = create_proc_entry("dsisettings", 0644, NULL);
++	if (e) {
++		e->read_proc = settings_read_proc;
++		e->write_proc = settings_write_proc;
++	}
+ 	create_proc_read_entry("dsimic", 0444, NULL, mic_read_proc, NULL);
+ 	create_proc_read_entry("dsivolume", 0444, NULL, vol_read_proc, NULL);
+ 	return 0;
+diff --git a/linux-2.6.x/drivers/block/dldi_c.c b/linux-2.6.x/drivers/block/dldi_c.c
+index c6a0d39d2..7fb695b48 100644
+--- a/linux-2.6.x/drivers/block/dldi_c.c
++++ b/linux-2.6.x/drivers/block/dldi_c.c
+@@ -210,6 +210,23 @@ int dsisd_camera_cmd(unsigned int sub, unsigned int arg, unsigned int *value, un
+ 	return ret;
+ }
+ 
++/* Power chip status (and the backlight): op 1 sets the backlight register to val (0..4). out[0] battery register, out[1] volume register,
++ * out[2] backlight register (0xffffffff = unreadable). 0 = ok. */
++int dsisd_pm(unsigned int op, unsigned int val, unsigned int *out)
++{
++	int ret;
++
++	down(&sd_mutex);
++	ret = sd_request_locked(NDS_SD_CMD_PM, val, op);
++	if (ret == NDS_SD_OK) {
++		out[0] = sd_block.info[0];
++		out[1] = sd_block.info[1];
++		out[2] = sd_block.info[2];
++	}
++	up(&sd_mutex);
++	return ret;
++}
++
+ /* The ARM7's microphone counters (arm7/microphone.c): out[0..7] events, out[8..15] settings, out[16..17] lowest/highest sample. 0 = ok. */
+ int dsisd_micdiag(unsigned int *out)
+ {
+diff --git a/linux-2.6.x/drivers/input/touchscreen/nds_ts.c b/linux-2.6.x/drivers/input/touchscreen/nds_ts.c
+index c3d568c53..177d1de6c 100644
+--- a/linux-2.6.x/drivers/input/touchscreen/nds_ts.c
++++ b/linux-2.6.x/drivers/input/touchscreen/nds_ts.c
+@@ -150,7 +150,7 @@ static struct fifo_cb my_callback = {
+  * R = left, L = right (see ndspad_buttons(), called from arch/arm/mach-nds/button.c).
+  */
+ #define PAD_ROWS	9			/* tile rows 0..8 */
+-#define PAD_GAIN	2			/* pointer pixels per touch pixel */
++int ndspad_gain = 2;				/* pointer pixels per touch pixel (/proc/dsisettings: padgain) */
+ #define PAD_TAP_MAX_MOVE	4		/* touch pixels */
+ #define PAD_TAP_MAX_TIME	(HZ / 3)
+ 
+@@ -195,8 +195,8 @@ static void pad_touch(int touched, u8 x, u8 y)
+ 
+ 			if (dx || dy) {
+ 				pad_moved += (dx < 0 ? -dx : dx) + (dy < 0 ? -dy : dy);
+-				input_report_rel(&ndspad_dev, REL_X, dx * PAD_GAIN);
+-				input_report_rel(&ndspad_dev, REL_Y, dy * PAD_GAIN);
++				input_report_rel(&ndspad_dev, REL_X, dx * ndspad_gain);
++				input_report_rel(&ndspad_dev, REL_Y, dy * ndspad_gain);
+ 				input_sync(&ndspad_dev);
+ 				pad_lx = x;
+ 				pad_ly = y;
+diff --git a/linux-2.6.x/include/asm-arm/arch-nds/dsisd.h b/linux-2.6.x/include/asm-arm/arch-nds/dsisd.h
+index f0cf11caa..5857a39cb 100644
+--- a/linux-2.6.x/include/asm-arm/arch-nds/dsisd.h
++++ b/linux-2.6.x/include/asm-arm/arch-nds/dsisd.h
+@@ -19,6 +19,7 @@
+ #define NDS_SD_CMD_INIT		0
+ #define NDS_SD_CMD_READ		1
+ #define NDS_SD_CMD_WRITE	2
++#define NDS_SD_CMD_PM		11	/* not SD: power chip status and backlight. count 1 = also set the backlight register to sector (0..4); answer: info[0] battery reg 0x20, info[1] volume reg 0x40, info[2] backlight reg 0x41 (0xffffffff if unreadable) */
+ #define NDS_SD_CMD_MICDIAG	10	/* not SD: the microphone counters (touch[] events, diag[] settings), see arm7/microphone.c */
+ #define NDS_SD_CMD_CAMERA	9	/* not SD: camera sensor control; count = sub command, sector = argument, answer in info[0] (value) and info[1] (error mask), see arm7/dsicam.h */
+ #define NDS_SD_CMD_POWEROFF	7	/* not SD: DSi power off via the I2C power chip; answers (diag[]) only if the console stayed on */
+diff --git a/user/microwin/Makefile b/user/microwin/Makefile
+index a2a2eaf04..6d83fb680 100644
+--- a/user/microwin/Makefile
++++ b/user/microwin/Makefile
+@@ -18,6 +18,7 @@ real_romfs:
+ 	$(ROMFSINST) /bin/dsgx
+ 	$(ROMFSINST) /bin/dsplay
+ 	$(ROMFSINST) /bin/dsmemo
++	$(ROMFSINST) /bin/dssettings
+ 	$(ROMFSINST) /bin/dscam
+ 	$(ROMFSINST) /bin/dsgallery
+ 	$(ROMFSINST) -e CONFIG_USER_MICROWIN_BIN_LANDMINE    /bin/landmine
+diff --git a/user/microwin/src/demos/nanox/Makefile b/user/microwin/src/demos/nanox/Makefile
+index 916a9b78b..af1734dc0 100644
+--- a/user/microwin/src/demos/nanox/Makefile
++++ b/user/microwin/src/demos/nanox/Makefile
+@@ -87,10 +87,11 @@ OBJS =	demo.o \
+ 	dsplay.o \
+ 	dsmemo.o \
+ 	dscam.o \
+-	dsgallery.o
++	dsgallery.o \
++	dssettings.o
+ 
+ TARGETS = \
+-	$(TOP)/bin/dsdesk $(TOP)/bin/dsnotes $(TOP)/bin/dsfiles $(TOP)/bin/dsbench $(TOP)/bin/dsgl3d $(TOP)/bin/dsgx $(TOP)/bin/dsplay $(TOP)/bin/dsmemo $(TOP)/bin/dscam $(TOP)/bin/dsgallery \
++	$(TOP)/bin/dsdesk $(TOP)/bin/dsnotes $(TOP)/bin/dsfiles $(TOP)/bin/dsbench $(TOP)/bin/dsgl3d $(TOP)/bin/dsgx $(TOP)/bin/dsplay $(TOP)/bin/dsmemo $(TOP)/bin/dscam $(TOP)/bin/dsgallery $(TOP)/bin/dssettings \
+ 	$(TOP)/bin/demo $(TOP)/bin/move $(TOP)/bin/landmine \
+ 	$(TOP)/bin/world $(TOP)/bin/nxclock \
+ 	$(TOP)/bin/nxlsclients $(TOP)/bin/nxev \
+@@ -197,6 +198,10 @@ $(TOP)/bin/dsgallery: dsgallery.o dsgx.h dsgx_win.h dsbmp.h $(NANOXCLIENTLIBS) $
+ 	@echo "Linking $@ ..."
+ 	$(CC) $(CFLAGS) $(LDFLAGS) $< -o $@ $(LD_NANOXCLIENTLIBS) $(LIBM)
+ 
++$(TOP)/bin/dssettings: dssettings.o w95.h $(NANOXCLIENTLIBS) $(TOP)/config
++	@echo "Linking $@ ..."
++	$(CC) $(CFLAGS) $(LDFLAGS) dssettings.o -o $@ $(LD_NANOXCLIENTLIBS)
++
+ $(TOP)/bin/dsmemo: dsmemo.o w95.h $(NANOXCLIENTLIBS) $(TOP)/config
+ 	@echo "Linking $@ ..."
+ 	$(CC) $(CFLAGS) $(LDFLAGS) dsmemo.o -o $@ $(LD_NANOXCLIENTLIBS) $(LIBM)
+diff --git a/user/microwin/src/demos/nanox/dsdesk.c b/user/microwin/src/demos/nanox/dsdesk.c
+index df66f4354..bac732f8e 100644
+--- a/user/microwin/src/demos/nanox/dsdesk.c
++++ b/user/microwin/src/demos/nanox/dsdesk.c
+@@ -16,6 +16,7 @@
+ #include <sys/wait.h>
+ #include "nano-X.h"
+ #include "w95.h"
++#include "dsbmp.h"
+ 
+ struct item {
+ 	const char *name;
+@@ -43,6 +44,7 @@ static const struct item games[] = {
+ 	{ "Tetris", "/boot/ntetris" },
+ };
+ static const struct item system_items[] = {
++	{ "Settings", "/boot/dssettings" },
+ 	{ "Bench", "/boot/dsbench" },
+ 	{ "Save log", "/boot/savelog" },
+ };
+@@ -170,8 +172,131 @@ static void launch(const char *prog, const char *arg)
+  */
+ #define VOLW	130
+ #define VOL_SECONDS	2
++static int bar_dirty;
++
++/*
++ * Desktop background and settings. /home/settings.conf (written by the Settings app) has a line  desktop=C:n  (plain colour n),
++ * desktop=P:n (built in pattern n) or desktop=F:/path/file.bmp (a 256x192 24 bit BMP, e.g. a photo). A wallpaper is a pixmap that
++ * belongs to this (long running) program, which is why this program, not Settings, sets it. SIGUSR1 = read the line again.
++ */
++#define CONF_FILE	"/home/settings.conf"
++static volatile int reload_desktop = 1;
++static GR_WINDOW_ID wall_pix;
++static unsigned short wallbuf[PW * PH];
++
++static const struct { const char *name; int r, g, b; } desk_colours[] = {
++	{ "Teal", 0, 128, 128 }, { "Navy", 0, 0, 128 }, { "Green", 0, 100, 60 }, { "Grey", 128, 128, 128 },
++	{ "Purple", 96, 32, 128 }, { "Black", 0, 0, 0 },
++};
++#define NCOLOURS	6
++#define NPATTERNS	3
++
++static void on_usr1(int sig)
++{
++	reload_desktop = 1;
++}
++
++static unsigned short ds555(int r, int g, int b)	/* 0..31 each; DS pixel with the opaque bit */
++{
++	return 0x8000 | r | (g << 5) | (b << 10);
++}
++
++static void make_pattern(int n)
++{
++	int x, y;
++
++	for (y = 0; y < PH; y++)
++		for (x = 0; x < PW; x++) {
++			int t = y * 31 / (PH - 1), r, g, b;
++
++			if (n == 0) {			/* sky: dark blue to light blue */
++				r = 2 + t / 2; g = 6 + t * 18 / 31; b = 14 + t * 17 / 31;
++			} else if (n == 1) {		/* dusk: purple to orange */
++				r = 8 + t * 23 / 31; g = 3 + t * 11 / 31; b = 14 - t * 8 / 31;
++			} else {			/* grid on teal */
++				r = 0; g = 14; b = 14;
++				if ((x & 15) == 0 || (y & 15) == 0) {
++					r = 4; g = 20; b = 20;
++				}
++			}
++			wallbuf[y * PW + x] = ds555(r, g, b);
++		}
++}
++
++static void apply_desktop(void)
++{
++	char line[200], kind = 'C';
++	int n = 0, ok = 0, y;
++	FILE *f = fopen(CONF_FILE, "r");
++	GR_WINDOW_ID old = wall_pix, pix;
++	char path[160];
++
++	path[0] = 0;
++	if (f) {
++		while (fgets(line, sizeof(line), f)) {
++			if (!strncmp(line, "desktop=", 8) && line[8] && line[9] == ':') {
++				char *e = line + strlen(line);
++
++				while (e > line && (e[-1] == '\n' || e[-1] == '\r'))
++					*--e = 0;
++				kind = line[8];
++				if (kind == 'F')
++					snprintf(path, sizeof(path), "%s", line + 10);
++				else
++					n = atoi(line + 10);
++			}
++		}
++		fclose(f);
++	}
++	if (kind == 'F' && path[0] && bmp_read(path, wallbuf) == 0)
++		ok = 1;
++	else if (kind == 'P' && n >= 0 && n < NPATTERNS) {
++		make_pattern(n);
++		ok = 1;
++	}
++	if (ok) {
++		pix = GrNewPixmap(PW, PH, NULL);
++		for (y = 0; y < PH; y += 16)		/* in strips: one big request is too much for the connection */
++			GrArea(pix, gc, 0, y, PW, 16, wallbuf + y * PW, MWPF_TRUECOLOR555);	/* 16 bit data is taken as the screen's own pixels */
++		GrSetBackgroundPixmap(GR_ROOT_WINDOW_ID, pix, GR_BACKGROUND_TOPLEFT);
++		wall_pix = pix;
++	} else {
++		if (n < 0 || n >= NCOLOURS || kind != 'C')
++			n = 0;
++		GrSetBackgroundPixmap(GR_ROOT_WINDOW_ID, 0, GR_BACKGROUND_TILE);
++		wall_pix = 0;
++		GrSetWindowBackgroundColor(GR_ROOT_WINDOW_ID, GR_RGB(desk_colours[n].r, desk_colours[n].g, desk_colours[n].b));
++	}
++	GrClearWindow(GR_ROOT_WINDOW_ID, GR_TRUE);
++	if (old)
++		GrDestroyWindow(old);
++	fprintf(stderr, "dsdesk: desktop %c:%d %s -> %s\n", kind, n, path, ok ? "wallpaper" : "colour");
++}
++
++/* battery from /proc/dsisettings (the ARM7 reads the power chip: a few ms, so never while a memo records) */
++static int bat_level = -1, bat_chg;
++
++static void poll_battery(void)
++{
++	FILE *f;
++	int b = -1, c = 0, v, bl, pg;
++
++	if (access("/tmp/rec.lock", F_OK) == 0)
++		return;
++	f = fopen("/proc/dsisettings", "r");
++	if (!f)
++		return;
++	if (fscanf(f, "battery=%d charger=%d volume=%d backlight=%d padgain=%d", &b, &c, &v, &bl, &pg) >= 2 &&
++	    (b != bat_level || c != bat_chg)) {
++		bat_level = b;
++		bat_chg = c;
++		bar_dirty = 1;
++	}
++	fclose(f);
++}
++
+ static GR_WINDOW_ID volwin;
+-static int vol_cur = -1, bar_dirty;		/* volume percent shown in the taskbar tray (-1 unknown) */
++static int vol_cur = -1;		/* volume percent shown in the taskbar tray (-1 unknown) */
+ static time_t vol_since;
+ static int vol_last = -2, vol_pct, vol_status;
+ static char vol_msg[40];
+@@ -301,6 +426,28 @@ static void draw_bar(void)
+ 		w95_text(bar, gc, W95_DARK, x + 11, 3 + (barh - 5 - th) / 2, vt);
+ 	}
+ 
++	/* battery: a small battery picture (filled to the level, green / yellow / red) and the percentage, left of the volume */
++	if (bat_level >= 0) {
++		char bt[8];
++		int bwid, iy, pct = bat_level * 100 / 15, fw;
++		GR_COLOR fc = pct >= 40 ? GR_RGB(0, 160, 0) : (pct >= 20 ? GR_RGB(220, 170, 0) : GR_RGB(220, 0, 0));
++
++		sprintf(bt, "%d%%", pct);
++		bwid = w95_textw(gc, bt) + 25;
++		x -= bwid + 2;
++		iy = 3 + (barh - 5 - 7) / 2;
++		w95_box(bar, gc, x, 3, bwid, barh - 5, 1, W95_FACEFILL);
++		w95_fill(bar, gc, W95_DARK, x + 4, iy, 13, 7);		/* the case */
++		w95_fill(bar, gc, W95_LIGHT, x + 5, iy + 1, 11, 5);
++		w95_fill(bar, gc, W95_DARK, x + 17, iy + 2, 1, 3);	/* the tip */
++		fw = 11 * bat_level / 15;
++		if (fw > 0)
++			w95_fill(bar, gc, fc, x + 5, iy + 1, fw, 5);
++		if (bat_chg)						/* on external power */
++			w95_fill(bar, gc, GR_RGB(255, 200, 0), x + 19, iy + 1, 1, 5);
++		w95_text(bar, gc, W95_DARK, x + 21, 3 + (barh - 5 - th) / 2, bt);
++	}
++
+ 	/* a divider after the Start button */
+ 	w95_vline(bar, gc, W95_SHADOW, startw + 5, 3, barh - 3);
+ 	w95_vline(bar, gc, W95_LIGHT, startw + 6, 3, barh - 3);
+@@ -512,6 +659,15 @@ int main(int argc, char **argv)
+ 	GR_EVENT ev;
+ 	GR_FONT_ID font;
+ 	signal(SIGCHLD, reap);
++	signal(SIGUSR1, on_usr1);
++	{	/* the Settings app finds this program through its pid */
++		FILE *pf = fopen("/tmp/dsdesk.pid", "w");
++
++		if (pf) {
++			fprintf(pf, "%d\n", getpid());
++			fclose(pf);
++		}
++	}
+ 	if (GrOpen() < 0) {
+ 		fprintf(stderr, "dsdesk: cannot connect to Nano-X\n");
+ 		return 1;
+@@ -612,6 +768,12 @@ int main(int argc, char **argv)
+ 		case GR_EVENT_TYPE_TIMEOUT:
+ 			/* quiet for 0.3 s: do the slow things that need an answer from the server */
+ 			ticks++;
++			if (reload_desktop) {
++				reload_desktop = 0;
++				apply_desktop();
++			}
++			if ((ticks % 100) == 1)		/* about every 30 s */
++				poll_battery();
+ 			poll_volume();
+ 			if (bar_dirty) {
+ 				bar_dirty = 0;
+diff --git a/user/microwin/src/demos/nanox/dssettings.c b/user/microwin/src/demos/nanox/dssettings.c
+new file mode 100644
+index 000000000..763ed33af
+--- /dev/null
++++ b/user/microwin/src/demos/nanox/dssettings.c
+@@ -0,0 +1,558 @@
++/*
++ * dssettings - the Settings window of the DSLinuxDSi desktop (Windows 95 look).
++ *   Brightness     the DSi backlight, levels 1..5 (never off). /proc/dsisettings -> the ARM7 writes the power chip.
++ *   Pointer speed  how far the pointer moves for a drag on the trackpad, 1..8. /proc/dsisettings.
++ *   Desktop        the colour or wallpaper behind the windows: 6 colours, 3 built in patterns, and every BMP in /home/wallpapers
++ *                  and every photo in /home/photos (256x192, 24 bit BMP). The desktop panel (dsdesk) does the drawing: this
++ *                  program writes the choice to /home/settings.conf and tells dsdesk (SIGUSR1).
++ *   Clock          sets the system clock (hours, minutes, day, month, year). It is kept by the kernel until power off.
++ *   Info           battery level, volume level of the DSi's volume buttons, free memory.
++ * Choices are saved at once in /home/settings.conf and applied again at every desktop start (dssettings apply).
++ * Keys: up/down choose a row, left/right change it, q or Esc closes. Buttons and the trackpad pointer work too.
++ */
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <unistd.h>
++#include <fcntl.h>
++#include <signal.h>
++#include <dirent.h>
++#include <time.h>
++#include <sys/time.h>
++#include "nano-X.h"
++#include "w95.h"
++
++#define CONF		"/home/settings.conf"
++#define PROC		"/proc/dsisettings"
++#define WIN_W		224
++#define WIN_H		150
++#define NCOLOURS	6
++#define NPATTERNS	3
++#define MAXWALL		48
++
++static const char *colour_names[NCOLOURS] = { "Teal", "Navy", "Green", "Grey", "Purple", "Black" };
++static const char *pattern_names[NPATTERNS] = { "Sky", "Dusk", "Grid" };
++
++/* the desktop choices: colours, patterns, files */
++static char wall_label[MAXWALL][24];
++static char wall_path[MAXWALL][96];
++static int nwall;
++
++static int brightness = 3, padgain = 2, desk = 0;	/* desk: index into the choices */
++static int have_brightness, have_padgain;
++static int focus, applying;			/* applying: only write the hardware, do not rewrite the saved file */
++#define FIXED_BTNS	7			/* the three spin rows (6 buttons) and the Sound test button */
++static GR_WINDOW_ID win;
++static GR_GC_ID gc;
++static int th;
++
++/* ---- the proc file ---- */
++struct info {
++	int battery, charger, volume, backlight, padgain;
++};
++
++static int proc_info(struct info *i)
++{
++	FILE *f = fopen(PROC, "r");
++	int n;
++
++	i->battery = i->volume = i->backlight = -1;
++	i->charger = 0;
++	i->padgain = 2;
++	if (!f)
++		return -1;
++	n = fscanf(f, "battery=%d charger=%d volume=%d backlight=%d padgain=%d", &i->battery, &i->charger, &i->volume, &i->backlight,
++		   &i->padgain);
++	fclose(f);
++	return n >= 4 ? 0 : -1;
++}
++
++static void proc_set(const char *cmd)
++{
++	int f = open(PROC, O_WRONLY);
++
++	if (f >= 0) {
++		write(f, cmd, strlen(cmd));
++		close(f);
++	}
++}
++
++/* ---- the choices for the desktop ---- */
++static int cmp_labels(const void *a, const void *b)
++{
++	return strcmp((const char *)a, (const char *)b);
++}
++
++static void add_files(const char *dir, const char *prefix)
++{
++	DIR *d = opendir(dir);
++	struct dirent *e;
++
++	if (!d)
++		return;
++	while ((e = readdir(d)) != NULL && nwall < NCOLOURS + NPATTERNS + MAXWALL - 1) {
++		int n = strlen(e->d_name);
++
++		if (n > 4 && n < 20 && !strcmp(e->d_name + n - 4, ".bmp")) {
++			int k = nwall - (NCOLOURS + NPATTERNS);
++
++			if (k < 0 || k >= MAXWALL)
++				break;
++			snprintf(wall_label[k], sizeof(wall_label[k]), "%s%s", prefix, e->d_name);
++			snprintf(wall_path[k], sizeof(wall_path[k]), "%s/%s", dir, e->d_name);
++			nwall++;
++		}
++	}
++	closedir(d);
++}
++
++static int nchoices(void)
++{
++	return nwall;
++}
++
++static void choice_name(int i, char *out, int len)
++{
++	if (i < NCOLOURS)
++		snprintf(out, len, "%s", colour_names[i]);
++	else if (i < NCOLOURS + NPATTERNS)
++		snprintf(out, len, "%s", pattern_names[i - NCOLOURS]);
++	else
++		snprintf(out, len, "%s", wall_label[i - NCOLOURS - NPATTERNS]);
++}
++
++static void scan_choices(void)
++{
++	nwall = NCOLOURS + NPATTERNS;
++	add_files("/home/wallpapers", "");
++	add_files("/home/photos", "");
++}
++
++/* ---- the saved settings ---- */
++static void save_conf(void)
++{
++	FILE *f = fopen(CONF, "w");
++	char line[110];
++
++	if (!f)
++		return;
++	if (have_brightness)
++		fprintf(f, "brightness=%d\n", brightness);
++	if (have_padgain)
++		fprintf(f, "padgain=%d\n", padgain);
++	if (desk < NCOLOURS)
++		sprintf(line, "desktop=C:%d", desk);
++	else if (desk < NCOLOURS + NPATTERNS)
++		sprintf(line, "desktop=P:%d", desk - NCOLOURS);
++	else
++		sprintf(line, "desktop=F:%s", wall_path[desk - NCOLOURS - NPATTERNS]);
++	fprintf(f, "%s\n", line);
++	fclose(f);
++}
++
++/* returns the desktop line's kind and value through the arguments; 0 = no line */
++static void load_conf(char *kind, char *path, int *n)
++{
++	FILE *f = fopen(CONF, "r");
++	char line[200];
++
++	*kind = 0;
++	path[0] = 0;
++	*n = 0;
++	if (!f)
++		return;
++	while (fgets(line, sizeof(line), f)) {
++		char *e = line + strlen(line);
++
++		while (e > line && (e[-1] == '\n' || e[-1] == '\r'))
++			*--e = 0;
++		if (!strncmp(line, "brightness=", 11)) {
++			brightness = atoi(line + 11);
++			have_brightness = 1;
++		} else if (!strncmp(line, "padgain=", 8)) {
++			padgain = atoi(line + 8);
++			have_padgain = 1;
++		} else if (!strncmp(line, "desktop=", 8) && line[8] && line[9] == ':') {
++			*kind = line[8];
++			if (*kind == 'F')
++				snprintf(path, 160, "%s", line + 10);
++			else
++				*n = atoi(line + 10);
++		}
++	}
++	fclose(f);
++}
++
++static void tell_desktop(void)
++{
++	FILE *f = fopen("/tmp/dsdesk.pid", "r");
++	int pid = 0;
++
++	if (f) {
++		if (fscanf(f, "%d", &pid) != 1)
++			pid = 0;
++		fclose(f);
++	}
++	if (pid > 0)
++		kill(pid, SIGUSR1);
++}
++
++static void set_brightness(int v)
++{
++	char cmd[24];
++
++	if (v < 1)
++		v = 1;
++	if (v > 5)
++		v = 5;
++	brightness = v;
++	have_brightness = 1;
++	sprintf(cmd, "backlight %d\n", v);
++	proc_set(cmd);
++	if (!applying)
++		save_conf();
++}
++
++static void set_padgain(int v)
++{
++	char cmd[24];
++
++	if (v < 1)
++		v = 1;
++	if (v > 8)
++		v = 8;
++	padgain = v;
++	have_padgain = 1;
++	sprintf(cmd, "padgain %d\n", v);
++	proc_set(cmd);
++	if (!applying)
++		save_conf();
++}
++
++static void set_desk(int d)
++{
++	int n = nchoices();
++
++	desk = (d % n + n) % n;
++	save_conf();
++	tell_desktop();
++}
++
++static void adjust_time(long delta, int field)
++{
++	time_t now = time(NULL);
++	struct tm tm;
++	struct timeval tv;
++
++	if (field) {					/* month / year: through the calendar */
++		struct tm *p = localtime(&now);
++
++		tm = *p;
++		if (field == 1)
++			tm.tm_mon++;
++		else
++			tm.tm_year++;
++		now = mktime(&tm);
++	} else {
++		now += delta;
++	}
++	tv.tv_sec = now;
++	tv.tv_usec = 0;
++	settimeofday(&tv, NULL);
++}
++
++/* ---- drawing ---- */
++#define RX0		4
++#define LABELW		62
++#define BTNW		16
++#define BTNH		13
++#define ROWH		17
++#define ROWY(i)		(4 + (i) * ROWH)
++#define VALX		(RX0 + LABELW + BTNW + 3)	/* the value field */
++#define VALW		78
++#define PLUSX		(VALX + VALW + 3)
++
++struct btn {
++	int x, y, w, h, id;
++};
++static struct btn btns[16];
++static int nbtn;
++
++static void add_btn(int x, int y, int w, int h, int id)
++{
++	btns[nbtn].x = x;
++	btns[nbtn].y = y;
++	btns[nbtn].w = w;
++	btns[nbtn].h = h;
++	btns[nbtn++].id = id;
++}
++
++enum { B_BR_M = 1, B_BR_P, B_PD_M, B_PD_P, B_DK_M, B_DK_P, B_TH, B_TM, B_DD, B_DMO, B_DY, B_SOUND };
++
++static void draw_spin(int row, const char *label, int minus_id, int plus_id)
++{
++	int y = ROWY(row);
++
++	w95_text(win, gc, row == focus ? W95_NAVY : W95_DARK, RX0, y + 2, label);
++	w95_button(win, gc, RX0 + LABELW, y, BTNW, BTNH, "-", 0);
++	w95_box(win, gc, VALX, y, VALW, BTNH, 1, W95_WHITEFILL);
++	w95_button(win, gc, PLUSX, y, BTNW, BTNH, "+", 0);
++	add_btn(RX0 + LABELW, y, BTNW, BTNH, minus_id);
++	add_btn(PLUSX, y, BTNW, BTNH, plus_id);
++}
++
++static void draw_value(int row, const char *text)
++{
++	int y = ROWY(row);
++
++	w95_fill(win, gc, W95_LIGHT, VALX + 2, y + 2, VALW - 4, BTNH - 4);
++	w95_text(win, gc, W95_DARK, VALX + 4, y + 2, text);
++}
++
++static void draw_pips(int row, int level, int max)
++{
++	int y = ROWY(row), i;
++
++	w95_fill(win, gc, W95_LIGHT, VALX + 2, y + 2, VALW - 4, BTNH - 4);
++	for (i = 0; i < max; i++)
++		w95_fill(win, gc, i < level ? W95_NAVY : W95_SHADOW, VALX + 5 + i * (VALW - 10) / max, y + 4,
++			 (VALW - 10) / max - 2, BTNH - 8);
++}
++
++static void draw_clock(void)
++{
++	time_t now = time(NULL);
++	struct tm *tm = localtime(&now);
++	char t[40];
++	int y = ROWY(3);
++
++	w95_fill(win, gc, W95_FACE, 0, y, WIN_W, ROWH * 2);
++	nbtn = FIXED_BTNS;				/* the clock buttons are rebuilt below */
++	sprintf(t, "%02d:%02d:%02d", tm->tm_hour, tm->tm_min, tm->tm_sec);
++	w95_text(win, gc, W95_DARK, RX0, y + 2, "Time");
++	w95_box(win, gc, VALX, y, VALW, BTNH, 1, W95_WHITEFILL);
++	w95_text(win, gc, W95_DARK, VALX + 4, y + 2, t);
++	w95_button(win, gc, PLUSX, y, 20, BTNH, "H+", 0);
++	w95_button(win, gc, PLUSX + 22, y, 20, BTNH, "M+", 0);
++	add_btn(PLUSX, y, 20, BTNH, B_TH);
++	add_btn(PLUSX + 22, y, 20, BTNH, B_TM);
++	y = ROWY(4);
++	sprintf(t, "%04d-%02d-%02d", tm->tm_year + 1900, tm->tm_mon + 1, tm->tm_mday);
++	w95_text(win, gc, W95_DARK, RX0, y + 2, "Date");
++	w95_box(win, gc, VALX, y, VALW, BTNH, 1, W95_WHITEFILL);
++	w95_text(win, gc, W95_DARK, VALX + 4, y + 2, t);
++	w95_button(win, gc, PLUSX, y, 20, BTNH, "D+", 0);
++	w95_button(win, gc, PLUSX + 22, y, 20, BTNH, "Mo", 0);
++	w95_button(win, gc, PLUSX + 44, y, 20, BTNH, "Y+", 0);
++	add_btn(PLUSX, y, 20, BTNH, B_DD);
++	add_btn(PLUSX + 22, y, 20, BTNH, B_DMO);
++	add_btn(PLUSX + 44, y, 20, BTNH, B_DY);
++}
++
++static void draw_info(void)
++{
++	struct info in;
++	char t[48];
++	FILE *f;
++	long total = 0, freem = 0;
++	char l[80];
++	int y = ROWY(5) + 2;
++
++	w95_fill(win, gc, W95_FACE, 0, y, WIN_W, th * 3 + 8);
++	proc_info(&in);
++	if (in.battery >= 0)
++		sprintf(t, "Battery %d%%%s", in.battery * 100 / 15, in.charger ? "  (external power)" : "");
++	else
++		strcpy(t, "Battery: unknown");
++	w95_text(win, gc, W95_DARK, RX0, y, t);
++	if (in.volume >= 0)
++		sprintf(t, "Volume %d%% (the DSi's volume buttons)", in.volume * 100 / 31);
++	else
++		strcpy(t, "Volume: unknown");
++	w95_text(win, gc, W95_DARK, RX0, y + th + 1, t);
++	f = fopen("/proc/meminfo", "r");
++	if (f) {
++		while (fgets(l, sizeof(l), f)) {
++			if (!strncmp(l, "MemTotal:", 9))
++				total = atol(l + 9);
++			else if (!strncmp(l, "MemFree:", 8))
++				freem = atol(l + 8);
++		}
++		fclose(f);
++	}
++	sprintf(t, "Memory %ld of %ld kB free", freem, total);
++	w95_text(win, gc, W95_DARK, RX0, y + 2 * (th + 1), t);
++}
++
++static void draw_all(void)
++{
++	char t[40];
++
++	nbtn = 0;
++	w95_fill(win, gc, W95_FACE, 0, 0, WIN_W, WIN_H);
++	draw_spin(0, "Brightness", B_BR_M, B_BR_P);
++	draw_pips(0, brightness, 5);
++	draw_spin(1, "Pointer", B_PD_M, B_PD_P);
++	sprintf(t, "speed %d of 8", padgain);
++	draw_value(1, t);
++	draw_spin(2, "Desktop", B_DK_M, B_DK_P);
++	choice_name(desk, t, sizeof(t));
++	t[11] = 0;
++	draw_value(2, t);
++	w95_button(win, gc, RX0, WIN_H - BTNH - 4, 70, BTNH, "Sound test", 0);
++	add_btn(RX0, WIN_H - BTNH - 4, 70, BTNH, B_SOUND);
++	draw_clock();
++	draw_info();
++}
++
++static void refresh_row(int row)
++{
++	char t[40];
++
++	if (row == 0) {
++		draw_pips(0, brightness, 5);
++	} else if (row == 1) {
++		sprintf(t, "speed %d of 8", padgain);
++		draw_value(1, t);
++	} else if (row == 2) {
++		choice_name(desk, t, sizeof(t));
++		t[11] = 0;
++		draw_value(2, t);
++	}
++}
++
++static void act(int id)
++{
++	switch (id) {
++	case B_BR_M: set_brightness(brightness - 1); refresh_row(0); break;
++	case B_BR_P: set_brightness(brightness + 1); refresh_row(0); break;
++	case B_PD_M: set_padgain(padgain - 1); refresh_row(1); break;
++	case B_PD_P: set_padgain(padgain + 1); refresh_row(1); break;
++	case B_DK_M: set_desk(desk - 1); refresh_row(2); break;
++	case B_DK_P: set_desk(desk + 1); refresh_row(2); break;
++	case B_TH: adjust_time(3600, 0); draw_clock(); break;
++	case B_TM: adjust_time(60, 0); draw_clock(); break;
++	case B_DD: adjust_time(86400, 0); draw_clock(); break;
++	case B_DMO: adjust_time(0, 1); draw_clock(); break;
++	case B_DY: adjust_time(0, 2); draw_clock(); break;
++	case B_SOUND:
++		if (vfork() == 0) {
++			execl("/boot/dsplay", "/boot/dsplay", (char *)NULL);
++			_exit(127);
++		}
++		break;
++	}
++}
++
++/* `dssettings apply`: at every desktop start, bring back what was saved (no window) */
++static int apply(void)
++{
++	char kind, path[160];
++	int n;
++
++	load_conf(&kind, path, &n);
++	applying = 1;
++	if (have_brightness)
++		set_brightness(brightness);
++	if (have_padgain)
++		set_padgain(padgain);
++	return 0;
++}
++
++int main(int argc, char **argv)
++{
++	GR_EVENT ev;
++	GR_FONT_ID font;
++	char kind, path[160];
++	int n, i, first = 1;
++	struct info in;
++
++	if (argc > 1 && !strcmp(argv[1], "apply"))
++		return apply();
++	if (GrOpen() < 0) {
++		fprintf(stderr, "dssettings: cannot connect to Nano-X\n");
++		return 1;
++	}
++	gc = GrNewGC();
++	font = GrCreateFont("Tiny", 0, NULL);
++	GrSetGCFont(gc, font);
++	w95_init(font);
++	th = w95_texth(gc);
++	scan_choices();
++	load_conf(&kind, path, &n);
++	if (proc_info(&in) == 0) {
++		if (!have_brightness && in.backlight >= 1)
++			brightness = in.backlight;
++		if (!have_padgain)
++			padgain = in.padgain;
++	}
++	if (kind == 'C' && n >= 0 && n < NCOLOURS)
++		desk = n;
++	else if (kind == 'P' && n >= 0 && n < NPATTERNS)
++		desk = NCOLOURS + n;
++	else if (kind == 'F') {
++		for (i = NCOLOURS + NPATTERNS; i < nwall; i++)
++			if (!strcmp(wall_path[i - NCOLOURS - NPATTERNS], path))
++				desk = i;
++	}
++
++	win = GrNewWindowEx(GR_WM_PROPS_APPFRAME | GR_WM_PROPS_CAPTION | GR_WM_PROPS_CLOSEBOX, "Settings",
++			    GR_ROOT_WINDOW_ID, 16, 4, WIN_W, WIN_H, W95_FACE);
++	GrSelectEvents(win, GR_EVENT_MASK_EXPOSURE | GR_EVENT_MASK_BUTTON_DOWN | GR_EVENT_MASK_KEY_DOWN | GR_EVENT_MASK_CLOSE_REQ);
++	GrMapWindow(win);
++	GrSetFocus(win);
++
++	for (;;) {
++		GrGetNextEventTimeout(&ev, 1000);
++		switch (ev.type) {
++		case GR_EVENT_TYPE_EXPOSURE:
++			draw_all();
++			break;
++		case GR_EVENT_TYPE_CLOSE_REQ:
++			GrClose();
++			return 0;
++		case GR_EVENT_TYPE_BUTTON_DOWN:
++			for (i = 0; i < nbtn; i++)
++				if (ev.button.x >= btns[i].x && ev.button.x < btns[i].x + btns[i].w && ev.button.y >= btns[i].y &&
++				    ev.button.y < btns[i].y + btns[i].h) {
++					act(btns[i].id);
++					break;
++				}
++			break;
++		case GR_EVENT_TYPE_KEY_DOWN:
++			switch (ev.keystroke.ch) {
++			case 'q':
++			case MWKEY_ESCAPE:
++				GrClose();
++				return 0;
++			case MWKEY_UP:
++				if (focus > 0) {
++					focus--;
++					draw_all();
++				}
++				break;
++			case MWKEY_DOWN:
++				if (focus < 2) {
++					focus++;
++					draw_all();
++				}
++				break;
++			case MWKEY_LEFT:
++				act(focus == 0 ? B_BR_M : (focus == 1 ? B_PD_M : B_DK_M));
++				break;
++			case MWKEY_RIGHT:
++				act(focus == 0 ? B_BR_P : (focus == 1 ? B_PD_P : B_DK_P));
++				break;
++			}
++			break;
++		case GR_EVENT_TYPE_TIMEOUT:
++			draw_clock();				/* the clock runs; the numbers are read now and then */
++			if (first || (time(NULL) % 5) == 0) {
++				draw_info();
++				first = 0;
++			}
++			break;
++		}
++	}
++	return 0;
++}
+diff --git a/user/microwin/src/demos/nanox/w95.h b/user/microwin/src/demos/nanox/w95.h
+index 68454b129..a7bf137e5 100644
+--- a/user/microwin/src/demos/nanox/w95.h
++++ b/user/microwin/src/demos/nanox/w95.h
+@@ -26,7 +26,7 @@
+ static GR_FONT_ID w95_font;
+ static int w95_fw = 6, w95_fh = 10;	/* the font's character cell, read once in w95_init() */
+ 
+-#define W95_MAXGC	10
++#define W95_MAXGC	16
+ static GR_COLOR w95_gc_color[W95_MAXGC];
+ static GR_GC_ID w95_gc_id[W95_MAXGC];
+ static int w95_gc_n;
+diff --git a/vendors/Nintendo/DSI/Makefile b/vendors/Nintendo/DSI/Makefile
+index f302b7e78..290e3b4ee 100644
+--- a/vendors/Nintendo/DSI/Makefile
++++ b/vendors/Nintendo/DSI/Makefile
+@@ -168,6 +168,7 @@ finishrom:
+ 	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/dsplay $(ROMFSDIR)/boot/dsplay
+ 	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/cmp $(ROMFSDIR)/boot/cmp
+ 	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/dsmemo $(ROMFSDIR)/boot/dsmemo
++	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/dssettings $(ROMFSDIR)/boot/dssettings
+ 	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/dscam $(ROMFSDIR)/boot/dscam
+ 	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/dsgallery $(ROMFSDIR)/boot/dsgallery
+ 	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/landmine $(ROMFSDIR)/boot/landmine
+diff --git a/vendors/Nintendo/DSI/desktop-apps b/vendors/Nintendo/DSI/desktop-apps
+index d382479b8..ab4d24034 100644
+--- a/vendors/Nintendo/DSI/desktop-apps
++++ b/vendors/Nintendo/DSI/desktop-apps
+@@ -6,6 +6,7 @@ if [ -z "`pidof nano-X`" ]; then
+ 	echo "desktop: nano-X is not running" >> $LOG
+ 	exit 1
+ fi
++/boot/dssettings apply >> $LOG 2>&1		# brightness and pointer speed saved by the Settings app
+ /boot/nanowm >> $LOG 2>&1 &
+ sleep 1
+ /boot/dsdesk >> $LOG 2>&1 &
+-- 
+2.56.0
+
