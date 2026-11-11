@@ -320,6 +320,10 @@ z build (patch 0028): the power-off uses its own SPI access (bounded waits, no B
 
 z on the console: **`poweroff` switches the DSi off** (user report). So the failures were all in the ARM7 power code (the old helpers waited on the bus with a BIOS delay call, and cut the bus before the data byte finished); the I2C route was unnecessary and is gone. The diagnostic line is kept: it prints only if the console stays on.
 
+## Desktop (desk1 build)
+Findings from the tree: the DSI build already contains Microwindows/Nano-X (`nano-X`, `nanowm`, `nxterm`, `nxkbd`, `nxclock`, `nxview`, `nxev`, about 420 KB for the server) and they are in `ROOTFS.IMG`. The frame buffer driver registers two devices: `/dev/fb0` (main engine, `0x06000000`, the text console) and `/dev/fb1` (sub engine, `0x06200000`, the touch screen). Opening `/dev/fb1` makes the touch driver leave keyboard mode and report absolute pointer positions on `/dev/touch` (event1); closing it brings the touch keyboard back. Nano-X reads its device from `FRAMEBUFFER=` and its touch input from `/dev/touch`. Stock DSLinux used `fbset -depth 16 -n` and `ifconfig lo up` before starting it.
+`/boot/desktop` (patch 0029) does that: `FRAMEBUFFER=/dev/fb1`, `fbset -fb /dev/fb1 -depth 16 -n`, `nano-X -p -e`, `nanowm`, `nxterm` (and `nxkbd` with the `kbd` argument); `/boot/desktop stop` stops it. Output goes to `/tmp/desktop.log`, which `/boot/savelog` adds to `DSILOG.TXT`. `start_desktop="YES"` in `/etc/rc.conf` starts it at boot. Compiled, **not run on the console**; nothing here was ever run in DSi mode.
+
 ## 3c. Faster ARM9 clock: nothing to do (measured on the console)
 `CONFIG_NDS_DSI_FASTCPU` writes `SCFG_CLK` (0x04004004) bit 0 early in boot. On the console the t-fast ROM printed `NDS: ARM9 SCFG_CLK 0001 -> 0001: 134 MHz requested and accepted`: the register already held `0001` before the write, so the loader had
 already put the ARM9 at 134 MHz and the option changes nothing. All DSi-mode boots show `66.76 BogoMIPS (lpj=333824)`: with the ARM946E's delay loop taking about 4 cycles per iteration (sub plus a taken branch), 33.4 M iterations per second means roughly 134 MHz.

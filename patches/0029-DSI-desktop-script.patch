@@ -1,0 +1,108 @@
+From f52331afb5f9ab2511fe869f22a7dc4ebb0866cd Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 03:40:09 -0600
+Subject: [PATCH] DSI: /boot/desktop starts Nano-X + nanowm + nxterm on the
+ bottom screen (/dev/fb1); optional start_desktop=YES at boot; log saved with
+ savelog
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ vendors/Nintendo/DSI/Makefile  |  1 +
+ vendors/Nintendo/DSI/desktop   | 40 ++++++++++++++++++++++++++++++++++
+ vendors/Nintendo/DSI/rc.common |  7 ++++++
+ vendors/Nintendo/DSI/savelog   |  2 ++
+ 4 files changed, 50 insertions(+)
+ create mode 100644 vendors/Nintendo/DSI/desktop
+
+diff --git a/vendors/Nintendo/DSI/Makefile b/vendors/Nintendo/DSI/Makefile
+index 2ba315a37..b6edabd94 100644
+--- a/vendors/Nintendo/DSI/Makefile
++++ b/vendors/Nintendo/DSI/Makefile
+@@ -107,6 +107,7 @@ romfs:
+ 	$(ROMFSINST) /boot/rc.common
+ 	$(ROMFSINST) /boot/rc.fat
+ 	$(ROMFSINST) -p +x /boot/savelog
++	$(ROMFSINST) -p +x /boot/desktop
+ 	$(ROMFSINST) /$(FATFS)/linux/etc/issue
+ 	# copy some Nintendo specific files to romfs
+ 	$(ROMFSINST) $(NDS_COMMON)/rc.common /$(FATFS)/linux/etc/rc.common
+diff --git a/vendors/Nintendo/DSI/desktop b/vendors/Nintendo/DSI/desktop
+new file mode 100644
+index 000000000..abc47fc3a
+--- /dev/null
++++ b/vendors/Nintendo/DSI/desktop
+@@ -0,0 +1,40 @@
++#!/bin/sh
++# DSLinuxDSi desktop: the Nano-X window system on the bottom (touch) screen, /dev/fb1. The top screen keeps the
++# text console. While /dev/fb1 is open the touch driver turns into an absolute pointer and the touch keyboard goes away.
++#   /boot/desktop        server + window manager + one terminal
++#   /boot/desktop kbd    the same, plus the on-screen keyboard (nxkbd)
++#   /boot/desktop stop   stop it (the touch keyboard comes back)
++# Everything it prints goes to /tmp/desktop.log (also saved by /boot/savelog).
++LOG=/tmp/desktop.log
++
++if [ "$1" = "stop" ]; then
++	for p in nxkbd nxterm nanowm nano-X; do kill `pidof $p` 2>/dev/null; done
++	echo "desktop: stopped" >> $LOG
++	exit 0
++fi
++
++export FRAMEBUFFER=/dev/fb1
++echo "desktop: start (fb1)" > $LOG
++[ -c /dev/fb1 ] || { echo "desktop: no /dev/fb1" >> $LOG; echo "desktop: no /dev/fb1"; exit 1; }
++[ -c /dev/touch ] || echo "desktop: no /dev/touch" >> $LOG
++
++# 16 bit colour on the touch screen, like the stock DSLinux setup
++fbset -fb /dev/fb1 -depth 16 -n >> $LOG 2>&1
++fbset -fb /dev/fb1 >> $LOG 2>&1
++ifconfig lo up >> $LOG 2>&1
++grep Mem /proc/meminfo >> $LOG 2>&1
++
++# -p keep running when the last client exits; -e the Esc key does not quit the server
++nano-X -p -e >> $LOG 2>&1 &
++sleep 3
++if [ -z "`pidof nano-X`" ]; then
++	echo "desktop: nano-X did not start, see $LOG"
++	exit 1
++fi
++nanowm >> $LOG 2>&1 &
++sleep 1
++[ "$1" = "kbd" ] && { nxkbd >> $LOG 2>&1 & }
++nxterm >> $LOG 2>&1 &
++sleep 2
++echo "desktop: running: `pidof nano-X nanowm nxterm nxkbd`" >> $LOG
++echo "desktop: started on the bottom screen (log: $LOG)"
+diff --git a/vendors/Nintendo/DSI/rc.common b/vendors/Nintendo/DSI/rc.common
+index ee6fad6db..8e8c91483 100644
+--- a/vendors/Nintendo/DSI/rc.common
++++ b/vendors/Nintendo/DSI/rc.common
+@@ -187,6 +187,13 @@ echo "rc: firmware version"
+ # run local startup script if it exists
+ [ -e /etc/rc.local ] && . /etc/rc.local
+ 
++# desktop (Nano-X on the bottom screen) at boot: put start_desktop="YES" in /etc/rc.conf (or run /boot/desktop by hand)
++echo "rc: desktop"
++if [ "$start_desktop" = "YES" ] && [ -x /boot/desktop ]
++then
++	/boot/desktop &
++fi
++
+ # setup nano-X
+ if [ "$start_nanox" = "YES" ]
+ then
+diff --git a/vendors/Nintendo/DSI/savelog b/vendors/Nintendo/DSI/savelog
+index 97767cd80..216e1b2ea 100644
+--- a/vendors/Nintendo/DSI/savelog
++++ b/vendors/Nintendo/DSI/savelog
+@@ -10,6 +10,8 @@ echo "--- rc.common.log ---" >> $L
+ [ -f /tmp/rc.common.log ] && /usr/bin/cat /tmp/rc.common.log >> $L
+ echo "--- ramcopy.log ---" >> $L
+ [ -f /tmp/ramcopy.log ] && /usr/bin/cat /tmp/ramcopy.log >> $L
++echo "--- desktop.log ---" >> $L
++[ -f /tmp/desktop.log ] && /usr/bin/cat /tmp/desktop.log >> $L
+ echo "--- end ---" >> $L
+ if /usr/bin/cat $L > /dev/dsilog
+ then
+-- 
+2.56.0
+
