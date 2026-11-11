@@ -1,0 +1,2625 @@
+From 9c2e4220aa81d2f6037b9adf34d290f14ac67957 Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 15:14:00 -0600
+Subject: [PATCH] dsarcade: 3D Breakout, Tron and 3D Maze (GX window), 2048,
+ Sokoban, Sudoku, Life and Paint (touch); rules in arc_logic.h tested on a PC
+ by arc_test.c; Start > Games / Puzzles / Accessories > Paint
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ user/microwin/Makefile                    |    1 +
+ user/microwin/src/demos/nanox/Makefile    |    9 +-
+ user/microwin/src/demos/nanox/arc_logic.h |  671 +++++++++
+ user/microwin/src/demos/nanox/arc_test.c  |  245 ++++
+ user/microwin/src/demos/nanox/dsarcade.c  | 1575 +++++++++++++++++++++
+ user/microwin/src/demos/nanox/dsdesk.c    |   11 +
+ vendors/Nintendo/DSI/Makefile             |    1 +
+ 7 files changed, 2511 insertions(+), 2 deletions(-)
+ create mode 100644 user/microwin/src/demos/nanox/arc_logic.h
+ create mode 100644 user/microwin/src/demos/nanox/arc_test.c
+ create mode 100644 user/microwin/src/demos/nanox/dsarcade.c
+
+diff --git a/user/microwin/Makefile b/user/microwin/Makefile
+index b9808c430..88c42786c 100644
+--- a/user/microwin/Makefile
++++ b/user/microwin/Makefile
+@@ -20,6 +20,7 @@ real_romfs:
+ 	$(ROMFSINST) /bin/dsmemo
+ 	$(ROMFSINST) /bin/dssettings
+ 	$(ROMFSINST) /bin/dsgame
++	$(ROMFSINST) /bin/dsarcade
+ 	$(ROMFSINST) /bin/dscam
+ 	$(ROMFSINST) /bin/dsgallery
+ 	$(ROMFSINST) -e CONFIG_USER_MICROWIN_BIN_LANDMINE    /bin/landmine
+diff --git a/user/microwin/src/demos/nanox/Makefile b/user/microwin/src/demos/nanox/Makefile
+index dc05a6e13..d14f765a7 100644
+--- a/user/microwin/src/demos/nanox/Makefile
++++ b/user/microwin/src/demos/nanox/Makefile
+@@ -89,10 +89,11 @@ OBJS =	demo.o \
+ 	dscam.o \
+ 	dsgallery.o \
+ 	dssettings.o \
+-	dsgame.o
++	dsgame.o \
++	dsarcade.o
+ 
+ TARGETS = \
+-	$(TOP)/bin/dsdesk $(TOP)/bin/dsnotes $(TOP)/bin/dsfiles $(TOP)/bin/dsbench $(TOP)/bin/dsgl3d $(TOP)/bin/dsgx $(TOP)/bin/dsplay $(TOP)/bin/dsmemo $(TOP)/bin/dscam $(TOP)/bin/dsgallery $(TOP)/bin/dssettings $(TOP)/bin/dsgame \
++	$(TOP)/bin/dsdesk $(TOP)/bin/dsnotes $(TOP)/bin/dsfiles $(TOP)/bin/dsbench $(TOP)/bin/dsgl3d $(TOP)/bin/dsgx $(TOP)/bin/dsplay $(TOP)/bin/dsmemo $(TOP)/bin/dscam $(TOP)/bin/dsgallery $(TOP)/bin/dssettings $(TOP)/bin/dsgame $(TOP)/bin/dsarcade \
+ 	$(TOP)/bin/demo $(TOP)/bin/move $(TOP)/bin/landmine \
+ 	$(TOP)/bin/world $(TOP)/bin/nxclock \
+ 	$(TOP)/bin/nxlsclients $(TOP)/bin/nxev \
+@@ -203,6 +204,10 @@ $(TOP)/bin/dsgame: dsgame.o dsgx.h dsgx_win.h dsgx_demo.h $(NANOXCLIENTLIBS) $(T
+ 	@echo "Linking $@ ..."
+ 	$(CC) $(CFLAGS) $(LDFLAGS) $< -o $@ $(LD_NANOXCLIENTLIBS) $(LIBM)
+ 
++$(TOP)/bin/dsarcade: dsarcade.o arc_logic.h w95.h dsgx.h dsgx_win.h dsgx_demo.h $(NANOXCLIENTLIBS) $(TOP)/config
++	@echo "Linking $@ ..."
++	$(CC) $(CFLAGS) $(LDFLAGS) $< -o $@ $(LD_NANOXCLIENTLIBS) $(LIBM)
++
+ $(TOP)/bin/dssettings: dssettings.o w95.h $(NANOXCLIENTLIBS) $(TOP)/config
+ 	@echo "Linking $@ ..."
+ 	$(CC) $(CFLAGS) $(LDFLAGS) dssettings.o -o $@ $(LD_NANOXCLIENTLIBS)
+diff --git a/user/microwin/src/demos/nanox/arc_logic.h b/user/microwin/src/demos/nanox/arc_logic.h
+new file mode 100644
+index 000000000..bc251ca91
+--- /dev/null
++++ b/user/microwin/src/demos/nanox/arc_logic.h
+@@ -0,0 +1,671 @@
++/*
++ * arc_logic.h - the rules of the DSLinuxDSi arcade games (dsarcade), with no drawing and no input: plain C that also builds and runs
++ * on a PC (arc_test.c checks it there: 2048 moves, Sokoban levels are solvable, Sudoku grids are valid, mazes are connected, ...).
++ * Integer maths only where it matters (the DS has no floating point unit); the 3D games use doubles at a few dozen operations a frame.
++ */
++#ifndef ARC_LOGIC_H
++#define ARC_LOGIC_H
++
++#include <stdlib.h>
++#include <string.h>
++
++static int arc_rnd(int n)
++{
++	return (int)(((unsigned)rand() >> 4) % (unsigned)n);
++}
++
++/* ======================================================================== 2048 */
++struct g2048 {
++	int t[4][4];
++	int score;
++	int over;
++};
++
++static int g2048_add(struct g2048 *g)
++{
++	int cell[16], n = 0, i;
++
++	for (i = 0; i < 16; i++)
++		if (!g->t[i / 4][i % 4])
++			cell[n++] = i;
++	if (!n)
++		return 0;
++	i = cell[arc_rnd(n)];
++	g->t[i / 4][i % 4] = arc_rnd(10) == 0 ? 4 : 2;
++	return 1;
++}
++
++static int g2048_can_move(const struct g2048 *g)
++{
++	int r, c;
++
++	for (r = 0; r < 4; r++)
++		for (c = 0; c < 4; c++) {
++			if (!g->t[r][c])
++				return 1;
++			if (c < 3 && g->t[r][c] == g->t[r][c + 1])
++				return 1;
++			if (r < 3 && g->t[r][c] == g->t[r + 1][c])
++				return 1;
++		}
++	return 0;
++}
++
++static void g2048_new(struct g2048 *g)
++{
++	memset(g, 0, sizeof(*g));
++	g2048_add(g);
++	g2048_add(g);
++}
++
++/* slide one line towards index 0, merging equal neighbours once; returns 1 if it changed */
++static int g2048_line(int *l, int *score)
++{
++	int out[4] = { 0, 0, 0, 0 }, n = 0, i, changed = 0;
++
++	for (i = 0; i < 4; i++) {
++		if (!l[i])
++			continue;
++		if (n && out[n - 1] == l[i] && out[n - 1] > 0) {
++			out[n - 1] *= -2;		/* merged: negative marks "do not merge again" */
++			*score += -out[n - 1];
++		} else {
++			out[n++] = l[i];
++		}
++	}
++	for (i = 0; i < 4; i++) {
++		if (out[i] < 0)
++			out[i] = -out[i];
++		if (l[i] != out[i])
++			changed = 1;
++		l[i] = out[i];
++	}
++	return changed;
++}
++
++/* dir: 0 left, 1 right, 2 up, 3 down; returns 1 if the board changed (and a new tile was added) */
++static int g2048_move(struct g2048 *g, int dir)
++{
++	int i, j, line[4], moved = 0;
++
++	for (i = 0; i < 4; i++) {
++		for (j = 0; j < 4; j++) {
++			switch (dir) {
++			case 0: line[j] = g->t[i][j]; break;
++			case 1: line[j] = g->t[i][3 - j]; break;
++			case 2: line[j] = g->t[j][i]; break;
++			default: line[j] = g->t[3 - j][i]; break;
++			}
++		}
++		if (g2048_line(line, &g->score))
++			moved = 1;
++		for (j = 0; j < 4; j++) {
++			switch (dir) {
++			case 0: g->t[i][j] = line[j]; break;
++			case 1: g->t[i][3 - j] = line[j]; break;
++			case 2: g->t[j][i] = line[j]; break;
++			default: g->t[3 - j][i] = line[j]; break;
++			}
++		}
++	}
++	if (moved)
++		g2048_add(g);
++	if (!g2048_can_move(g))
++		g->over = 1;
++	return moved;
++}
++
++/* ================================================================== Sokoban */
++#define SK_MAXW 14
++#define SK_MAXH 12
++#define SK_LEVELS 6
++
++static const char *sk_levels[SK_LEVELS][SK_MAXH + 1] = {
++	{ "#####",
++	  "#@$.#",
++	  "#####", 0 },
++	{ "######",
++	  "#    #",
++	  "# .$@#",
++	  "#  $.#",
++	  "######", 0 },
++	{ "####",
++	  "# .#",
++	  "#  ###",
++	  "#*@  #",
++	  "#  $ #",
++	  "#  ###",
++	  "####", 0 },
++	{ "########",
++	  "#  @   #",
++	  "# $$$  #",
++	  "#      #",
++	  "# ...  #",
++	  "########", 0 },
++	{ "  ####  ",
++	  "###  ###",
++	  "#   $  #",
++	  "# #  # #",
++	  "# . .$@#",
++	  "#  $ . #",
++	  "#  #   #",
++	  "########", 0 },
++	{ "#######",
++	  "#     #",
++	  "# $ $ #",
++	  "# .@. #",
++	  "#  $  #",
++	  "#  .  #",
++	  "#######", 0 },
++};
++
++struct sokoban {
++	int w, h, level;
++	unsigned char wall[SK_MAXH][SK_MAXW];
++	unsigned char goal[SK_MAXH][SK_MAXW];
++	unsigned char box[SK_MAXH][SK_MAXW];
++	int px, py, moves, pushes;
++	/* undo: one entry per move: direction 0..3 and whether a box was pushed */
++	unsigned char undo_dir[1024];
++	unsigned char undo_push[1024];
++	int nundo;
++};
++
++static void sk_load(struct sokoban *s, int level)
++{
++	int y, x;
++
++	memset(s, 0, sizeof(*s));
++	s->level = level;
++	for (y = 0; sk_levels[level][y]; y++) {
++		for (x = 0; sk_levels[level][y][x]; x++) {
++			char c = sk_levels[level][y][x];
++
++			if (x >= SK_MAXW || y >= SK_MAXH)
++				continue;
++			if (c == '#')
++				s->wall[y][x] = 1;
++			if (c == '.' || c == '*' || c == '+')
++				s->goal[y][x] = 1;
++			if (c == '$' || c == '*')
++				s->box[y][x] = 1;
++			if (c == '@' || c == '+') {
++				s->px = x;
++				s->py = y;
++			}
++			if (x + 1 > s->w)
++				s->w = x + 1;
++		}
++		if (y + 1 > s->h)
++			s->h = y + 1;
++	}
++}
++
++static const int sk_dx[4] = { 0, 1, 0, -1 }, sk_dy[4] = { -1, 0, 1, 0 };
++
++/* dir 0 up, 1 right, 2 down, 3 left; returns 0 no move, 1 moved, 2 moved and pushed a box */
++static int sk_move(struct sokoban *s, int dir)
++{
++	int nx = s->px + sk_dx[dir], ny = s->py + sk_dy[dir], pushed = 0;
++
++	if (nx < 0 || ny < 0 || nx >= SK_MAXW || ny >= SK_MAXH || s->wall[ny][nx])
++		return 0;
++	if (s->box[ny][nx]) {
++		int bx = nx + sk_dx[dir], by = ny + sk_dy[dir];
++
++		if (bx < 0 || by < 0 || bx >= SK_MAXW || by >= SK_MAXH || s->wall[by][bx] || s->box[by][bx])
++			return 0;
++		s->box[ny][nx] = 0;
++		s->box[by][bx] = 1;
++		pushed = 1;
++		s->pushes++;
++	}
++	s->px = nx;
++	s->py = ny;
++	s->moves++;
++	if (s->nundo < 1024) {
++		s->undo_dir[s->nundo] = dir;
++		s->undo_push[s->nundo++] = pushed;
++	}
++	return pushed ? 2 : 1;
++}
++
++static int sk_undo(struct sokoban *s)
++{
++	int dir, pushed;
++
++	if (s->nundo <= 0)
++		return 0;
++	s->nundo--;
++	dir = s->undo_dir[s->nundo];
++	pushed = s->undo_push[s->nundo];
++	if (pushed) {					/* the box is in front of the player: pull it back to the player's square */
++		int bx = s->px + sk_dx[dir], by = s->py + sk_dy[dir];
++
++		s->box[by][bx] = 0;
++		s->box[s->py][s->px] = 1;
++		s->pushes--;
++	}
++	s->px -= sk_dx[dir];
++	s->py -= sk_dy[dir];
++	s->moves--;
++	return 1;
++}
++
++static int sk_won(const struct sokoban *s)
++{
++	int y, x;
++
++	for (y = 0; y < SK_MAXH; y++)
++		for (x = 0; x < SK_MAXW; x++)
++			if (s->box[y][x] && !s->goal[y][x])
++				return 0;
++	return 1;
++}
++
++/* ================================================================== Sudoku */
++struct sudoku {
++	unsigned char g[81];		/* 0 = empty */
++	unsigned char given[81];	/* 1 = part of the puzzle */
++};
++
++static void sud_new(struct sudoku *s, int holes)
++{
++	int base[9][9], perm[9], i, j, r[9], c[9], tmp;
++
++	for (i = 0; i < 9; i++)
++		perm[i] = i + 1;
++	for (i = 8; i > 0; i--) {				/* shuffle the digits */
++		j = arc_rnd(i + 1);
++		tmp = perm[i]; perm[i] = perm[j]; perm[j] = tmp;
++	}
++	/* rows and columns: bands and stacks in any order, rows inside a band, columns inside a stack */
++	{
++		int b[3] = { 0, 1, 2 }, k;
++
++		for (i = 2; i > 0; i--) { j = arc_rnd(i + 1); tmp = b[i]; b[i] = b[j]; b[j] = tmp; }
++		for (k = 0; k < 3; k++) {
++			int in[3] = { 0, 1, 2 };
++
++			for (i = 2; i > 0; i--) { j = arc_rnd(i + 1); tmp = in[i]; in[i] = in[j]; in[j] = tmp; }
++			for (i = 0; i < 3; i++)
++				r[k * 3 + i] = b[k] * 3 + in[i];
++		}
++		for (i = 2; i > 0; i--) { j = arc_rnd(i + 1); tmp = b[i]; b[i] = b[j]; b[j] = tmp; }
++		for (k = 0; k < 3; k++) {
++			int in[3] = { 0, 1, 2 };
++
++			for (i = 2; i > 0; i--) { j = arc_rnd(i + 1); tmp = in[i]; in[i] = in[j]; in[j] = tmp; }
++			for (i = 0; i < 3; i++)
++				c[k * 3 + i] = b[k] * 3 + in[i];
++		}
++	}
++	for (i = 0; i < 9; i++)
++		for (j = 0; j < 9; j++)
++			base[i][j] = (i * 3 + i / 3 + j) % 9;
++	for (i = 0; i < 9; i++)
++		for (j = 0; j < 9; j++) {
++			s->g[i * 9 + j] = perm[base[r[i]][c[j]]];
++			s->given[i * 9 + j] = 1;
++		}
++	for (i = 0; i < holes; ) {				/* dig holes (the puzzle may have more than one solution: the game accepts any) */
++		j = arc_rnd(81);
++		if (s->g[j]) {
++			s->g[j] = 0;
++			s->given[j] = 0;
++			i++;
++		}
++	}
++}
++
++/* 1 if the digit in cell i also appears in its row, column or box */
++static int sud_conflict(const struct sudoku *s, int i)
++{
++	int v = s->g[i], r = i / 9, c = i % 9, k, br = r / 3 * 3, bc = c / 3 * 3;
++
++	if (!v)
++		return 0;
++	for (k = 0; k < 9; k++) {
++		if (k != c && s->g[r * 9 + k] == v)
++			return 1;
++		if (k != r && s->g[k * 9 + c] == v)
++			return 1;
++	}
++	for (k = 0; k < 9; k++) {
++		int rr = br + k / 3, cc = bc + k % 3;
++
++		if ((rr != r || cc != c) && s->g[rr * 9 + cc] == v)
++			return 1;
++	}
++	return 0;
++}
++
++static int sud_complete(const struct sudoku *s)
++{
++	int i;
++
++	for (i = 0; i < 81; i++)
++		if (!s->g[i] || sud_conflict(s, i))
++			return 0;
++	return 1;
++}
++
++/* ===================================================================== Life */
++static void life_step(const unsigned char *cur, unsigned char *next, int w, int h)
++{
++	int x, y;
++
++	for (y = 0; y < h; y++)
++		for (x = 0; x < w; x++) {
++			int n = 0, dx, dy;
++
++			for (dy = -1; dy <= 1; dy++)
++				for (dx = -1; dx <= 1; dx++)
++					if ((dx || dy) && cur[((y + dy + h) % h) * w + (x + dx + w) % w])
++						n++;
++			next[y * w + x] = cur[y * w + x] ? (n == 2 || n == 3) : (n == 3);
++		}
++}
++
++/* ===================================================================== Maze */
++#define MZ_W 7
++#define MZ_H 7
++/* open[y][x] has bit d set when the wall on side d (0 north = y-1, 1 east, 2 south, 3 west) is open */
++struct maze {
++	unsigned char open[MZ_H][MZ_W];
++	int exit_x, exit_y;
++};
++
++static void maze_new(struct maze *m)
++{
++	int stack[MZ_W * MZ_H][2], sp = 0, x = 0, y = 0;
++	unsigned char seen[MZ_H][MZ_W];
++	static const int dx[4] = { 0, 1, 0, -1 }, dy[4] = { -1, 0, 1, 0 };
++
++	memset(m, 0, sizeof(*m));
++	memset(seen, 0, sizeof(seen));
++	seen[0][0] = 1;
++	stack[sp][0] = 0;
++	stack[sp++][1] = 0;
++	while (sp) {
++		int d, order[4], n = 0, k;
++
++		x = stack[sp - 1][0];
++		y = stack[sp - 1][1];
++		for (d = 0; d < 4; d++) {
++			int nx = x + dx[d], ny = y + dy[d];
++
++			if (nx >= 0 && ny >= 0 && nx < MZ_W && ny < MZ_H && !seen[ny][nx])
++				order[n++] = d;
++		}
++		if (!n) {
++			sp--;
++			continue;
++		}
++		k = order[arc_rnd(n)];
++		m->open[y][x] |= 1 << k;
++		m->open[y + dy[k]][x + dx[k]] |= 1 << ((k + 2) & 3);
++		seen[y + dy[k]][x + dx[k]] = 1;
++		stack[sp][0] = x + dx[k];
++		stack[sp++][1] = y + dy[k];
++	}
++	m->exit_x = MZ_W - 1;
++	m->exit_y = MZ_H - 1;
++}
++
++/* ===================================================================== Tron */
++#define TR_N 22
++struct run {
++	int x0, y0, x1, y1;		/* cells of the straight run, inclusive */
++};
++#define TR_RUNS 120
++struct tbike {
++	int x, y, dir, alive;		/* dir: 0 north (y-1), 1 east, 2 south, 3 west */
++	struct run runs[TR_RUNS];
++	int nruns, prev_dir;
++};
++struct tron {
++	unsigned char occ[TR_N][TR_N];
++	struct tbike b[2];
++	int over, winner;		/* winner: 0 player, 1 computer, -1 draw */
++};
++
++static void tron_runs_add(struct tbike *b)
++{
++	if (b->nruns > 0 && b->prev_dir == b->dir) {		/* the run goes on */
++		b->runs[b->nruns - 1].x1 = b->x;
++		b->runs[b->nruns - 1].y1 = b->y;
++	} else if (b->nruns < TR_RUNS) {
++		b->runs[b->nruns].x0 = b->runs[b->nruns].x1 = b->x;
++		b->runs[b->nruns].y0 = b->runs[b->nruns].y1 = b->y;
++		/* a new run begins in the cell where the turn happened, so it joins the run before it */
++		if (b->nruns > 0) {
++			b->runs[b->nruns].x0 = b->runs[b->nruns - 1].x1;
++			b->runs[b->nruns].y0 = b->runs[b->nruns - 1].y1;
++		}
++		b->nruns++;
++	}
++	b->prev_dir = b->dir;
++}
++
++static void tron_new(struct tron *t)
++{
++	memset(t, 0, sizeof(*t));
++	t->b[0].x = TR_N / 2 - 4;
++	t->b[0].y = TR_N - 4;
++	t->b[0].dir = 0;
++	t->b[1].x = TR_N / 2 + 4;
++	t->b[1].y = 3;
++	t->b[1].dir = 2;
++	t->b[0].alive = t->b[1].alive = 1;
++	t->b[0].prev_dir = t->b[0].dir;
++	t->b[1].prev_dir = t->b[1].dir;
++	t->occ[t->b[0].y][t->b[0].x] = 1;
++	t->occ[t->b[1].y][t->b[1].x] = 2;
++	tron_runs_add(&t->b[0]);
++	tron_runs_add(&t->b[1]);
++}
++
++static const int tr_dx[4] = { 0, 1, 0, -1 }, tr_dy[4] = { -1, 0, 1, 0 };
++
++static int tron_free(const struct tron *t, int x, int y)
++{
++	return x >= 0 && y >= 0 && x < TR_N && y < TR_N && !t->occ[y][x];
++}
++
++/* free cells straight ahead from (x, y) going dir, at most 12 */
++static int tron_room(const struct tron *t, int x, int y, int dir)
++{
++	int n = 0;
++
++	while (n < 12 && tron_free(t, x + tr_dx[dir] * (n + 1), y + tr_dy[dir] * (n + 1)))
++		n++;
++	return n;
++}
++
++/* the computer: keep going, turn when blocked or now and then, toward the side with more room */
++static void tron_ai(const struct tron *t, struct tbike *b)
++{
++	int ahead = tron_room(t, b->x, b->y, b->dir);
++	int left = (b->dir + 3) & 3, right = (b->dir + 1) & 3;
++	int rl = tron_room(t, b->x, b->y, left), rr = tron_room(t, b->x, b->y, right);
++
++	if (ahead < 2 || (ahead < 8 && arc_rnd(5) == 0) || arc_rnd(14) == 0) {
++		if (rl > rr || (rl == rr && arc_rnd(2)))
++			b->dir = left;
++		else
++			b->dir = right;
++		if (ahead >= 2 && tron_room(t, b->x, b->y, b->dir) < 2)	/* the turn is worse than going on */
++			b->dir = (b->dir == left) ? right : left;
++	}
++}
++
++/* turn the player's bike (-1 left, +1 right) before the next step */
++static void tron_turn(struct tron *t, int who, int side)
++{
++	t->b[who].dir = (t->b[who].dir + (side < 0 ? 3 : 1)) & 3;
++}
++
++/* one move of both bikes */
++static void tron_step(struct tron *t)
++{
++	int i, nx[2], ny[2], dead[2] = { 0, 0 };
++
++	if (t->over)
++		return;
++	tron_ai(t, &t->b[1]);
++	for (i = 0; i < 2; i++) {
++		nx[i] = t->b[i].x + tr_dx[t->b[i].dir];
++		ny[i] = t->b[i].y + tr_dy[t->b[i].dir];
++		if (!tron_free(t, nx[i], ny[i]))
++			dead[i] = 1;
++	}
++	if (nx[0] == nx[1] && ny[0] == ny[1])
++		dead[0] = dead[1] = 1;
++	for (i = 0; i < 2; i++) {
++		if (dead[i]) {
++			t->b[i].alive = 0;
++			continue;
++		}
++		t->b[i].x = nx[i];
++		t->b[i].y = ny[i];
++		t->occ[ny[i]][nx[i]] = i + 1;
++		tron_runs_add(&t->b[i]);
++	}
++	if (dead[0] || dead[1]) {
++		t->over = 1;
++		t->winner = dead[0] && dead[1] ? -1 : (dead[0] ? 1 : 0);
++	}
++}
++
++/* ================================================================= Breakout */
++#define BR_COLS 8
++#define BR_ROWS 4
++#define BR_HALFW 4.5		/* the field is x from -4.5 to 4.5, y from -3.2 (paddle) to 3.4 */
++#define BR_BOTTOM (-3.2)
++#define BR_TOP 3.4
++struct breakout {
++	unsigned char brick[BR_ROWS][BR_COLS];
++	double px;			/* paddle centre */
++	double bx, by, vx, vy;
++	int attached, lives, score, level, bricks_left;
++	double speed;
++};
++
++static void br_level(struct breakout *b)
++{
++	int r, c;
++
++	for (r = 0; r < BR_ROWS; r++)
++		for (c = 0; c < BR_COLS; c++)
++			b->brick[r][c] = 1;
++	b->bricks_left = BR_ROWS * BR_COLS;
++	b->attached = 1;
++	b->speed = 5.0 + 0.8 * (b->level - 1);
++}
++
++static void br_new(struct breakout *b)
++{
++	memset(b, 0, sizeof(*b));
++	b->lives = 3;
++	b->level = 1;
++	br_level(b);
++}
++
++#define BR_BRICK_W 1.05
++#define BR_BRICK_H 0.45
++#define BR_BRICK_X0 (-(BR_COLS - 1) * BR_BRICK_W / 2.0)
++#define BR_BRICK_Y0 2.5
++#define BR_PADDLE_HALF 0.85
++#define BR_BALL_R 0.2
++
++static void br_launch(struct breakout *b)
++{
++	if (b->attached) {
++		b->attached = 0;
++		b->vx = b->speed * 0.35;
++		b->vy = b->speed * 0.94;
++	}
++}
++
++/* advance by dt seconds (small steps inside, so nothing tunnels). returns 1 when a life was lost */
++static int br_step(struct breakout *b, double dt)
++{
++	int steps = (int)(dt * b->speed / 0.15) + 1, s, lost = 0;
++	double h = dt / steps;
++
++	if (b->attached) {
++		b->bx = b->px;
++		b->by = BR_BOTTOM + 0.5;
++		return 0;
++	}
++	for (s = 0; s < steps; s++) {
++		b->bx += b->vx * h;
++		b->by += b->vy * h;
++		if (b->bx < -BR_HALFW + BR_BALL_R) {
++			b->bx = -BR_HALFW + BR_BALL_R;
++			b->vx = -b->vx;
++		}
++		if (b->bx > BR_HALFW - BR_BALL_R) {
++			b->bx = BR_HALFW - BR_BALL_R;
++			b->vx = -b->vx;
++		}
++		if (b->by > BR_TOP - BR_BALL_R) {
++			b->by = BR_TOP - BR_BALL_R;
++			b->vy = -b->vy;
++		}
++		/* paddle: the ball leaves at an angle that depends on where it hits */
++		if (b->vy < 0 && b->by < BR_BOTTOM + 0.25 + BR_BALL_R && b->by > BR_BOTTOM - 0.1 &&
++		    b->bx > b->px - BR_PADDLE_HALF - BR_BALL_R && b->bx < b->px + BR_PADDLE_HALF + BR_BALL_R) {
++			double off = (b->bx - b->px) / (BR_PADDLE_HALF + BR_BALL_R);	/* -1 .. 1 */
++			double vxn = off * 0.8;				/* sine of the angle from straight up */
++			double vyn = 1.0 - 0.5 * vxn * vxn;		/* about cosine, no sqrt needed for a game */
++
++			b->vx = vxn * b->speed;
++			b->vy = vyn * b->speed;
++			b->by = BR_BOTTOM + 0.25 + BR_BALL_R;
++		}
++		/* bricks */
++		{
++			int r, c;
++
++			for (r = 0; r < BR_ROWS; r++)
++				for (c = 0; c < BR_COLS; c++) {
++					double cx = BR_BRICK_X0 + c * BR_BRICK_W, cy = BR_BRICK_Y0 - r * (BR_BRICK_H + 0.1);
++					double dx, dy, ox, oy;
++
++					if (!b->brick[r][c])
++						continue;
++					dx = b->bx - cx;
++					dy = b->by - cy;
++					ox = BR_BRICK_W / 2 + BR_BALL_R - (dx < 0 ? -dx : dx);
++					oy = BR_BRICK_H / 2 + BR_BALL_R - (dy < 0 ? -dy : dy);
++					if (ox > 0 && oy > 0) {
++						b->brick[r][c] = 0;
++						b->bricks_left--;
++						b->score += 10 * (BR_ROWS - r);
++						if (ox < oy)
++							b->vx = -b->vx;
++						else
++							b->vy = -b->vy;
++						goto hit;
++					}
++				}
++		}
++hit:
++		if (b->by < BR_BOTTOM - 1.0) {
++			lost = 1;
++			break;
++		}
++	}
++	if (lost) {
++		b->lives--;
++		b->attached = 1;
++	} else if (b->bricks_left == 0) {
++		b->level++;
++		br_level(b);
++	}
++	return lost;
++}
++
++#endif
+diff --git a/user/microwin/src/demos/nanox/arc_test.c b/user/microwin/src/demos/nanox/arc_test.c
+new file mode 100644
+index 000000000..1d6866fab
+--- /dev/null
++++ b/user/microwin/src/demos/nanox/arc_test.c
+@@ -0,0 +1,245 @@
++/* arc_test.c - checks the rules in arc_logic.h on a PC: cc -O1 -o arc_test arc_test.c && ./arc_test */
++#include <stdio.h>
++#include "arc_logic.h"
++
++static int fails;
++#define CHECK(c) do { if (!(c)) { printf("FAIL line %d: %s\n", __LINE__, #c); fails++; } } while (0)
++
++/* breadth first Sokoban solver over (player, boxes) states for the small built-in levels */
++#define MAXSTATES 400000
++struct skstate { unsigned char px, py; unsigned char nb; unsigned char bx[8], by[8]; };
++
++static unsigned long long hash_state(const struct sokoban *s)
++{
++	unsigned long long h = 1469598103934665603ULL;
++	int y, x;
++
++	h = (h ^ (s->px * 16 + s->py)) * 1099511628211ULL;
++	for (y = 0; y < SK_MAXH; y++)
++		for (x = 0; x < SK_MAXW; x++)
++			if (s->box[y][x])
++				h = (h ^ (y * 16 + x + 1)) * 1099511628211ULL;
++	return h;
++}
++
++static int solvable(int level)
++{
++	static struct sokoban *q;
++	int head = 0, tail = 0, n, d;
++	unsigned long long *tab;
++	int tabn = 1 << 21;
++
++	q = malloc(sizeof(*q) * MAXSTATES);
++	tab = calloc(tabn, sizeof(*tab));
++	sk_load(&q[0], level);
++	q[0].nundo = 0;
++	tail = 1;
++	while (head < tail && tail < MAXSTATES - 4) {
++		struct sokoban cur = q[head++];
++
++		if (sk_won(&cur)) {
++			free(q);
++			free(tab);
++			return 1;
++		}
++		for (d = 0; d < 4; d++) {
++			struct sokoban nx = cur;
++			unsigned long long h;
++			int i;
++
++			nx.nundo = 0;
++			if (!sk_move(&nx, d))
++				continue;
++			h = hash_state(&nx) | 1;
++			for (i = h & (tabn - 1); tab[i] && tab[i] != h; i = (i + 1) & (tabn - 1))
++				;
++			if (tab[i])
++				continue;
++			tab[i] = h;
++			q[tail++] = nx;
++		}
++	}
++	n = 0;
++	free(q);
++	free(tab);
++	return n;
++}
++
++static int reach_all(const struct maze *m)
++{
++	int seen[MZ_H][MZ_W] = { { 0 } }, st[MZ_W * MZ_H][2], sp = 0, n = 0;
++	static const int dx[4] = { 0, 1, 0, -1 }, dy[4] = { -1, 0, 1, 0 };
++
++	st[sp][0] = 0; st[sp++][1] = 0; seen[0][0] = 1;
++	while (sp) {
++		int x = st[--sp][0], y = st[sp][1], d;
++
++		n++;
++		for (d = 0; d < 4; d++)
++			if ((m->open[y][x] & (1 << d)) && !seen[y + dy[d]][x + dx[d]]) {
++				seen[y + dy[d]][x + dx[d]] = 1;
++				st[sp][0] = x + dx[d]; st[sp++][1] = y + dy[d];
++			}
++	}
++	return n == MZ_W * MZ_H;
++}
++
++int main(void)
++{
++	int i, t;
++
++	/* 2048 */
++	{
++		struct g2048 g;
++		int l[4];
++		int sc = 0;
++
++		l[0] = 2; l[1] = 2; l[2] = 2; l[3] = 2;
++		CHECK(g2048_line(l, &sc) && l[0] == 4 && l[1] == 4 && !l[2] && !l[3] && sc == 8);
++		l[0] = 2; l[1] = 2; l[2] = 4; l[3] = 0; sc = 0;
++		CHECK(g2048_line(l, &sc) && l[0] == 4 && l[1] == 4 && !l[2]);
++		l[0] = 4; l[1] = 2; l[2] = 2; l[3] = 0;
++		CHECK(g2048_line(l, &sc) && l[0] == 4 && l[1] == 4 && !l[2]);
++		l[0] = 2; l[1] = 4; l[2] = 8; l[3] = 16;
++		CHECK(!g2048_line(l, &sc));
++		l[0] = 0; l[1] = 0; l[2] = 0; l[3] = 2;
++		CHECK(g2048_line(l, &sc) && l[0] == 2 && !l[3]);
++		srand(1);
++		for (t = 0; t < 200; t++) {
++			g2048_new(&g);
++			for (i = 0; i < 2000 && !g.over; i++)
++				g2048_move(&g, arc_rnd(4));
++			CHECK(g.over);
++		}
++		g2048_new(&g);
++		memset(g.t, 0, sizeof(g.t));
++		g.t[0][0] = 2; g.t[0][1] = 2;
++		g2048_move(&g, 0);
++		CHECK(g.t[0][0] == 4);
++	}
++	/* Sokoban */
++	for (i = 0; i < SK_LEVELS; i++) {
++		struct sokoban s;
++		int boxes = 0, goals = 0, y, x;
++
++		sk_load(&s, i);
++		for (y = 0; y < SK_MAXH; y++)
++			for (x = 0; x < SK_MAXW; x++) {
++				boxes += s.box[y][x];
++				goals += s.goal[y][x];
++			}
++		CHECK(boxes == goals && boxes > 0);
++		CHECK(solvable(i));
++		printf("sokoban level %d: %dx%d, %d boxes, solvable\n", i + 1, s.w, s.h, boxes);
++	}
++	{
++		struct sokoban s;
++
++		sk_load(&s, 0);
++		CHECK(sk_move(&s, 1) == 2);
++		CHECK(sk_won(&s));
++		CHECK(sk_undo(&s));
++		CHECK(!sk_won(&s) && s.px == 1 && s.box[1][2]);
++		CHECK(sk_move(&s, 3) == 0);
++	}
++	/* Sudoku */
++	srand(7);
++	for (t = 0; t < 300; t++) {
++		struct sudoku s;
++		int k;
++
++		sud_new(&s, 40);
++		for (k = 0; k < 81; k++)
++			if (s.g[k])
++				CHECK(!sud_conflict(&s, k));
++		/* fill the holes from a copy of the solution: regenerate with the same seed */
++	}
++	{
++		struct sudoku s;
++		int k;
++
++		srand(99);
++		sud_new(&s, 0);
++		CHECK(sud_complete(&s));
++		for (k = 0; k < 81; k++)
++			CHECK(s.g[k] >= 1 && s.g[k] <= 9);
++		s.g[0] = s.g[1];
++		CHECK(!sud_complete(&s));
++	}
++	/* Life: a blinker oscillates, a block stays */
++	{
++		unsigned char a[25] = { 0 }, b[25];
++
++		a[2 * 5 + 1] = a[2 * 5 + 2] = a[2 * 5 + 3] = 1;
++		life_step(a, b, 5, 5);
++		CHECK(b[1 * 5 + 2] && b[2 * 5 + 2] && b[3 * 5 + 2] && !b[2 * 5 + 1] && !b[2 * 5 + 3]);
++		life_step(b, a, 5, 5);
++		CHECK(a[2 * 5 + 1] && a[2 * 5 + 2] && a[2 * 5 + 3] && !a[1 * 5 + 2]);
++	}
++	/* maze: connected, 6 edges... a spanning tree has cells-1 passages */
++	srand(5);
++	for (t = 0; t < 500; t++) {
++		struct maze m;
++		int edges = 0, y, x, d;
++
++		maze_new(&m);
++		CHECK(reach_all(&m));
++		for (y = 0; y < MZ_H; y++)
++			for (x = 0; x < MZ_W; x++)
++				for (d = 0; d < 4; d++)
++					if (m.open[y][x] & (1 << d))
++						edges++;
++		CHECK(edges / 2 == MZ_W * MZ_H - 1);
++	}
++	/* Tron: the computer survives a while against a bike that goes straight; a full game never loops forever */
++	{
++		int wins[3] = { 0, 0, 0 }, longest = 0;
++
++		srand(3);
++		for (t = 0; t < 300; t++) {
++			struct tron tr;
++			int steps = 0;
++
++			tron_new(&tr);
++			while (!tr.over && steps < 1000) {
++				if (arc_rnd(6) == 0)
++					tron_turn(&tr, 0, arc_rnd(2) ? -1 : 1);
++				tron_step(&tr);
++				steps++;
++			}
++			CHECK(tr.over);
++			wins[tr.winner + 1]++;
++			if (steps > longest)
++				longest = steps;
++			CHECK(tr.b[0].nruns <= TR_RUNS || 1);
++		}
++		printf("tron vs random player: draws %d, player wins %d, computer wins %d, longest %d steps\n", wins[0], wins[1], wins[2], longest);
++		CHECK(wins[2] > wins[1]);
++	}
++	/* Breakout: a paddle that follows the ball clears the field, a still paddle loses lives */
++	{
++		struct breakout b;
++		int steps = 0;
++
++		srand(11);
++		br_new(&b);
++		while (b.lives > 0 && b.level == 1 && steps < 200000) {
++			b.px = b.bx - 0.6 * (((steps / 200) % 5) - 2) / 2;
++			if (b.px < -BR_HALFW + BR_PADDLE_HALF) b.px = -BR_HALFW + BR_PADDLE_HALF;
++			if (b.px > BR_HALFW - BR_PADDLE_HALF) b.px = BR_HALFW - BR_PADDLE_HALF;
++			br_launch(&b);
++			br_step(&b, 1.0 / 60);
++			steps++;
++		}
++		printf("breakout: tracking paddle reached level %d with %d lives, score %d after %d frames\n", b.level, b.lives, b.score, steps);
++		CHECK(b.level > 1);
++		br_new(&b);
++		for (steps = 0; steps < 20000 && b.lives > 0; steps++) {
++			br_launch(&b);
++			br_step(&b, 1.0 / 60);
++		}
++		CHECK(b.lives == 0);
++	}
++	printf(fails ? "%d FAILED\n" : "all passed\n", fails);
++	return fails != 0;
++}
+diff --git a/user/microwin/src/demos/nanox/dsarcade.c b/user/microwin/src/demos/nanox/dsarcade.c
+new file mode 100644
+index 000000000..ea7fec929
+--- /dev/null
++++ b/user/microwin/src/demos/nanox/dsarcade.c
+@@ -0,0 +1,1575 @@
++/*
++ * dsarcade - small games for the DSLinuxDSi desktop, all in one program (it saves ROM space: the Nano-X and 3D code is shared).
++ *   dsarcade breakout|tron|maze      3D games on the DS 3D engine (dsgx_win.h), rules in arc_logic.h
++ *   dsarcade 2048|sokoban|sudoku|life|paint   touch games in a plain desktop window (w95.h)
++ * Keys on the console: d-pad = arrow keys, A = Enter, B = Space, X / Y = Page up / Page down, q or Esc quits.
++ * The rules live in arc_logic.h (also tested on a PC by arc_test.c); this file is drawing and input only.
++ * Best scores / progress: /home/arcade2048.best, /home/sokoban.lvl, /home/paint.dat.
++ */
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <math.h>
++#include <time.h>
++#include <unistd.h>
++#include <sys/time.h>
++#include "nano-X.h"
++#include "w95.h"
++#include "dsgx_win.h"
++#include "dsgx_demo.h"
++#include "arc_logic.h"
++
++static long usec(void)
++{
++	struct timeval tv;
++
++	gettimeofday(&tv, NULL);
++	return tv.tv_sec * 1000000L + tv.tv_usec;
++}
++
++static int load_int(const char *name, int def)
++{
++	FILE *f = fopen(name, "r");
++	int v = def;
++
++	if (f) {
++		if (fscanf(f, "%d", &v) != 1)
++			v = def;
++		fclose(f);
++	}
++	return v;
++}
++
++static void save_int(const char *name, int v)
++{
++	FILE *f = fopen(name, "w");
++
++	if (f) {
++		fprintf(f, "%d\n", v);
++		fclose(f);
++	}
++}
++
++/* ===================================================================== 2D games */
++#define WW	200		/* client size of the touch games' windows */
++#define WH	136
++
++static GR_WINDOW_ID win;
++static GR_GC_ID gc;
++static int running = 1;
++
++struct btn {
++	int x, y, w, h;
++	const char *label;
++	int key;		/* the key the button stands for */
++};
++
++struct game2d {
++	const char *title;
++	void (*init)(void);
++	void (*draw)(void);
++	void (*key)(int k);
++	void (*mouse)(int x, int y, int kind);	/* kind: 1 down, 0 up, 2 moved with the button held */
++	void (*tick)(void);			/* about every 30 ms, when not NULL */
++	void (*done)(void);
++	const struct btn *btns;
++	int nbtns;
++	int want_motion;
++};
++
++static const struct game2d *cur2d;
++
++static void fillc(GR_COLOR c, int x, int y, int w, int h)
++{
++	w95_fill(win, gc, c, x, y, w, h);
++}
++
++static void text(GR_COLOR c, int x, int y, const char *s)
++{
++	w95_text(win, gc, c, x, y, s);
++}
++
++/* text centred in a box */
++static void ctext(GR_COLOR c, int x, int y, int w, int h, const char *s)
++{
++	text(c, x + (w - w95_textw(gc, s)) / 2, y + (h - w95_texth(gc)) / 2, s);
++}
++
++static void draw_buttons(const struct game2d *g)
++{
++	int i;
++
++	for (i = 0; i < g->nbtns; i++)
++		w95_button(win, gc, g->btns[i].x, g->btns[i].y, g->btns[i].w, g->btns[i].h, g->btns[i].label, 0);
++}
++
++static void redraw_all(const struct game2d *g)
++{
++	fillc(W95_FACE, 0, 0, WW, WH);
++	g->draw();
++	draw_buttons(g);
++}
++
++/* ---------------------------------------------------------------------- 2048 */
++static struct g2048 g48;
++static int best48, won48;
++#define F_BOARD	127
++#define F_TILE	28
++#define F_GAP	3
++static const GR_COLOR tile_col[8] = {
++	GR_RGB(205, 193, 180), GR_RGB(238, 228, 218), GR_RGB(237, 224, 200), GR_RGB(242, 177, 121),
++	GR_RGB(245, 149, 99), GR_RGB(246, 124, 95), GR_RGB(246, 94, 59), GR_RGB(237, 207, 114)
++};
++#define F_BG	GR_RGB(187, 173, 160)
++static int f_sx, f_sy;
++
++static void draw_tile(int r, int c)
++{
++	int v = g48.t[r][c], k = 0, x = 4 + F_GAP + c * (F_TILE + F_GAP), y = 4 + F_GAP + r * (F_TILE + F_GAP);
++	char s[8];
++
++	while ((1 << k) < v)
++		k++;
++	fillc(tile_col[v ? (k > 7 ? 7 : k) : 0], x, y, F_TILE, F_TILE);
++	if (v) {
++		sprintf(s, "%d", v);
++		ctext(v <= 4 ? W95_DARK : W95_LIGHT, x, y, F_TILE, F_TILE, s);
++	}
++}
++
++static void draw_panel48(void)
++{
++	char s[24];
++
++	fillc(W95_FACE, 134, 0, WW - 134, 70);
++	text(W95_NAVY, 138, 4, "2048");
++	sprintf(s, "score %d", g48.score);
++	text(W95_DARK, 138, 18, s);
++	sprintf(s, "best  %d", best48);
++	text(W95_DARK, 138, 30, s);
++	if (g48.over)
++		text(GR_RGB(200, 0, 0), 138, 46, "No moves left");
++	else if (won48)
++		text(GR_RGB(0, 140, 0), 138, 46, "2048 reached!");
++	else
++		text(W95_SHADOW, 138, 46, "swipe or arrows");
++}
++
++static void draw48(void)
++{
++	int r, c;
++
++	fillc(F_BG, 4, 4, F_BOARD, F_BOARD);
++	for (r = 0; r < 4; r++)
++		for (c = 0; c < 4; c++)
++			draw_tile(r, c);
++	draw_panel48();
++}
++
++static void key48(int k)
++{
++	int dir = -1, r, c;
++
++	switch (k) {
++	case MWKEY_LEFT: dir = 0; break;
++	case MWKEY_RIGHT: dir = 1; break;
++	case MWKEY_UP: dir = 2; break;
++	case MWKEY_DOWN: dir = 3; break;
++	case 'n':
++	case MWKEY_ENTER:
++		if (g48.over || k == 'n') {
++			g2048_new(&g48);
++			won48 = 0;
++			draw48();
++		}
++		return;
++	}
++	if (dir < 0 || g48.over)
++		return;
++	if (g2048_move(&g48, dir)) {
++		for (r = 0; r < 4; r++)
++			for (c = 0; c < 4; c++)
++				if (g48.t[r][c] >= 2048)
++					won48 = 1;
++		if (g48.score > best48) {
++			best48 = g48.score;
++			save_int("/home/arcade2048.best", best48);
++		}
++		draw48();
++	}
++}
++
++static void mouse48(int x, int y, int kind)
++{
++	int dx, dy;
++
++	if (kind == 1) {
++		f_sx = x;
++		f_sy = y;
++		return;
++	}
++	if (kind != 0 || x >= 134)
++		return;
++	dx = x - f_sx;
++	dy = y - f_sy;
++	if (dx * dx + dy * dy < 100) {			/* a tap: towards that side of the middle of the board */
++		dx = x - (4 + F_BOARD / 2);
++		dy = y - (4 + F_BOARD / 2);
++	}
++	if (abs(dx) > abs(dy))
++		key48(dx < 0 ? MWKEY_LEFT : MWKEY_RIGHT);
++	else
++		key48(dy < 0 ? MWKEY_UP : MWKEY_DOWN);
++}
++
++static void init48(void)
++{
++	best48 = load_int("/home/arcade2048.best", 0);
++	g2048_new(&g48);
++}
++
++static const struct btn btn48[] = { { 138, 90, 54, 14, "New game", 'n' } };
++static const struct game2d game_2048 = { "2048", init48, draw48, key48, mouse48, NULL, NULL, btn48, 1, 0 };
++
++/* ------------------------------------------------------------------- Sokoban */
++#define SK_T 14
++static struct sokoban sk;
++static unsigned char sk_floor[SK_MAXH][SK_MAXW];
++static int sk_level, sk_ox, sk_oy, sk_done;
++#define SK_FLOOR	GR_RGB(214, 196, 150)
++#define SK_BRICK	GR_RGB(150, 70, 40)
++#define SK_BOX		GR_RGB(220, 140, 30)
++#define SK_BOXOK	GR_RGB(70, 190, 70)
++#define SK_GOAL		GR_RGB(200, 40, 40)
++#define SK_ME		GR_RGB(40, 80, 220)
++
++static void sk_find_floor(void)
++{
++	int st[SK_MAXW * SK_MAXH][2], sp = 0, i;
++
++	memset(sk_floor, 0, sizeof(sk_floor));
++	st[sp][0] = sk.px;
++	st[sp++][1] = sk.py;
++	sk_floor[sk.py][sk.px] = 1;
++	while (sp) {
++		int x = st[--sp][0], y = st[sp][1];
++
++		for (i = 0; i < 4; i++) {
++			int nx = x + sk_dx[i], ny = y + sk_dy[i];
++
++			if (nx >= 0 && ny >= 0 && nx < SK_MAXW && ny < SK_MAXH && !sk.wall[ny][nx] && !sk_floor[ny][nx]) {
++				sk_floor[ny][nx] = 1;
++				st[sp][0] = nx;
++				st[sp++][1] = ny;
++			}
++		}
++	}
++}
++
++static void sk_cell(int x, int y)
++{
++	int px = sk_ox + x * SK_T, py = sk_oy + y * SK_T;
++
++	if (x < 0 || y < 0 || x >= sk.w || y >= sk.h)
++		return;
++	if (sk.wall[y][x]) {
++		fillc(SK_BRICK, px, py, SK_T, SK_T);
++		fillc(W95_DARK, px, py + SK_T / 2, SK_T, 1);
++		return;
++	}
++	if (!sk_floor[y][x]) {
++		fillc(W95_DARK, px, py, SK_T, SK_T);
++		return;
++	}
++	fillc(SK_FLOOR, px, py, SK_T, SK_T);
++	if (sk.goal[y][x])
++		fillc(SK_GOAL, px + 5, py + 5, 4, 4);
++	if (sk.box[y][x]) {
++		fillc(W95_DARK, px + 1, py + 1, SK_T - 2, SK_T - 2);
++		fillc(sk.goal[y][x] ? SK_BOXOK : SK_BOX, px + 2, py + 2, SK_T - 4, SK_T - 4);
++		fillc(W95_DARK, px + 5, py + 2, 1, SK_T - 4);
++	}
++	if (x == sk.px && y == sk.py) {
++		fillc(SK_ME, px + 3, py + 5, SK_T - 6, SK_T - 7);
++		fillc(W95_LIGHT, px + 4, py + 2, SK_T - 8, 4);
++	}
++}
++
++static void sk_panel(void)
++{
++	char s[24];
++
++	fillc(W95_FACE, 134, 0, WW - 134, 80);
++	text(W95_NAVY, 138, 4, "Sokoban");
++	sprintf(s, "level %d/%d", sk_level + 1, SK_LEVELS);
++	text(W95_DARK, 138, 18, s);
++	sprintf(s, "moves  %d", sk.moves);
++	text(W95_DARK, 138, 30, s);
++	sprintf(s, "pushes %d", sk.pushes);
++	text(W95_DARK, 138, 42, s);
++	if (sk_done)
++		text(GR_RGB(0, 140, 0), 138, 58, sk_level + 1 < SK_LEVELS ? "Solved! Next:" : "All solved!");
++}
++
++static void draw_sk(void)
++{
++	int x, y;
++
++	fillc(W95_DARK, 4, 4, 126, 126);
++	for (y = 0; y < sk.h; y++)
++		for (x = 0; x < sk.w; x++)
++			sk_cell(x, y);
++	sk_panel();
++}
++
++static void sk_start(int level)
++{
++	if (level < 0)
++		level = 0;
++	if (level >= SK_LEVELS)
++		level = SK_LEVELS - 1;
++	sk_level = level;
++	sk_load(&sk, level);
++	sk_find_floor();
++	sk_done = 0;
++	sk_ox = 4 + (126 - sk.w * SK_T) / 2;
++	sk_oy = 4 + (126 - sk.h * SK_T) / 2;
++}
++
++static void sk_line(void)
++{
++	int x, y;
++
++	for (y = 0; y < sk.h; y++)
++		for (x = 0; x < sk.w; x++)
++			if ((x - sk.px) * (x - sk.px) + (y - sk.py) * (y - sk.py) <= 4)
++				sk_cell(x, y);
++}
++
++static void key_sk(int k)
++{
++	int dir = -1, r;
++
++	switch (k) {
++	case MWKEY_UP: case 'w': dir = 0; break;
++	case MWKEY_RIGHT: case 'd': dir = 1; break;
++	case MWKEY_DOWN: case 's': dir = 2; break;
++	case MWKEY_LEFT: case 'a': dir = 3; break;
++	case ' ':
++	case 'u':
++		if (!sk_done && sk_undo(&sk)) {
++			sk_line();
++			sk_panel();
++		}
++		return;
++	case 'r':
++		sk_start(sk_level);
++		redraw_all(cur2d);
++		return;
++	case 'p':
++	case MWKEY_PAGEUP:
++		sk_start(sk_level - 1);
++		redraw_all(cur2d);
++		return;
++	case 'n':
++	case MWKEY_PAGEDOWN:
++		sk_start(sk_level + 1);
++		redraw_all(cur2d);
++		return;
++	case MWKEY_ENTER:
++		if (sk_done && sk_level + 1 < SK_LEVELS)
++			sk_start(sk_level + 1);
++		else
++			sk_start(sk_level);
++		redraw_all(cur2d);
++		return;
++	}
++	if (dir < 0 || sk_done)
++		return;
++	r = sk_move(&sk, dir);
++	if (r) {
++		sk_line();
++		if (sk_won(&sk)) {
++			sk_done = 1;
++			if (sk_level + 1 > load_int("/home/sokoban.lvl", 0))
++				save_int("/home/sokoban.lvl", sk_level + 1 < SK_LEVELS ? sk_level + 1 : sk_level);
++		}
++		sk_panel();
++	}
++}
++
++static void mouse_sk(int x, int y, int kind)
++{
++	int dx, dy;
++
++	if (kind != 1 || x >= 134)
++		return;
++	dx = (x - sk_ox) / SK_T - sk.px;
++	dy = (y - sk_oy) / SK_T - sk.py;
++	if (!dx && !dy)
++		return;
++	if (abs(dx) >= abs(dy))
++		key_sk(dx < 0 ? MWKEY_LEFT : MWKEY_RIGHT);
++	else
++		key_sk(dy < 0 ? MWKEY_UP : MWKEY_DOWN);
++}
++
++static void init_sk(void)
++{
++	sk_start(load_int("/home/sokoban.lvl", 0));
++}
++
++static const struct btn btn_sk[] = {
++	{ 138, 84, 56, 14, "Undo", 'u' }, { 138, 100, 56, 14, "Restart", 'r' },
++	{ 138, 116, 26, 14, "<", 'p' }, { 168, 116, 26, 14, ">", 'n' },
++};
++static const struct game2d game_sokoban = { "Sokoban", init_sk, draw_sk, key_sk, mouse_sk, NULL, NULL, btn_sk, 4, 0 };
++
++/* ------------------------------------------------------------------- Sudoku */
++#define SU_C	13
++static struct sudoku su;
++static int su_sel, su_solved;
++#define SU_SEL	GR_RGB(255, 255, 160)
++#define SU_RED	GR_RGB(200, 0, 0)
++
++static void su_cell(int i)
++{
++	int x = 4 + (i % 9) * SU_C + 1, y = 4 + (i / 9) * SU_C + 1;
++	char s[2];
++
++	fillc(i == su_sel ? SU_SEL : W95_LIGHT, x, y, SU_C - 1, SU_C - 1);
++	if (su.g[i]) {
++		s[0] = '0' + su.g[i];
++		s[1] = 0;
++		ctext(sud_conflict(&su, i) ? SU_RED : (su.given[i] ? W95_DARK : W95_NAVY), x, y, SU_C - 1, SU_C - 1, s);
++	}
++}
++
++static void su_status(void)
++{
++	fillc(W95_FACE, 126, 92, WW - 126, 40);
++	if (su_solved)
++		text(GR_RGB(0, 140, 0), 130, 96, "Solved!");
++	else
++		text(W95_SHADOW, 130, 96, "red = clash");
++}
++
++static void su_lines(void)
++{
++	int k;
++
++	for (k = 0; k <= 3; k++) {
++		fillc(W95_DARK, 4 + k * 3 * SU_C, 4, 1, 9 * SU_C + 1);
++		fillc(W95_DARK, 4, 4 + k * 3 * SU_C, 9 * SU_C + 1, 1);
++	}
++}
++
++static void draw_su(void)
++{
++	int i;
++
++	fillc(W95_SHADOW, 4, 4, 9 * SU_C + 1, 9 * SU_C + 1);
++	for (i = 0; i < 81; i++)
++		su_cell(i);
++	su_lines();
++	su_status();
++}
++
++static void su_set(int v)
++{
++	int i;
++
++	if (su.given[su_sel] || su_solved)
++		return;
++	su.g[su_sel] = v;
++	for (i = 0; i < 81; i++)				/* a changed digit can change the red clashes anywhere in its row, column, box */
++		su_cell(i);
++	su_lines();
++	if (v && sud_complete(&su))
++		su_solved = 1;
++	su_status();
++}
++
++static void su_move(int d)
++{
++	int old = su_sel, r = su_sel / 9, c = su_sel % 9;
++
++	if (d == 0 && r > 0) r--;
++	if (d == 1 && c < 8) c++;
++	if (d == 2 && r < 8) r++;
++	if (d == 3 && c > 0) c--;
++	su_sel = r * 9 + c;
++	if (su_sel != old) {
++		su_cell(old);
++		su_cell(su_sel);
++		su_lines();
++	}
++}
++
++static void su_new(void)
++{
++	sud_new(&su, 38);
++	su_sel = 40;
++	su_solved = 0;
++}
++
++static void key_su(int k)
++{
++	switch (k) {
++	case MWKEY_UP: su_move(0); return;
++	case MWKEY_RIGHT: su_move(1); return;
++	case MWKEY_DOWN: su_move(2); return;
++	case MWKEY_LEFT: su_move(3); return;
++	case '0': case MWKEY_BACKSPACE: case MWKEY_DELETE: case 'c':
++		su_set(0);
++		return;
++	case 'n':
++		su_new();
++		redraw_all(cur2d);
++		return;
++	case MWKEY_PAGEUP:					/* X / Y on the console: the digit under the cursor up or down */
++		su_set(su.g[su_sel] % 9 + 1);
++		return;
++	case MWKEY_PAGEDOWN:
++		su_set(su.g[su_sel] <= 1 ? 9 : su.g[su_sel] - 1);
++		return;
++	}
++	if (k >= '1' && k <= '9')
++		su_set(k - '0');
++}
++
++static void mouse_su(int x, int y, int kind)
++{
++	int c = (x - 4) / SU_C, r = (y - 4) / SU_C, old;
++
++	if (kind != 1 || x < 4 || y < 4 || c > 8 || r > 8)
++		return;
++	old = su_sel;
++	su_sel = r * 9 + c;
++	su_cell(old);
++	su_cell(su_sel);
++	su_lines();
++}
++
++static void init_su(void)
++{
++	su_new();
++}
++
++static const struct btn btn_su[] = {
++	{ 128, 4, 22, 16, "1", '1' }, { 152, 4, 22, 16, "2", '2' }, { 176, 4, 22, 16, "3", '3' },
++	{ 128, 22, 22, 16, "4", '4' }, { 152, 22, 22, 16, "5", '5' }, { 176, 22, 22, 16, "6", '6' },
++	{ 128, 40, 22, 16, "7", '7' }, { 152, 40, 22, 16, "8", '8' }, { 176, 40, 22, 16, "9", '9' },
++	{ 128, 58, 70, 14, "Clear", '0' }, { 128, 74, 70, 14, "New puzzle", 'n' },
++};
++static const struct game2d game_sudoku = { "Sudoku", init_su, draw_su, key_su, mouse_su, NULL, NULL, btn_su, 11, 0 };
++
++/* ---------------------------------------------------------------------- Life */
++#define LW 40
++#define LH 30
++#define LC 4
++static unsigned char life_a[LW * LH], life_b[LW * LH];
++static int life_run, life_speed = 2, life_gen, life_cx = 20, life_cy = 15;
++static long life_next;
++static const int life_rate[4] = { 1, 3, 6, 12 };
++static char life_lab[8];
++#define LIFE_BG		GR_RGB(30, 30, 40)
++#define LIFE_ON		GR_RGB(90, 230, 90)
++#define LIFE_CUR	GR_RGB(255, 220, 0)
++
++static void life_cell(int x, int y)
++{
++	int px = 4 + x * LC, py = 4 + y * LC;
++
++	fillc(LIFE_BG, px, py, LC, LC);
++	if (life_a[y * LW + x])
++		fillc(LIFE_ON, px, py, LC - 1, LC - 1);
++	if (x == life_cx && y == life_cy) {
++		w95_hline(win, gc, LIFE_CUR, px, px + LC - 1, py);
++		w95_hline(win, gc, LIFE_CUR, px, px + LC - 1, py + LC - 1);
++		w95_vline(win, gc, LIFE_CUR, px, py, py + LC - 1);
++		w95_vline(win, gc, LIFE_CUR, px + LC - 1, py, py + LC - 1);
++	}
++}
++
++static void life_status(void)
++{
++	char s[32];
++
++	fillc(W95_FACE, 4, 126, 130, 10);
++	sprintf(s, "gen %d  %s  speed %d", life_gen, life_run ? "running" : "paused", life_speed + 1);
++	text(W95_DARK, 4, 126, s);
++	strcpy(life_lab, life_run ? "Pause" : "Run");
++}
++
++static void draw_life(void)
++{
++	int x, y;
++
++	fillc(LIFE_BG, 4, 4, LW * LC, LH * LC);
++	for (y = 0; y < LH; y++)
++		for (x = 0; x < LW; x++)
++			if (life_a[y * LW + x] || (x == life_cx && y == life_cy))
++				life_cell(x, y);
++	life_status();
++}
++
++static void life_random(void)
++{
++	int i;
++
++	for (i = 0; i < LW * LH; i++)
++		life_a[i] = arc_rnd(4) == 0;
++	life_gen = 0;
++}
++
++static void life_generation(void)
++{
++	int i, changed = 0, x, y;
++
++	life_step(life_a, life_b, LW, LH);
++	for (i = 0; i < LW * LH; i++)
++		if (life_a[i] != life_b[i])
++			changed++;
++	if (changed > 150) {
++		memcpy(life_a, life_b, sizeof(life_a));
++		draw_life();
++	} else {
++		unsigned char old[LW * LH];
++
++		memcpy(old, life_a, sizeof(old));
++		memcpy(life_a, life_b, sizeof(life_a));
++		for (y = 0; y < LH; y++)
++			for (x = 0; x < LW; x++)
++				if (old[y * LW + x] != life_a[y * LW + x])
++					life_cell(x, y);
++	}
++	life_gen++;
++	life_status();
++}
++
++static void life_move(int dx, int dy)
++{
++	int ox = life_cx, oy = life_cy;
++
++	life_cx = (life_cx + dx + LW) % LW;
++	life_cy = (life_cy + dy + LH) % LH;
++	life_cell(ox, oy);
++	life_cell(life_cx, life_cy);
++}
++
++static void life_toggle(int x, int y)
++{
++	life_a[y * LW + x] ^= 1;
++	life_cell(x, y);
++}
++
++static void key_life(int k)
++{
++	switch (k) {
++	case MWKEY_UP: life_move(0, -1); return;
++	case MWKEY_DOWN: life_move(0, 1); return;
++	case MWKEY_LEFT: life_move(-1, 0); return;
++	case MWKEY_RIGHT: life_move(1, 0); return;
++	case ' ':
++		life_toggle(life_cx, life_cy);
++		return;
++	case MWKEY_ENTER:
++	case 'p':
++		life_run = !life_run;
++		life_next = usec();
++		life_status();
++		redraw_all(cur2d);
++		return;
++	case 's':
++		life_generation();
++		return;
++	case 'r':
++		life_random();
++		draw_life();
++		return;
++	case 'c':
++		memset(life_a, 0, sizeof(life_a));
++		life_gen = 0;
++		draw_life();
++		return;
++	case '+':
++	case MWKEY_PAGEUP:
++		if (life_speed < 3) life_speed++;
++		life_status();
++		return;
++	case '-':
++	case MWKEY_PAGEDOWN:
++		if (life_speed > 0) life_speed--;
++		life_status();
++		return;
++	}
++}
++
++static void mouse_life(int x, int y, int kind)
++{
++	int cx = (x - 4) / LC, cy = (y - 4) / LC, ox = life_cx, oy = life_cy;
++
++	if (x < 4 || y < 4 || cx >= LW || cy >= LH)
++		return;
++	if (kind == 1) {
++		life_cx = cx;
++		life_cy = cy;
++		life_toggle(cx, cy);
++		life_cell(ox, oy);
++	} else if (kind == 2 && (cx != life_cx || cy != life_cy)) {	/* dragging draws */
++		life_cx = cx;
++		life_cy = cy;
++		if (!life_a[cy * LW + cx])
++			life_toggle(cx, cy);
++		life_cell(ox, oy);
++	}
++}
++
++static void tick_life(void)
++{
++	long now = usec();
++
++	if (life_run && now >= life_next) {
++		life_generation();
++		life_next = now + 1000000L / life_rate[life_speed];
++	}
++}
++
++static void init_life(void)
++{
++	life_random();
++	strcpy(life_lab, "Run");
++}
++
++static const struct btn btn_life[] = {
++	{ 168, 4, 30, 14, life_lab, MWKEY_ENTER }, { 168, 20, 30, 14, "Step", 's' },
++	{ 168, 36, 30, 14, "Rand", 'r' }, { 168, 52, 30, 14, "Clear", 'c' },
++	{ 168, 68, 30, 14, "Fast", '+' }, { 168, 84, 30, 14, "Slow", '-' },
++};
++static const struct game2d game_life = { "Life", init_life, draw_life, key_life, mouse_life, tick_life, NULL, btn_life, 6, 1 };
++
++/* --------------------------------------------------------------------- Paint */
++#define PX 80
++#define PY 60
++#define PS 2
++static unsigned char canvas[PX * PY];
++static int pcol = 4, psize = 1, pfill, pdown, plx, ply;
++static const GR_COLOR pal[12] = {
++	GR_RGB(0, 0, 0), GR_RGB(255, 255, 255), GR_RGB(128, 128, 128), GR_RGB(230, 30, 30),
++	GR_RGB(255, 140, 0), GR_RGB(255, 230, 0), GR_RGB(30, 170, 50), GR_RGB(0, 200, 220),
++	GR_RGB(30, 60, 230), GR_RGB(150, 40, 200), GR_RGB(255, 130, 190), GR_RGB(130, 80, 30)
++};
++static char psize_lab[8], pfill_lab[8];
++
++static void paint_labels(void)
++{
++	sprintf(psize_lab, "Size %d", psize);
++	strcpy(pfill_lab, pfill ? "Fill *" : "Fill");
++}
++
++static void paint_swatch(int i)
++{
++	int x = 168 + (i % 2) * 16, y = 4 + (i / 2) * 13;
++
++	fillc(i == pcol ? W95_DARK : W95_FACE, x, y, 16, 13);
++	fillc(pal[i], x + 2, y + 2, 12, 9);
++}
++
++static void paint_dot(int lx, int ly, int c, int draw)
++{
++	int x0 = lx - (psize - 1) / 2, y0 = ly - (psize - 1) / 2, x, y;
++
++	for (y = y0; y < y0 + psize; y++)
++		for (x = x0; x < x0 + psize; x++)
++			if (x >= 0 && y >= 0 && x < PX && y < PY)
++				canvas[y * PX + x] = c;
++	if (x0 < 0) x0 = 0;
++	if (y0 < 0) y0 = 0;
++	if (draw)
++		fillc(pal[c], 4 + x0 * PS, 4 + y0 * PS, psize * PS, psize * PS);
++}
++
++static void paint_line(int x0, int y0, int x1, int y1)
++{
++	int dx = abs(x1 - x0), dy = -abs(y1 - y0), sx = x0 < x1 ? 1 : -1, sy = y0 < y1 ? 1 : -1, err = dx + dy;
++
++	for (;;) {
++		paint_dot(x0, y0, pcol, 1);
++		if (x0 == x1 && y0 == y1)
++			break;
++		if (2 * err >= dy) { err += dy; x0 += sx; }
++		if (2 * err <= dx) { err += dx; y0 += sy; }
++	}
++}
++
++static void draw_paint(void)
++{
++	int i, x, y;
++
++	fillc(pal[1], 4, 4, PX * PS, PY * PS);
++	for (y = 0; y < PY; y++) {
++		for (x = 0; x < PX; ) {
++			int c = canvas[y * PX + x], n = 1;
++
++			while (x + n < PX && canvas[y * PX + x + n] == c)
++				n++;
++			if (c != 1)
++				fillc(pal[c], 4 + x * PS, 4 + y * PS, n * PS, PS);
++			x += n;
++		}
++	}
++	for (i = 0; i < 12; i++)
++		paint_swatch(i);
++	paint_labels();
++}
++
++static void paint_flood(int x, int y)
++{
++	static short stack[PX * PY];
++	int sp = 0, from = canvas[y * PX + x];
++
++	if (from == pcol)
++		return;
++	stack[sp++] = y * PX + x;
++	canvas[y * PX + x] = pcol;
++	while (sp) {
++		int p = stack[--sp], px = p % PX, py = p / PX, k;
++
++		for (k = 0; k < 4; k++) {
++			int nx = px + sk_dx[k], ny = py + sk_dy[k];
++
++			if (nx >= 0 && ny >= 0 && nx < PX && ny < PY && canvas[ny * PX + nx] == from && sp < PX * PY - 1) {
++				canvas[ny * PX + nx] = pcol;
++				stack[sp++] = ny * PX + nx;
++			}
++		}
++	}
++	draw_paint();
++}
++
++static void key_paint(int k)
++{
++	switch (k) {
++	case 'z':
++	case 'c':
++		memset(canvas, 1, sizeof(canvas));
++		draw_paint();
++		break;
++	case 's':
++		psize = psize % 3 + 1;
++		paint_labels();
++		draw_buttons(cur2d);
++		break;
++	case 'f':
++		pfill = !pfill;
++		paint_labels();
++		draw_buttons(cur2d);
++		break;
++	case MWKEY_PAGEUP:
++	case MWKEY_RIGHT: {
++		int old = pcol;
++
++		pcol = (pcol + 1) % 12;
++		paint_swatch(old);
++		paint_swatch(pcol);
++		break;
++	}
++	case MWKEY_PAGEDOWN:
++	case MWKEY_LEFT: {
++		int old = pcol;
++
++		pcol = (pcol + 11) % 12;
++		paint_swatch(old);
++		paint_swatch(pcol);
++		break;
++	}
++	}
++}
++
++static void mouse_paint(int x, int y, int kind)
++{
++	int lx = (x - 4) / PS, ly = (y - 4) / PS, i;
++
++	if (kind == 0) {
++		pdown = 0;
++		return;
++	}
++	if (kind == 1 && x >= 168) {				/* palette */
++		i = (x - 168) / 16 + 2 * ((y - 4) / 13);
++		if (y >= 4 && i >= 0 && i < 12 && (x - 168) / 16 < 2) {
++			int old = pcol;
++
++			pcol = i;
++			paint_swatch(old);
++			paint_swatch(pcol);
++		}
++		return;
++	}
++	if (x < 4 || y < 4 || lx >= PX || ly >= PY)
++		return;
++	if (kind == 1) {
++		if (pfill) {
++			paint_flood(lx, ly);
++			return;
++		}
++		pdown = 1;
++		paint_dot(lx, ly, pcol, 1);
++	} else if (kind == 2 && pdown && !pfill) {
++		paint_line(plx, ply, lx, ly);
++	}
++	plx = lx;
++	ply = ly;
++}
++
++static void init_paint(void)
++{
++	FILE *f = fopen("/home/paint.dat", "r");
++
++	memset(canvas, 1, sizeof(canvas));
++	if (f) {
++		if (fread(canvas, 1, sizeof(canvas), f) != sizeof(canvas))
++			memset(canvas, 1, sizeof(canvas));
++		fclose(f);
++	}
++	paint_labels();
++}
++
++static void done_paint(void)
++{
++	FILE *f = fopen("/home/paint.dat", "w");
++
++	if (f) {
++		fwrite(canvas, 1, sizeof(canvas), f);
++		fclose(f);
++	}
++}
++
++static const struct btn btn_paint[] = {
++	{ 166, 84, 32, 14, psize_lab, 's' }, { 166, 100, 32, 14, pfill_lab, 'f' }, { 166, 116, 32, 14, "Clear", 'c' },
++};
++static const struct game2d game_paint = { "Paint", init_paint, draw_paint, key_paint, mouse_paint, NULL, done_paint, btn_paint, 3, 1 };
++
++/* the 2D event loop */
++static int run2d(const struct game2d *g)
++{
++	GR_EVENT ev;
++	GR_FONT_ID font;
++	int mask;
++
++	if (GrOpen() < 0) {
++		fprintf(stderr, "dsarcade: cannot connect to Nano-X\n");
++		return 1;
++	}
++	srand((unsigned)time(NULL));
++	gc = GrNewGC();
++	font = GrCreateFont("Tiny", 0, NULL);
++	GrSetGCFont(gc, font);
++	w95_init(font);
++	cur2d = g;
++	g->init();
++	win = GrNewWindowEx(GR_WM_PROPS_APPFRAME | GR_WM_PROPS_CAPTION | GR_WM_PROPS_CLOSEBOX, (GR_CHAR *)g->title,
++			    GR_ROOT_WINDOW_ID, 14, 4, WW, WH, W95_FACE);
++	mask = GR_EVENT_MASK_EXPOSURE | GR_EVENT_MASK_KEY_DOWN | GR_EVENT_MASK_CLOSE_REQ | GR_EVENT_MASK_BUTTON_DOWN |
++	       GR_EVENT_MASK_BUTTON_UP;
++	if (g->want_motion)
++		mask |= GR_EVENT_MASK_MOUSE_POSITION;
++	GrSelectEvents(win, mask);
++	GrMapWindow(win);
++	GrSetFocus(win);
++
++	while (running) {
++		int key = 0;
++
++		if (g->tick) {					/* a game with a clock: poll */
++			GrCheckNextEvent(&ev);
++			if (ev.type == GR_EVENT_TYPE_NONE) {
++				g->tick();
++				usleep(30000);
++				continue;
++			}
++		} else {
++			GrGetNextEvent(&ev);
++		}
++		switch (ev.type) {
++		case GR_EVENT_TYPE_EXPOSURE:
++			redraw_all(g);
++			break;
++		case GR_EVENT_TYPE_CLOSE_REQ:
++			running = 0;
++			break;
++		case GR_EVENT_TYPE_KEY_DOWN:
++			key = ev.keystroke.ch;
++			if (key == MWKEY_ESCAPE || key == 'q')
++				running = 0;
++			else
++				g->key(key);
++			break;
++		case GR_EVENT_TYPE_BUTTON_DOWN: {
++			int i, hit = 0;
++
++			for (i = 0; i < g->nbtns; i++)
++				if (ev.button.x >= g->btns[i].x && ev.button.x < g->btns[i].x + g->btns[i].w &&
++				    ev.button.y >= g->btns[i].y && ev.button.y < g->btns[i].y + g->btns[i].h) {
++					g->key(g->btns[i].key);
++					draw_buttons(g);	/* labels can change (Run / Pause) */
++					hit = 1;
++					break;
++				}
++			if (!hit && g->mouse)
++				g->mouse(ev.button.x, ev.button.y, 1);
++			break;
++		}
++		case GR_EVENT_TYPE_BUTTON_UP:
++			if (g->mouse)
++				g->mouse(ev.button.x, ev.button.y, 0);
++			break;
++		case GR_EVENT_TYPE_MOUSE_POSITION:
++			if (g->mouse && ev.mouse.buttons)
++				g->mouse(ev.mouse.x, ev.mouse.y, 2);
++			break;
++		}
++	}
++	if (g->done)
++		g->done();
++	GrClose();
++	return 0;
++}
++
++/* ===================================================================== 3D games */
++struct g3d {
++	const char *title;
++	int w, h;
++	double znear, zfar;
++	void (*init)(void);
++	void (*key)(int k);
++	void (*mouse)(struct gxw *w, int x);	/* pointer moved (x in the window), NULL = not used */
++	void (*update)(double dt);
++	void (*draw)(void);
++	void (*hud)(struct gxw *w, int force);
++};
++
++static struct gx_mesh cubem;
++static double now_t;
++static char hud_cache[4][40];
++
++static void hud_line(struct gxw *w, int i, const char *s, int force)
++{
++	if (force || strcmp(hud_cache[i], s)) {
++		strcpy(hud_cache[i], s);
++		gxw_text(w, i, s);
++	}
++}
++
++static void box(double x, double y, double z, double sx, double sy, double sz, int r, int g, int b)
++{
++	gx_push();
++	gx_translate(x, y, z);
++	gx_scale(sx, sy, sz);
++	gx_material(GX_RGB(r, g, b), GX_RGB(r / 3, g / 3, b / 3));
++	gx_mesh_draw(&cubem);
++	gx_pop(1);
++}
++
++static void scene_begin(void)
++{
++	gx_mode(GX_MODELVIEW);
++	gx_identity();
++	gx_light(0, 31, 31, 31, -0.3, -0.6, -1.0);
++	gx_polyattr(1, GX_CULL_NONE, 31);
++	gx_cmd(GXR_TEXIMAGE, 0);
++}
++
++static void scene_end(void)
++{
++	gx_swap();
++	gx_flush();
++}
++
++/* ------------------------------------------------------------------ Breakout */
++static struct breakout br;
++static int br_best, br_dead;
++static double br_spin;
++
++static void br_init(void)
++{
++	br_best = load_int("/home/breakout.best", 0);
++	br_new(&br);
++	br_dead = 0;
++}
++
++static void br_key(int k)
++{
++	switch (k) {
++	case MWKEY_LEFT: case 'a':
++		br.px -= 0.55;
++		break;
++	case MWKEY_RIGHT: case 'd':
++		br.px += 0.55;
++		break;
++	case ' ': case MWKEY_ENTER: case MWKEY_UP:
++		if (br_dead) {
++			br_new(&br);
++			br_dead = 0;
++		} else {
++			br_launch(&br);
++		}
++		break;
++	}
++	if (br.px < -BR_HALFW + BR_PADDLE_HALF) br.px = -BR_HALFW + BR_PADDLE_HALF;
++	if (br.px > BR_HALFW - BR_PADDLE_HALF) br.px = BR_HALFW - BR_PADDLE_HALF;
++}
++
++static void br_mouse(struct gxw *w, int x)
++{
++	br.px = (x / (double)w->rw * 2.0 - 1.0) * (BR_HALFW + 0.3);
++	br_key(0);
++}
++
++static void br_update(double dt)
++{
++	br_spin += dt * 220.0;
++	if (br_dead)
++		return;
++	br_step(&br, dt);
++	if (br.score > br_best) {
++		br_best = br.score;
++		save_int("/home/breakout.best", br_best);
++	}
++	if (br.lives <= 0)
++		br_dead = 1;
++}
++
++static void br_draw(void)
++{
++	int r, c;
++	static const int rowc[BR_ROWS][3] = { { 31, 6, 6 }, { 31, 17, 3 }, { 30, 28, 4 }, { 6, 24, 8 } };
++
++	scene_begin();
++	gx_translate(0.0, 0.0, -6.6);
++	gx_rotate('x', -18.0);
++	gx_translate(0.0, -0.1, 0.0);
++	box(0.0, 0.1, -0.6, 4.9, 3.8, 0.05, 4, 5, 14);						/* floor */
++	box(-BR_HALFW - 0.25, 0.1, 0.0, 0.25, 3.8, 0.3, 14, 14, 22);				/* walls */
++	box(BR_HALFW + 0.25, 0.1, 0.0, 0.25, 3.8, 0.3, 14, 14, 22);
++	box(0.0, BR_TOP + 0.25, 0.0, BR_HALFW + 0.5, 0.25, 0.3, 14, 14, 22);
++	for (r = 0; r < BR_ROWS; r++)
++		for (c = 0; c < BR_COLS; c++)
++			if (br.brick[r][c])
++				box(BR_BRICK_X0 + c * BR_BRICK_W, BR_BRICK_Y0 - r * (BR_BRICK_H + 0.1), 0.0, BR_BRICK_W / 2 - 0.04, BR_BRICK_H / 2, 0.25,
++				    rowc[r][0], rowc[r][1], rowc[r][2]);
++	box(br.px, BR_BOTTOM + 0.125, 0.0, BR_PADDLE_HALF, 0.125, 0.25, 8, 24, 31);			/* paddle */
++	gx_push();
++	gx_translate(br.bx, br.by, 0.0);
++	gx_rotate('y', br_spin);
++	gx_rotate('x', br_spin * 0.6);
++	gx_scale(BR_BALL_R, BR_BALL_R, BR_BALL_R);
++	gx_material(GX_RGB(31, 31, 31), GX_RGB(14, 14, 14));
++	gx_mesh_draw(&cubem);
++	gx_pop(1);
++	scene_end();
++}
++
++static void br_hud(struct gxw *w, int force)
++{
++	char s[40];
++
++	sprintf(s, "score %d  best %d", br.score, br_best);
++	hud_line(w, 0, s, force);
++	sprintf(s, "lives %d  level %d", br.lives, br.level);
++	hud_line(w, 1, s, force);
++	hud_line(w, 2, br_dead ? "GAME OVER: Enter" : (br.attached ? "Enter: launch" : "arrows / touch"), force);
++}
++
++/* ---------------------------------------------------------------------- Tron */
++#define TR_STEP 0.20
++static struct tron tr;
++static double tr_acc, tr_cam;
++static int tr_q[2], tr_nq, tr_wins[2];
++
++static void tr_init(void)
++{
++	tron_new(&tr);
++	tr_acc = 0.0;
++	tr_nq = 0;
++	tr_cam = 0.0;
++}
++
++static void tr_key(int k)
++{
++	int side = 0;
++
++	switch (k) {
++	case MWKEY_LEFT: case 'a': side = -1; break;
++	case MWKEY_RIGHT: case 'd': side = 1; break;
++	case ' ': case MWKEY_ENTER:
++		if (tr.over)
++			tr_init();
++		return;
++	}
++	if (side && !tr.over && tr_nq < 2)
++		tr_q[tr_nq++] = side;
++}
++
++static void tr_update(double dt)
++{
++	double target = 90.0 * tr.b[0].dir, diff;
++
++	if (!tr.over) {
++		tr_acc += dt;
++		while (tr_acc >= TR_STEP && !tr.over) {
++			if (tr_nq) {
++				tron_turn(&tr, 0, tr_q[0]);
++				tr_q[0] = tr_q[1];
++				tr_nq--;
++			}
++			tron_step(&tr);
++			tr_acc -= TR_STEP;
++			if (tr.over && tr.winner >= 0)
++				tr_wins[tr.winner]++;
++		}
++	}
++	diff = target - tr_cam;
++	while (diff > 180.0) diff -= 360.0;
++	while (diff < -180.0) diff += 360.0;
++	tr_cam += diff * (dt * 9.0 > 1.0 ? 1.0 : dt * 9.0);
++}
++
++/* the wall of one bike's trail: a long thin box per straight run, the last one ending at the bike's smooth position */
++static void tr_trail(int who, double hx, double hz, int r, int g, int b)
++{
++	const struct tbike *bk = &tr.b[who];
++	int i;
++
++	for (i = 0; i < bk->nruns; i++) {
++		double x0 = bk->runs[i].x0, z0 = bk->runs[i].y0, x1 = bk->runs[i].x1, z1 = bk->runs[i].y1;
++
++		if (i == bk->nruns - 1 && bk->alive) {
++			x1 = hx;
++			z1 = hz;
++		}
++		box((x0 + x1) / 2 + 0.5, 0.35, (z0 + z1) / 2 + 0.5, fabs(x1 - x0) / 2 + 0.15, 0.35, fabs(z1 - z0) / 2 + 0.15, r, g, b);
++	}
++}
++
++static void tr_draw(void)
++{
++	double f = tr.over ? 1.0 : tr_acc / TR_STEP, hx[2], hz[2];
++	int i;
++
++	if (f > 1.0)
++		f = 1.0;
++	for (i = 0; i < 2; i++) {
++		hx[i] = tr.b[i].x - tr_dx[tr.b[i].dir] * (tr.b[i].alive ? 1.0 - f : 0.0);
++		hz[i] = tr.b[i].y - tr_dy[tr.b[i].dir] * (tr.b[i].alive ? 1.0 - f : 0.0);
++	}
++	scene_begin();
++	gx_rotate('x', 32.0);
++	gx_translate(0.0, -3.4, -5.2);
++	gx_rotate('y', tr_cam);
++	gx_translate(-(hx[0] + 0.5), 0.0, -(hz[0] + 0.5));
++	box(TR_N / 2.0, -0.1, TR_N / 2.0, TR_N / 2.0, 0.1, TR_N / 2.0, 3, 4, 10);			/* floor */
++	box(TR_N / 2.0, 0.5, -0.2, TR_N / 2.0 + 0.3, 0.5, 0.2, 6, 18, 31);				/* arena walls */
++	box(TR_N / 2.0, 0.5, TR_N + 0.2, TR_N / 2.0 + 0.3, 0.5, 0.2, 6, 18, 31);
++	box(-0.2, 0.5, TR_N / 2.0, 0.2, 0.5, TR_N / 2.0 + 0.3, 6, 18, 31);
++	box(TR_N + 0.2, 0.5, TR_N / 2.0, 0.2, 0.5, TR_N / 2.0 + 0.3, 6, 18, 31);
++	for (i = 1; i < TR_N / 3 + 1; i++) {								/* a few lines on the floor to show the speed */
++		box(i * 3.0, 0.0, TR_N / 2.0, 0.03, 0.02, TR_N / 2.0, 6, 8, 20);
++		box(TR_N / 2.0, 0.0, i * 3.0, TR_N / 2.0, 0.02, 0.03, 6, 8, 20);
++	}
++	tr_trail(0, hx[0], hz[0], 4, 26, 31);
++	tr_trail(1, hx[1], hz[1], 31, 14, 3);
++	box(hx[0] + 0.5, 0.3, hz[0] + 0.5, 0.35, 0.3, 0.35, tr.b[0].alive ? 20 : 31, tr.b[0].alive ? 31 : 4, 31);
++	box(hx[1] + 0.5, 0.3, hz[1] + 0.5, 0.35, 0.3, 0.35, 31, tr.b[1].alive ? 24 : 31, 6);
++	scene_end();
++}
++
++static void tr_hud(struct gxw *w, int force)
++{
++	char s[40];
++
++	sprintf(s, "you %d   cpu %d", tr_wins[0], tr_wins[1]);
++	hud_line(w, 0, s, force);
++	hud_line(w, 1, tr.over ? (tr.winner == 0 ? "YOU WIN! Enter" : (tr.winner == 1 ? "CRASH! Enter" : "DRAW. Enter")) : "left / right", force);
++}
++
++/* ---------------------------------------------------------------------- Maze */
++#define MZ_C 3.0		/* cell size */
++#define MZ_R 0.75		/* the player's radius */
++static struct maze mz;
++static double mz_x, mz_z, mz_yaw, mz_walk, mz_turn, mz_time;
++static int mz_n, mz_won, mz_map = 1, mz_pcx = -1, mz_pcy = -1;
++static double mz_cube;
++
++static void mz_start(void)
++{
++	maze_new(&mz);
++	mz_x = MZ_C / 2;
++	mz_z = MZ_C / 2;
++	mz_yaw = (mz.open[0][0] & 2) ? 90.0 : 180.0;
++	mz_walk = mz_turn = mz_time = 0.0;
++	mz_won = 0;
++	mz_pcx = -1;
++}
++
++static void mz_init(void)
++{
++	mz_n = 1;
++	mz_start();
++}
++
++static void mz_key(int k)
++{
++	switch (k) {
++	case MWKEY_UP: case 'w': mz_walk = 0.35; break;
++	case MWKEY_DOWN: case 's': mz_walk = -0.35; break;
++	case MWKEY_LEFT: case 'a': mz_turn = -0.3; break;
++	case MWKEY_RIGHT: case 'd': mz_turn = 0.3; break;
++	case 'm': mz_map = !mz_map; mz_pcx = -2; break;
++	case ' ': case MWKEY_ENTER:
++		if (mz_won) {
++			mz_n++;
++			mz_start();
++		}
++		break;
++	}
++}
++
++/* move with walls: x then z separately, so the player slides along a wall */
++static void mz_try(double dx, double dz)
++{
++	int cx, cz;
++	double nx = mz_x + dx, nz = mz_z + dz, lx, lz;
++
++	cx = (int)(mz_x / MZ_C);
++	cz = (int)(mz_z / MZ_C);
++	if (dx != 0.0) {
++		lx = nx - cx * MZ_C;
++		if (lx < MZ_R && !(mz.open[cz][cx] & 8)) lx = MZ_R;
++		if (lx > MZ_C - MZ_R && !(mz.open[cz][cx] & 2)) lx = MZ_C - MZ_R;
++		mz_x = cx * MZ_C + lx;
++	}
++	cx = (int)(mz_x / MZ_C);
++	if (dz != 0.0) {
++		lz = nz - cz * MZ_C;
++		if (lz < MZ_R && !(mz.open[cz][cx] & 1)) lz = MZ_R;
++		if (lz > MZ_C - MZ_R && !(mz.open[cz][cx] & 4)) lz = MZ_C - MZ_R;
++		mz_z = cz * MZ_C + lz;
++	}
++	if (mz_x < 0.1) mz_x = 0.1;
++	if (mz_z < 0.1) mz_z = 0.1;
++	if (mz_x > MZ_W * MZ_C - 0.1) mz_x = MZ_W * MZ_C - 0.1;
++	if (mz_z > MZ_H * MZ_C - 0.1) mz_z = MZ_H * MZ_C - 0.1;
++}
++
++static void mz_update(double dt)
++{
++	double a, ex, ez;
++
++	mz_cube += dt * 140.0;
++	if (mz_won)
++		return;
++	mz_time += dt;
++	if (mz_turn != 0.0) {
++		double s = mz_turn > 0 ? 1.0 : -1.0;
++
++		mz_yaw += s * 130.0 * dt;
++		mz_turn -= s * dt;
++		if (mz_turn * s < 0.0)
++			mz_turn = 0.0;
++	}
++	if (mz_walk != 0.0) {
++		double s = mz_walk > 0 ? 1.0 : -1.0, step = s * 4.0 * dt;
++
++		a = mz_yaw * M_PI / 180.0;
++		mz_try(sin(a) * step, -cos(a) * step);
++		mz_walk -= s * dt;
++		if (mz_walk * s < 0.0)
++			mz_walk = 0.0;
++	}
++	ex = (mz.exit_x + 0.5) * MZ_C;
++	ez = (mz.exit_y + 0.5) * MZ_C;
++	if (fabs(mz_x - ex) < 0.9 && fabs(mz_z - ez) < 0.9)
++		mz_won = 1;
++}
++
++static void mz_draw(void)
++{
++	int x, y;
++	double sz = MZ_W * MZ_C / 2;
++
++	scene_begin();
++	gx_rotate('y', mz_yaw);
++	gx_translate(-mz_x, -1.1, -mz_z);
++	box(sz, -0.1, sz, sz + 0.3, 0.1, sz + 0.3, 8, 8, 12);					/* floor */
++	box(sz, 2.5, sz, sz + 0.3, 0.1, sz + 0.3, 5, 5, 9);						/* ceiling */
++	for (y = 0; y < MZ_H; y++)
++		for (x = 0; x < MZ_W; x++) {
++			unsigned char o = mz.open[y][x];
++			int shade = 16 + ((x + y) & 1) * 4;
++			double cx = x * MZ_C, cz = y * MZ_C;
++
++			if (!(o & 1))
++				box(cx + MZ_C / 2, 1.2, cz, MZ_C / 2 + 0.1, 1.3, 0.1, shade + 8, shade, 8);
++			if (!(o & 8))
++				box(cx, 1.2, cz + MZ_C / 2, 0.1, 1.3, MZ_C / 2 + 0.1, 8, shade, shade + 8);
++			if (y == MZ_H - 1 && !(o & 4))
++				box(cx + MZ_C / 2, 1.2, cz + MZ_C, MZ_C / 2 + 0.1, 1.3, 0.1, shade + 8, shade, 8);
++			if (x == MZ_W - 1 && !(o & 2))
++				box(cx + MZ_C, 1.2, cz + MZ_C / 2, 0.1, 1.3, MZ_C / 2 + 0.1, 8, shade, shade + 8);
++		}
++	gx_push();									/* the exit: a spinning green cube */
++	gx_translate((mz.exit_x + 0.5) * MZ_C, 1.1, (mz.exit_y + 0.5) * MZ_C);
++	gx_rotate('y', mz_cube);
++	gx_rotate('x', 30.0);
++	gx_scale(0.45, 0.45, 0.45);
++	gx_material(GX_RGB(4, 31, 6), GX_RGB(2, 14, 4));
++	gx_mesh_draw(&cubem);
++	gx_pop(1);
++	scene_end();
++}
++
++static void mz_rect(struct gxw *w, GR_COLOR c, int x, int y, int ww, int hh)
++{
++	GrSetGCForeground(w->gc, c);
++	GrFillRect(w->win, w->gc, x, y, ww, hh);
++}
++
++/* the map: 5 pixel cells, passages as one pixel bridges; the cell you are in is red, the exit green */
++static void mz_map_cell(struct gxw *w, int x, int y, int mx, int my)
++{
++	unsigned char o = mz.open[y][x];
++	GR_COLOR c = (x == mz_pcx && y == mz_pcy) ? GR_RGB(255, 40, 40) : (x == mz.exit_x && y == mz.exit_y ? GR_RGB(40, 230, 60) : GR_RGB(200, 200, 215));
++
++	mz_rect(w, c, mx + 1 + x * 5, my + 1 + y * 5, 4, 4);
++	if (o & 2)
++		mz_rect(w, GR_RGB(120, 120, 140), mx + 5 + x * 5, my + 2 + y * 5, 1, 2);
++	if (o & 4)
++		mz_rect(w, GR_RGB(120, 120, 140), mx + 2 + x * 5, my + 5 + y * 5, 2, 1);
++}
++
++static void mz_hud(struct gxw *w, int force)
++{
++	char s[40];
++	int x, y, cx = (int)(mz_x / MZ_C), cy = (int)(mz_z / MZ_C), mx = w->rw - MZ_W * 5 - 3, my = 2;
++
++	if (cx >= MZ_W) cx = MZ_W - 1;
++	if (cy >= MZ_H) cy = MZ_H - 1;
++	sprintf(s, "maze %d  %ds", mz_n, (int)mz_time);
++	hud_line(w, 0, s, force);
++	hud_line(w, 1, mz_won ? "FOUND IT! Enter" : "arrows walk", force);
++	if (!mz_map) {
++		if (force || mz_pcx != -2) {
++			mz_rect(w, GXW_KEY, mx - 1, my - 1, MZ_W * 5 + 2, MZ_H * 5 + 2);
++			mz_pcx = -2;
++		}
++		return;
++	}
++	if (force || mz_pcx == -1 || mz_pcx == -2) {
++		mz_rect(w, GR_RGB(30, 30, 50), mx - 1, my - 1, MZ_W * 5 + 2, MZ_H * 5 + 2);
++		mz_pcx = cx;
++		mz_pcy = cy;
++		for (y = 0; y < MZ_H; y++)
++			for (x = 0; x < MZ_W; x++)
++				mz_map_cell(w, x, y, mx, my);
++	} else if (cx != mz_pcx || cy != mz_pcy) {
++		int ox = mz_pcx, oy = mz_pcy;
++
++		mz_pcx = cx;
++		mz_pcy = cy;
++		mz_map_cell(w, ox, oy, mx, my);
++		mz_map_cell(w, cx, cy, mx, my);
++	}
++}
++
++static const struct g3d game_breakout = { "3D Breakout", 176, 132, 1.0, 60.0, br_init, br_key, br_mouse, br_update, br_draw, br_hud };
++static const struct g3d game_tron = { "Tron", 176, 132, 1.0, 80.0, tr_init, tr_key, NULL, tr_update, tr_draw, tr_hud };
++static const struct g3d game_maze = { "3D Maze", 176, 132, 0.7, 60.0, mz_init, mz_key, NULL, mz_update, mz_draw, mz_hud };
++
++static int run3d(const struct g3d *g)
++{
++	GR_EVENT ev;
++	struct gxw w;
++	long last_us = 0;
++	int force_hud = 1;
++
++	if (gx_open() < 0)
++		return 1;
++	if (GrOpen() < 0) {
++		fprintf(stderr, "dsarcade: cannot connect to Nano-X\n");
++		return 1;
++	}
++	srand((unsigned)time(NULL));
++	cube(&cubem);
++	g->init();
++	gxw_create(&w, g->title, 30, 4, g->w, g->h, g->znear, g->zfar);
++	GrSelectEvents(w.win, GR_EVENT_MASK_EXPOSURE | GR_EVENT_MASK_KEY_DOWN | GR_EVENT_MASK_CLOSE_REQ | GR_EVENT_MASK_BUTTON_DOWN |
++		       (g->mouse ? GR_EVENT_MASK_MOUSE_POSITION : 0));
++	gx_control(GX_CTRL_AA);
++	gx_flush();
++
++	while (running) {
++		int n;
++		double dt;
++		long now;
++
++		for (n = 0; n < 16; n++) {
++			GrCheckNextEvent(&ev);
++			if (ev.type == GR_EVENT_TYPE_NONE)
++				break;
++			if (gxw_event(&w, &ev))
++				running = 0;
++			if (ev.type == GR_EVENT_TYPE_EXPOSURE)
++				force_hud = 1;
++			if (ev.type == GR_EVENT_TYPE_KEY_DOWN) {
++				if (ev.keystroke.ch == MWKEY_ESCAPE || ev.keystroke.ch == 'q')
++					running = 0;
++				else
++					g->key(ev.keystroke.ch);
++			} else if (ev.type == GR_EVENT_TYPE_BUTTON_DOWN) {
++				if (g->mouse)
++					g->mouse(&w, ev.button.x);
++				g->key(g == &game_breakout ? ' ' : (ev.button.x < w.rw / 2 ? MWKEY_LEFT : MWKEY_RIGHT));
++			} else if (ev.type == GR_EVENT_TYPE_MOUSE_POSITION && g->mouse) {
++				g->mouse(&w, ev.mouse.x);
++			}
++		}
++		gxw_update(&w);
++		if (!w.visible) {
++			usleep(100000);
++			w.dirty = 1;
++			last_us = 0;
++			continue;
++		}
++		gx_vsync();
++		now = usec();
++		dt = last_us ? (now - last_us) / 1e6 : 1.0 / 60.0;
++		last_us = now;
++		if (dt > 0.05)
++			dt = 0.05;
++		now_t += dt;
++		g->update(dt);
++		g->draw();
++		g->hud(&w, force_hud);
++		force_hud = 0;
++	}
++	gx_close();
++	GrClose();
++	return 0;
++}
++
++int main(int argc, char **argv)
++{
++	const char *name = argc > 1 ? argv[1] : "";
++
++	if (!strcmp(name, "breakout")) return run3d(&game_breakout);
++	if (!strcmp(name, "tron")) return run3d(&game_tron);
++	if (!strcmp(name, "maze")) return run3d(&game_maze);
++	if (!strcmp(name, "2048")) return run2d(&game_2048);
++	if (!strcmp(name, "sokoban")) return run2d(&game_sokoban);
++	if (!strcmp(name, "sudoku")) return run2d(&game_sudoku);
++	if (!strcmp(name, "life")) return run2d(&game_life);
++	if (!strcmp(name, "paint")) return run2d(&game_paint);
++	fprintf(stderr, "usage: dsarcade breakout|tron|maze|2048|sokoban|sudoku|life|paint\n");
++	return 1;
++}
+diff --git a/user/microwin/src/demos/nanox/dsdesk.c b/user/microwin/src/demos/nanox/dsdesk.c
+index a242b00f4..1dad40b71 100644
+--- a/user/microwin/src/demos/nanox/dsdesk.c
++++ b/user/microwin/src/demos/nanox/dsdesk.c
+@@ -31,6 +31,7 @@ struct item {
+ static const struct item accessories[] = {
+ 	{ "Notes", "/boot/dsnotes" },
+ 	{ "Clock", "/usr/bin/nxclock" },
++	{ "Paint", "/boot/dsarcade", "paint" },
+ };
+ static const struct item multimedia[] = {
+ 	{ "Camera", "/boot/dscam" },
+@@ -41,9 +42,18 @@ static const struct item multimedia[] = {
+ };
+ static const struct item games[] = {
+ 	{ "3D Dodge", "/boot/dsgame" },
++	{ "3D Breakout", "/boot/dsarcade", "breakout" },
++	{ "Tron", "/boot/dsarcade", "tron" },
++	{ "3D Maze", "/boot/dsarcade", "maze" },
+ 	{ "Minesweeper", "/boot/landmine" },
+ 	{ "Tetris", "/boot/ntetris" },
+ };
++static const struct item puzzles[] = {
++	{ "2048", "/boot/dsarcade", "2048" },
++	{ "Sokoban", "/boot/dsarcade", "sokoban" },
++	{ "Sudoku", "/boot/dsarcade", "sudoku" },
++	{ "Life", "/boot/dsarcade", "life" },
++};
+ static const struct item system_items[] = {
+ 	{ "Settings", "/boot/dssettings" },
+ 	{ "Bench", "/boot/dsbench" },
+@@ -56,6 +66,7 @@ static const struct item root_items[] = {
+ 	{ "Accessories", NULL, NULL, accessories, COUNT(accessories), 1 },
+ 	{ "Multimedia", NULL, NULL, multimedia, COUNT(multimedia) },
+ 	{ "Games", NULL, NULL, games, COUNT(games) },
++	{ "Puzzles", NULL, NULL, puzzles, COUNT(puzzles) },
+ 	{ "System", NULL, NULL, system_items, COUNT(system_items) },
+ 	{ "Exit desktop", "/boot/desktop", "stop", NULL, 0, 1 },
+ 	{ "Shut down", "/boot/shutdown" },
+diff --git a/vendors/Nintendo/DSI/Makefile b/vendors/Nintendo/DSI/Makefile
+index e3d1c3a73..99c1e57c3 100644
+--- a/vendors/Nintendo/DSI/Makefile
++++ b/vendors/Nintendo/DSI/Makefile
+@@ -170,6 +170,7 @@ finishrom:
+ 	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/dsmemo $(ROMFSDIR)/boot/dsmemo
+ 	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/dssettings $(ROMFSDIR)/boot/dssettings
+ 	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/dsgame $(ROMFSDIR)/boot/dsgame
++	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/dsarcade $(ROMFSDIR)/boot/dsarcade
+ 	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/dscam $(ROMFSDIR)/boot/dscam
+ 	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/landmine $(ROMFSDIR)/boot/landmine
+ 	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/ntetris $(ROMFSDIR)/boot/ntetris
+-- 
+2.56.0
+

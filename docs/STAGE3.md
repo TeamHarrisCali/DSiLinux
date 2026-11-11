@@ -444,6 +444,25 @@ ROM size (patch 0073): the first w97a build did not package: `ld: section .dsi [
 
 w97b (patch 0074): a small 3D game, "3D Dodge" (`dsgame`, Start > Games), made on the existing library (dsgx.h, dsgx_win.h, the cube mesh of dsgx_demo.h). Design choices from what the platform gives: (1) input: the tty keyboard path delivers key presses (and their auto repeat) but no key releases, so held keys cannot be tracked: the ship moves one cell of a 3x3 grid per press (animated, about 60 ms) instead of with a held key; the d-pad, the touch arrow buttons and w a s d all work, and a tap in the window moves towards the tapped third/half; (2) fairness: every wall of blocks leaves one free cell, and that free cell is at most one cell (also diagonally) from the previous wall's, the other eight cells are blocked with a probability of 50%, so it can always be dodged by following the path; the gap between walls goes from 1.15 s down to 0.55 s and the speed from 16 to 40 units/s (+1 per wall passed); (3) speed of the engine: all moving parts are boxes (the recorded cube mesh, a push/translate/scale/draw/pop each, about 80 boxes a frame: tunnel strips on the floor and walls, the blocks, the ship), one hit ends the game, the score is the number of walls passed and the best score is kept in /home/dodge.best. ROM: 3.92 MB, about 270 KB below the 4 MiB limit.
 
+## 3b-arcade. More games: `dsarcade` (w97c)
+
+One program, `/boot/dsarcade <game>`, holds eight games (one binary shares the Nano-X and 3D code, about 105 KB in the ROM). The rules are plain C in `arc_logic.h`; `arc_test.c` checks them on a PC (`cc -O1 -o arc_test arc_test.c && ./arc_test`): 2048 merging and game over, every built-in Sokoban level solved by a search, Sudoku grids valid, mazes connected with exactly cells-1 passages, Tron and Breakout played by simple bots. Drawing and input are in `dsarcade.c`.
+
+| Start menu | Game | Controls |
+|---|---|---|
+| Games > 3D Breakout | 3D window; 4 rows of bricks, 3 lives, speeds up each level | pointer over the window or left/right moves the paddle, Enter / tap launches; best in `/home/breakout.best` |
+| Games > Tron | light cycles on a 22x22 grid against the computer, chase camera | left / right turn (queued, one turn per step) |
+| Games > 3D Maze | first-person 7x7 maze in the 3D engine, minimap (m toggles it), spinning green cube = exit | up/down walk, left/right turn (a key press keeps moving for 0.35 s, because the console sends no key releases) |
+| Puzzles > 2048 | swipe, tap a side of the board, or arrows; best in `/home/arcade2048.best` | n = new game |
+| Puzzles > Sokoban | 6 levels, undo, restart; progress in `/home/sokoban.lvl` | arrows, tap towards a square, Space = undo, X / Y = previous / next level |
+| Puzzles > Sudoku | new random puzzle (43 givens); clashes show in red | tap a cell then a digit button, or digits / arrows; X / Y change the digit |
+| Puzzles > Life | 40x30 torus | tap or drag draws, Enter = run / pause, s = step, r = random, c = clear, X / Y = speed |
+| Accessories > Paint | 80x60 canvas drawn at 2x, 12 colours, brush 1..3, flood fill | drag to draw; the picture is kept in `/home/paint.dat` |
+
+The first-person maze uses the DS 3D chip (about 100 boxes a frame) instead of a software raycaster: it is simpler and looks better. FOV is wide (znear 0.7) so the walls need a 0.75 collision radius in 3 unit cells.
+
+Verified: the game rules on a PC; the program builds and the ROM is 4.03 MB (limit 4 MiB). **Not yet run on the console**: drawing, input, frame rate, whether pointer motion events arrive while the touch screen is held (Paint and Life dragging depend on that).
+
 ## 3c. Faster ARM9 clock: nothing to do (measured on the console)
 `CONFIG_NDS_DSI_FASTCPU` writes `SCFG_CLK` (0x04004004) bit 0 early in boot. On the console the t-fast ROM printed `NDS: ARM9 SCFG_CLK 0001 -> 0001: 134 MHz requested and accepted`: the register already held `0001` before the write, so the loader had
 already put the ARM9 at 134 MHz and the option changes nothing. All DSi-mode boots show `66.76 BogoMIPS (lpj=333824)`: with the ARM946E's delay loop taking about 4 cycles per iteration (sub plus a taken branch), 33.4 M iterations per second means roughly 134 MHz.

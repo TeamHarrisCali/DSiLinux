@@ -5,7 +5,7 @@ its internal SD slot and its touchscreen, launched from TWiLight Menu++ through 
 
 This repository holds the notes, build scripts and patches. The source tree is a separate clone of
 [ipwndev/DSLinux](https://github.com/ipwndev/DSLinux) (GPL-2.0, a mirror of the official SVN) that you create in `work/dslinux`;
-the changes are in `patches/` (74 small patches, in order) and explained in `docs/`.
+the changes are in `patches/` (75 small patches, in order) and explained in `docs/`.
 
 ## What works, and how it was tested
 
@@ -33,6 +33,7 @@ the changes are in `patches/` (74 small patches, in order) and explained in `doc
 | Camera (preview about 8.6 fps, two cameras, photos as BMP), photo viewer (`v` key in the camera app, or Start > Multimedia > Photos), voice memos (record/play with scope) | `w96n` (user report + card log): camera steady at about 8.6 frames a second (period 117 ms, min 90, max 140: the sensor mode's own rate), camera switching and the photo viewer work; voice memos record and play back; some whine remains in recordings/playback (parked by the user) | Mic: two 16 bit samples per FIFO word, 32728 samples/s, filtered to 16364 Hz in the app; microphone overruns still about 10 a second (small clicks) |
 | Settings app (Start > System > Settings): brightness, pointer speed, desktop colour / pattern / wallpaper, clock, info; battery indicator in the taskbar | `w97a` (user report): Settings works |  Saved in `/home/settings.conf` (wallpapers: 256x192 24 bit BMP files in `/home/wallpapers`, or any photo) and re-applied at desktop start |
 | 3D game "3D Dodge" (Start > Games) | `w97b`: compiled, **not yet run** | Hardware 3D in a desktop window: a 3x3 tunnel, walls of blocks with a free path, d-pad / touch arrows to hop between cells |
+| Arcade (`dsarcade`): 3D Breakout, Tron, 3D Maze, 2048, Sokoban, Sudoku, Life, Paint | `w97c`: rules tested on a PC, program compiled, **not yet run on the console** | Start > Games / Puzzles / Accessories; see docs/STAGE3.md "More games" |
 | Boot self-test (RAM, SD, confinement) printed at the end of boot | console | `/boot/selftest` |
 | ARM9 at 134 MHz | console (nothing to change) | The `u` build reads the clock register (read-only) and the self-test shows `CLK : PASS - ARM9 at 134 MHz (the fastest)`; the loader sets it. The optional `CONFIG_NDS_DSI_FASTCPU` writes the same bit and changes nothing |
 
