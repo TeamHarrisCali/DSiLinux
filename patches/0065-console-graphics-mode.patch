@@ -1,0 +1,57 @@
+From 98d9ca4502b0c5d65c570c9a00996b7b249fb877 Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 08:35:26 -0600
+Subject: [PATCH] Nano-X screen driver: put the text console into graphics mode
+ while the desktop runs (HAVETEXTMODE on for the DS driver, failure not
+ fatal), so the console's blinking cursor and any console text stay off the
+ desktop (a tiny flickering box at the bottom left of the top screen)
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ user/microwin/src/drivers/scr_fb.c | 19 ++++++++++++++-----
+ 1 file changed, 14 insertions(+), 5 deletions(-)
+
+diff --git a/user/microwin/src/drivers/scr_fb.c b/user/microwin/src/drivers/scr_fb.c
+index 07ecc2e0e..796a63493 100644
+--- a/user/microwin/src/drivers/scr_fb.c
++++ b/user/microwin/src/drivers/scr_fb.c
+@@ -31,7 +31,11 @@
+ #include "fb.h"
+ 
+ /* for Osprey and Embedded Planet boards, set HAVETEXTMODE=0*/
++#if NDSDRIVER
++#define HAVETEXTMODE	1	/* the text console shares the screen: put it into graphics mode so its cursor and any text stay away */
++#else
+ #define HAVETEXTMODE	0	/* =0 for graphics only systems*/
++#endif
+ #ifdef ARCH_LINUX_SPARC
+ #endif
+ 
+@@ -597,14 +601,19 @@ fb_open(PSD psd)
+ 	tty = open ("/dev/tty0", O_RDWR);
+ 	if(tty < 0) {
+ 		EPRINTF("Error can't open /dev/tty0: %m\n");
++#if !NDSDRIVER
+ 		goto fail;
+-	}
+-	if(ioctl (tty, KDSETMODE, KD_GRAPHICS) == -1) {
+-		EPRINTF("Error setting graphics mode: %m\n");
++#endif
++	} else {
++		if(ioctl (tty, KDSETMODE, KD_GRAPHICS) == -1) {
++			EPRINTF("Error setting graphics mode: %m\n");
++#if !NDSDRIVER
++			close(tty);
++			goto fail;
++#endif
++		}
+ 		close(tty);
+-		goto fail;
+ 	}
+-	close(tty);
+ #endif
+ 	/* mmap framebuffer into this address space*/
+ #ifndef __uClinux__
+-- 
+2.56.0
+
