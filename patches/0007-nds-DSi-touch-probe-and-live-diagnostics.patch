@@ -1,0 +1,238 @@
+From 0f4488b0273abe19d8ba8dc032c59d3f89984b2b Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <noreply@example.invalid>
+Date: Tue, 10 Nov 2026 20:32:52 -0600
+Subject: [PATCH] nds: DSi touch reader probes the codec directly (page-select
+ readback) and reports live counters
+
+No SCFG gate any more. The ARM7 collects pen/read counters; the ARM9 prints a 'dsitouch:' line every 2 s while they change.
+---
+ linux-2.6.x/arch/arm/mach-nds/arm7/dsitouch.c | 65 +++++++++++++++++--
+ linux-2.6.x/arch/arm/mach-nds/arm7/dsitouch.h |  1 +
+ linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c    |  6 ++
+ linux-2.6.x/drivers/block/dldi_c.c            | 26 ++++++++
+ linux-2.6.x/include/asm-arm/arch-nds/dsisd.h  |  5 +-
+ 5 files changed, 96 insertions(+), 7 deletions(-)
+
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/dsitouch.c b/linux-2.6.x/arch/arm/mach-nds/arm7/dsitouch.c
+index 5bca74233..8470808da 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/arm7/dsitouch.c
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/dsitouch.c
+@@ -123,11 +123,28 @@ static void cdc_read_array(u8 bank, u8 reg, u8 *out, u8 size)
+ 	*out++ = xchg(0);
+ }
+ 
++/* diagnostics, fetched by the ARM9 (dsitouch_diag) */
++static u32 st_probe, st_scfg, st_status, st_penreg, st_adc1, st_adc2;
++static u32 st_pen_calls, st_pen_true, st_rd_ok, st_rd_bad, st_rd_noisy;
++static u32 st_last_x, st_last_y, st_last_raw;
++
+ int dsitouch_init(void)
+ {
+-	/* DSi mode = the ARM7 may access SCFG_EXT (bit 31). In DS mode it reads 0. */
+-	if (!(SCFG_EXT7 & 0x80000000u))
++	u8 back;
++
++	st_scfg = SCFG_EXT7;
++
++	/* Is the codec in register mode? Select page 3, then read register 0 (the page
++	 * register) back: a codec in register mode answers 3. A touch chip in DS mode
++	 * ignores these bytes (they have no start bit) and answers 0. */
++	cur_bank = 0x63;
++	bank_switch(CDC_TOUCHCNT);
++	back = tsc_read(0x00);
++	st_probe = back;
++	if (back != CDC_TOUCHCNT) {
++		cur_bank = 0x63;
+ 		return 0;
++	}
+ 
+ 	/* cdcTouchInit() from libnds */
+ 	cdc_write_mask(CDC_TOUCHCNT, R_PEN_DOWN, 0x80, 0);
+@@ -143,6 +160,11 @@ int dsitouch_init(void)
+ 	cdc_write_mask(CDC_TOUCHCNT, R_DEBOUNCE_UP, 7, 0);
+ 	cdc_write_mask(CDC_TOUCHCNT, R_PEN_DOWN, 0x80, 0x80);
+ 
++	st_adc1 = cdc_read(CDC_TOUCHCNT, R_SAR_ADC_CTRL1);
++	st_adc2 = cdc_read(CDC_TOUCHCNT, R_SAR_ADC_CTRL2);
++	st_status = cdc_read(CDC_TOUCHCNT, R_STATUS);
++	st_penreg = cdc_read(CDC_TOUCHCNT, R_PEN_DOWN);
++
+ 	active = 1;
+ 	return 1;
+ }
+@@ -154,8 +176,16 @@ int dsitouch_active(void)
+ 
+ int dsitouch_pen_down(void)
+ {
+-	return (cdc_read(CDC_TOUCHCNT, R_STATUS) & 0xC0) != 0x40
+-	    && !(cdc_read(CDC_TOUCHCNT, R_PEN_DOWN) & 0x02);
++	u8 status = cdc_read(CDC_TOUCHCNT, R_STATUS);
++	u8 pen = cdc_read(CDC_TOUCHCNT, R_PEN_DOWN);
++	int down = (status & 0xC0) != 0x40 && !(pen & 0x02);
++
++	st_pen_calls++;
++	st_status = status;
++	st_penreg = pen;
++	if (down)
++		st_pen_true++;
++	return down;
+ }
+ 
+ /* sort five values and average the middle three (drops one low and one high outlier) */
+@@ -182,10 +212,13 @@ int dsitouch_read_xy(s16 *rawx, s16 *rawy)
+ 	int i, nx, ny;
+ 
+ 	cdc_read_array(CDC_TOUCHDATA, 0x01, buf, 40);
++	st_last_raw = (buf[0] << 24) | (buf[1] << 16) | (buf[2] << 8) | buf[3];
+ 	/* 20 big-endian halfwords: 5 X, 5 Y, 5 Z1, 5 Z2; the top 4 bits must be 0 */
+ 	for (i = 0; i < 10; i++) {
+-		if ((buf[i * 2] & 0xF0))
++		if ((buf[i * 2] & 0xF0)) {
++			st_rd_bad++;
+ 			return 0;
++		}
+ 	}
+ 	for (i = 0; i < 5; i++) {
+ 		xs[i] = (buf[i * 2] << 8) | buf[i * 2 + 1];
+@@ -193,7 +226,27 @@ int dsitouch_read_xy(s16 *rawx, s16 *rawy)
+ 	}
+ 	*rawx = (s16)filter5(xs, &nx);
+ 	*rawy = (s16)filter5(ys, &ny);
+-	if (*rawx == 0 || nx > 60 || ny > 60)
++	st_last_x = (u32)*rawx;
++	st_last_y = (u32)*rawy;
++	if (*rawx == 0 || nx > 60 || ny > 60) {
++		st_rd_noisy++;
+ 		return 0;
++	}
++	st_rd_ok++;
+ 	return 1;
+ }
++
++/* out[0] active|probe<<8|status<<16|penreg<<24  out[1] SCFG_EXT7  out[2] adc1|adc2<<8
++ * out[3] pen calls  out[4] pen-down count  out[5] reads ok | bad(top bits)<<16
++ * out[6] noisy reads out[7] last raw X | Y<<16 ; out2 is the first 4 data bytes */
++void dsitouch_diag(u32 *out)
++{
++	out[0] = active | (st_probe << 8) | (st_status << 16) | (st_penreg << 24);
++	out[1] = st_scfg;
++	out[2] = st_adc1 | (st_adc2 << 8) | (st_last_raw << 16);
++	out[3] = st_pen_calls;
++	out[4] = st_pen_true;
++	out[5] = (st_rd_ok & 0xFFFF) | (st_rd_bad << 16);
++	out[6] = st_rd_noisy;
++	out[7] = (st_last_x & 0xFFFF) | (st_last_y << 16);
++}
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/dsitouch.h b/linux-2.6.x/arch/arm/mach-nds/arm7/dsitouch.h
+index 2a8cc47ce..50fce78d5 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/arm7/dsitouch.h
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/dsitouch.h
+@@ -4,6 +4,7 @@
+ /* Returns 1 and enables the DSi-mode (codec) touch reader if the ARM7 is in DSi mode, else 0. */
+ int dsitouch_init(void);
+ int dsitouch_active(void);
++void dsitouch_diag(unsigned int *out);
+ /* Pen currently on the panel? (DSi mode only) */
+ int dsitouch_pen_down(void);
+ /* Raw 12 bit position like the DS path; 1 = valid sample. (DSi mode only) */
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c b/linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c
+index 18d2302af..4f683144c 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c
+@@ -37,6 +37,7 @@
+ #include "asm/arch/dsisd.h"
+ 
+ #include "sdmmc.h"
++#include "dsitouch.h"
+ 
+ typedef volatile u16 vu16;
+ typedef volatile u32 vu32;
+@@ -531,6 +532,11 @@ void nds_sd_request(struct nds_sd_block *b)
+ 		}
+ 		return;
+ 
++	case NDS_SD_CMD_TOUCHDIAG:
++		dsitouch_diag(b->touch);
++		b->result = NDS_SD_OK;
++		return;
++
+ 	default:
+ 		b->result = NDS_SD_ERR_PARAM;
+ 	}
+diff --git a/linux-2.6.x/drivers/block/dldi_c.c b/linux-2.6.x/drivers/block/dldi_c.c
+index 2d53af4f9..e5f718caa 100644
+--- a/linux-2.6.x/drivers/block/dldi_c.c
++++ b/linux-2.6.x/drivers/block/dldi_c.c
+@@ -144,6 +144,30 @@ static int sd_request(unsigned int cmd, unsigned int sector, unsigned int count)
+ 	return (int)sd_block.result;
+ }
+ 
++/* Print the ARM7's DSi touch counters every 2 s while they change (no userland tool needed). */
++static struct work_struct tdiag_work;
++static u32 tdiag_last[3];
++static int tdiag_first = 1;
++
++static void tdiag_fn(void *unused)
++{
++	if (sd_request(NDS_SD_CMD_TOUCHDIAG, 0, 0) == NDS_SD_OK) {
++		u32 *t = sd_block.touch;
++
++		if (tdiag_first || t[4] != tdiag_last[0] || t[5] != tdiag_last[1] ||
++		    t[6] != tdiag_last[2]) {
++			printk(KERN_INFO "dsitouch: a/p/st/pn %08x scfg %08x adc %08x calls %u "
++			       "pen %u rd %08x noisy %u xy %08x\n", t[0], t[1], t[2], t[3],
++			       t[4], t[5], t[6], t[7]);
++			tdiag_last[0] = t[4];
++			tdiag_last[1] = t[5];
++			tdiag_last[2] = t[6];
++			tdiag_first = 0;
++		}
++	}
++	schedule_delayed_work(&tdiag_work, 2 * HZ);
++}
++
+ static int dsisd_start(void)
+ {
+ 	int ret;
+@@ -151,6 +175,8 @@ static int dsisd_start(void)
+ 	register_fifocb(&sd_cb);
+ 	nds_fifo_send(FIFO_FIRMWARE_CMD(FIFO_FIRMWARE_CMD_SD_ADDRESS,
+ 					(u32)&sd_block));
++	INIT_WORK(&tdiag_work, tdiag_fn, NULL);
++	schedule_delayed_work(&tdiag_work, 3 * HZ);
+ 	ret = sd_request(NDS_SD_CMD_INIT, 0, 0);
+ 	printk(KERN_INFO "dsisd: init result %d, SCFG_EXT %08x, TMIO rev %04x, "
+ 	       "info %08x, sectors %u\n", ret, sd_block.info[0],
+diff --git a/linux-2.6.x/include/asm-arm/arch-nds/dsisd.h b/linux-2.6.x/include/asm-arm/arch-nds/dsisd.h
+index 0577861dc..d0b9cbe68 100644
+--- a/linux-2.6.x/include/asm-arm/arch-nds/dsisd.h
++++ b/linux-2.6.x/include/asm-arm/arch-nds/dsisd.h
+@@ -7,7 +7,7 @@
+  * flushes its data cache and sends FIFO_FIRMWARE_CMD_SD_REQUEST; the ARM7
+  * answers with the same command after it has written the result.
+  *
+- * The block is 32 byte aligned and its header is 64 bytes, a multiple of 32, so that the ARM9
++ * The block is 32 byte aligned and its header is 96 bytes, a multiple of 32, so that the ARM9
+  * can flush/invalidate it without touching neighbouring data.
+  */
+ #ifndef __ASM_ARCH_DSISD_H
+@@ -19,6 +19,7 @@
+ #define NDS_SD_CMD_INIT		0
+ #define NDS_SD_CMD_READ		1
+ #define NDS_SD_CMD_WRITE	2
++#define NDS_SD_CMD_TOUCHDIAG	3	/* not SD: fetch the DSi touch reader's counters into touch[] */
+ 
+ /* result codes, 0 = success */
+ #define NDS_SD_OK		0
+@@ -45,6 +46,8 @@ struct nds_sd_block {
+ 	 * [5] TMIO status register right now [6] last response word
+ 	 * [7] failing command index (low 8 bits) / number of commands sent */
+ 	unsigned int diag[8];
++	/* NDS_SD_CMD_TOUCHDIAG, see dsitouch_diag() in arm7/dsitouch.c */
++	unsigned int touch[8];
+ 	unsigned char data[NDS_SD_MAX_SECTORS * NDS_SD_SECTOR_SIZE];
+ } __attribute__((aligned(32)));
+ 
+-- 
+2.56.0
+

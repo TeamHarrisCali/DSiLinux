@@ -118,6 +118,16 @@ through the codec's data buffer, filtered (sort, average the middle three, rejec
 - Status: builds clean; **not run anywhere**. In melonDS the codec is probably not emulated at all, so the console is the only real test.
 - Risks: the pen-down test and the register sequence are copied from libnds, not verified on this console. Calibration is the existing one. Sound uses the same chip and is untested.
 
+## DSi touch still dead (user: d ROM, DSi mode): diagnostics build "e"
+No data on why. Possible causes: my `SCFG_EXT` bit-31 gate kept the reader off; the codec register sequence is wrong for this console; the pen/data reads fail.
+"e" ROMs (`out/dsi-mode/dslinux-dsimode-e-uc3.nds`, `-e-uc2.nds`):
+- No SCFG gate: the ARM7 selects codec page 3 and reads the page register back; 3 means the chip is in register mode and the codec reader is enabled.
+- Counters in the ARM7 (pen polls, pen-down count, valid/invalid/noisy reads, last raw X/Y, key register values) fetched by the ARM9 with a new request command and printed as
+  `dsitouch: a/p/st/pn <active|probe|status|penreg> scfg <SCFG_EXT> adc <adc1|adc2|first raw bytes> calls <n> pen <n> rd <ok|bad> noisy <n> xy <x|y>` every 2 s **while the counters change**.
+- Reading it: `a/p/st/pn` low byte = active (1 = codec reader on); next byte = probe readback (03 expected). `calls` rising = the ARM7 loop runs. `pen` rising on touch = pen detect works.
+  `rd` low half = valid reads, high half = invalid (garbage) reads; `xy` = last raw position.
+Builds clean; not run anywhere.
+
 ## 3c. Faster ARM9 clock, 3d. Wi-Fi/cameras/DSP
 Not started. 3c is small but needs the SD result first; 3d unchanged from the feasibility finding.
 
