@@ -267,6 +267,14 @@ Tested on the PC only: the ARM7's parser code was compiled with a host compiler 
 (markers checked), the guard accepts only those sectors (rejects the neighbours, the MBR and the boot sector), and with the file missing it reports "not found" at the file step.
 **Not tested on the console**: the real write command (CMD24/25), the character device, and fragmented files (up to 32 extents are supported). Needs the SD card's write-protect slider open.
 
+## SD LOG FILE WRITE VERIFIED ON THE CONSOLE ("r" build, user's card)
+First attempt: `dsisd: no log file ... result 7 step 4` (file not yet on the card): the guard refused everything and nothing was written.
+After the user put `DSILOG.TXT` into `sd:/linux/`: `dsisd: log file sd:/linux/DSILOG.TXT: 2048 sectors in 1 extents, first at 5274752`, and at the end of boot `/boot/savelog` wrote the log through `/dev/dsilog`.
+Read back on the PC: the file is still exactly 1,048,576 bytes; 10.5 KiB of text (dmesg, `rc.common.log`, self-test, `ramcopy.log`) ending in `--- end ---`, all zeros after it; no I/O errors and no `dsisd:` failures in it.
+So the ARM7's FAT32 parser, the sector guard, the real write command (CMD24/25), `/dev/dsilog` and `savelog` all work on a real DSi XL. (Checking the rest of the card for unwanted changes was not done beyond the file itself.)
+Noise seen in that log, fixed in "s": `cp -a` of a folder always fails here ("not a directory") so tar did the copy, and tar printed a "time stamp ... in the future" warning per file (the console's clock is years behind the PC's).
+"s" (`out/dsi-mode/dslinux-dsimode-s-uc3.nds`, `-uc2`) uses `tar -xmf` only (no restored dates, no failing cp). Built; not run. The "r" ROMs are kept in `old/r-log-file-works/` as the known-good build.
+
 ## 3c. Faster ARM9 clock, 3d. Wi-Fi/cameras/DSP
 Not started. 3c is small but needs the SD result first; 3d unchanged from the feasibility finding.
 

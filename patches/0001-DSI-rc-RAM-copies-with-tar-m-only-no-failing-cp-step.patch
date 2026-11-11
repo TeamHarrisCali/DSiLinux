@@ -1,0 +1,41 @@
+From ec511f9ab4a2da6bb5cc2896fb90d17a510f0ae4 Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <noreply@example.invalid>
+Date: Tue, 10 Nov 2026 21:58:37 -0600
+Subject: [PATCH] DSI rc: RAM copies with tar -m only (no failing cp step, no
+ time-stamp warnings)
+
+---
+ vendors/Nintendo/DSI/rc | 15 ++++-----------
+ 1 file changed, 4 insertions(+), 11 deletions(-)
+
+diff --git a/vendors/Nintendo/DSI/rc b/vendors/Nintendo/DSI/rc
+index a5c8cea83..99c4f55bc 100644
+--- a/vendors/Nintendo/DSI/rc
++++ b/vendors/Nintendo/DSI/rc
+@@ -38,19 +38,12 @@ for d in etc var home
+ do
+ 	if [ -d /media/linux/$d ]
+ 	then
+-		# 1st try: cp -a of the folder itself to a name that does not exist yet
+-		echo "cp $d" >> $LOG
+-		/usr/bin/cp -a /media/linux/$d /tmp/$d >> $LOG 2>&1
+-		# 2nd try if that left nothing: tar through a pipe
++		# copy with tar through a pipe (cp -a of a folder fails on this system: "not a directory"); -m: do not restore the
++		# file dates (the console's clock is years behind the PC's, which made tar print a warning per file)
++		echo "tar $d" >> $LOG
+ 		if ls /media/linux/$d | grep -q .
+ 		then
+-			if ls /tmp/$d | grep -q .
+-			then
+-				echo "ok $d" >> $LOG
+-			else
+-				echo "tar $d" >> $LOG
+-				/usr/bin/tar -cf - -C /media/linux $d | /usr/bin/tar -xf - -C /tmp >> $LOG 2>&1
+-			fi
++			/usr/bin/tar -cf - -C /media/linux $d | /usr/bin/tar -xmf - -C /tmp >> $LOG 2>&1
+ 		else
+ 			/usr/bin/mkdir /tmp/$d >> $LOG 2>&1
+ 		fi
+-- 
+2.56.0
+
