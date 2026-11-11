@@ -1,0 +1,1784 @@
+From bb90ecf799348b2c538aa2a9744eb32ecbb1ff14 Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 07:18:33 -0600
+Subject: [PATCH] DSi camera test: ARM7 sensor control (bounded I2C port of
+ libnds camera init), NDSFB_CAM_CMD/FRAME on the ARM9 (camera interface +
+ NDMA), dscam live preview on the 3D layer with photos as BMP, dsgallery photo
+ viewer, Start menu entries
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ linux-2.6.x/arch/arm/mach-nds/Makefile        |   3 +-
+ linux-2.6.x/arch/arm/mach-nds/arm7/dsicam.c   | 350 ++++++++++++++
+ linux-2.6.x/arch/arm/mach-nds/arm7/dsicam.h   |   9 +
+ .../arch/arm/mach-nds/arm7/dsicam_regs.h      | 429 ++++++++++++++++++
+ linux-2.6.x/arch/arm/mach-nds/arm7/dsivol.c   |  23 +
+ linux-2.6.x/arch/arm/mach-nds/arm7/dsivol.h   |   1 +
+ linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c    |   6 +
+ linux-2.6.x/drivers/block/dldi_c.c            |  21 +
+ linux-2.6.x/drivers/video/ndsfb.c             | 173 +++++++
+ linux-2.6.x/include/asm-arm/arch-nds/dsisd.h  |   1 +
+ user/microwin/Makefile                        |   2 +
+ user/microwin/src/demos/nanox/Makefile        |  14 +-
+ user/microwin/src/demos/nanox/dsbmp.h         | 106 +++++
+ user/microwin/src/demos/nanox/dscam.c         | 207 +++++++++
+ user/microwin/src/demos/nanox/dsdesk.c        |   2 +
+ user/microwin/src/demos/nanox/dsgallery.c     | 197 ++++++++
+ vendors/Nintendo/DSI/Makefile                 |   2 +
+ 17 files changed, 1543 insertions(+), 3 deletions(-)
+ create mode 100644 linux-2.6.x/arch/arm/mach-nds/arm7/dsicam.c
+ create mode 100644 linux-2.6.x/arch/arm/mach-nds/arm7/dsicam.h
+ create mode 100644 linux-2.6.x/arch/arm/mach-nds/arm7/dsicam_regs.h
+ create mode 100644 user/microwin/src/demos/nanox/dsbmp.h
+ create mode 100644 user/microwin/src/demos/nanox/dscam.c
+ create mode 100644 user/microwin/src/demos/nanox/dsgallery.c
+
+diff --git a/linux-2.6.x/arch/arm/mach-nds/Makefile b/linux-2.6.x/arch/arm/mach-nds/Makefile
+index 1a02ac520..761dde82e 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/Makefile
++++ b/linux-2.6.x/arch/arm/mach-nds/Makefile
+@@ -26,6 +26,7 @@ extra-y += arm7/divide.o
+ extra-y += arm7/sdmmc.o
+ extra-y += arm7/dsitouch.o
+ extra-y += arm7/dsivol.o
++extra-y += arm7/dsicam.o
+ extra-y += arm7.bin
+ 
+ # this does not seem to have any effect (why?):
+@@ -37,7 +38,7 @@ $(obj)/arm7.bin: $(obj)/arm7.elf
+ 	$(OBJCOPY) -O binary $(obj)/arm7.elf $(obj)/arm7.bin
+ 	rm -f $(obj)/head.o
+ 
+-arm7obj = $(obj)/arm7/head.o $(obj)/arm7/main.o $(obj)/arm7/time.o $(obj)/arm7/spi.o $(obj)/arm7/sound.o $(obj)/arm7/microphone.o $(obj)/arm7/wifi.o $(obj)/arm7/divide.o $(obj)/arm7/sdmmc.o $(obj)/arm7/dsitouch.o $(obj)/arm7/dsivol.o
++arm7obj = $(obj)/arm7/head.o $(obj)/arm7/main.o $(obj)/arm7/time.o $(obj)/arm7/spi.o $(obj)/arm7/sound.o $(obj)/arm7/microphone.o $(obj)/arm7/wifi.o $(obj)/arm7/divide.o $(obj)/arm7/sdmmc.o $(obj)/arm7/dsitouch.o $(obj)/arm7/dsivol.o $(obj)/arm7/dsicam.o
+ 
+ $(obj)/arm7.elf: $(arm7obj) $(src)/arm7/arm7.lds
+ 	$(LD) -nostartfiles -nostdlib -o $(obj)/arm7.elf $(arm7obj) -T $(src)/arm7/arm7.lds
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/dsicam.c b/linux-2.6.x/arch/arm/mach-nds/arm7/dsicam.c
+new file mode 100644
+index 000000000..2296b2339
+--- /dev/null
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/dsicam.c
+@@ -0,0 +1,350 @@
++/*
++ * DSi camera sensors for the DSLinux ARM7: set-up and control of the two Aptina MT9V113 sensors over I2C.
++ * (The ARM9 side, the camera interface registers and the DMA, is in drivers/video/ndsfb.c.)
++ *
++ * Derived from BlocksDS libnds (source/arm7/camera.twl.c and camerai2c.twl.c, Copyright (C) 2023 Adrian "asie"
++ * Siekierka, (C) 2011 Dave Murphy (WinterMute), (C) 2023 Epicpkmn11; zlib licence). This version is altered: ported to
++ * the DSLinux ARM7 (no libnds, no FIFO helpers), every wait is bounded (a sensor that never answers cannot hang the
++ * ARM7), no BIOS delay calls, no interrupts. zlib notice: This software is provided 'as-is', without any express or
++ * implied warranty; the origin must not be misrepresented; altered source versions must be plainly marked as such;
++ * this notice may not be removed or altered.
++ */
++#define __DSLINUX_ARM7__
++
++#include "linux/config.h"
++#include "asm/types.h"
++
++#include "dsicam.h"
++#include "dsicam_regs.h"
++#include "dsivol.h"
++
++#define REG_I2CDATA	(*(volatile u8 *)0x04004500)
++#define REG_I2CCNT	(*(volatile u8 *)0x04004501)
++
++#define I2C_NONE	0x00
++#define I2C_STOP	0x01
++#define I2C_START	0x02
++#define I2C_ERROR	0x04
++#define I2C_ACK		0x10
++#define I2C_READ	0x20
++#define I2C_IRQEN	0x40
++#define I2C_ENABLE	0x80	/* writing; reading it back = busy */
++
++#define DEV_CAM0	0x7A
++#define DEV_CAM1	0x78
++
++static u32 cam_err;
++static u8 cam_active = 0xFF;
++
++static int cwait(void)
++{
++	int n = 200000;
++
++	while ((REG_I2CCNT & I2C_ENABLE) && --n)
++		;
++	if (!n)
++		cam_err |= 1;
++	return n;
++}
++
++static int cres(void)
++{
++	if (!cwait())
++		return -1;
++	return (REG_I2CCNT >> 4) & 1;
++}
++
++static int csel(u8 dev, u8 flags)
++{
++	if (!cwait())
++		return -1;
++	REG_I2CDATA = dev;
++	REG_I2CCNT = I2C_ENABLE | I2C_IRQEN | flags;
++	return cres();
++}
++
++static int creg(u8 reg, u8 flags)
++{
++	if (!cwait())
++		return -1;
++	REG_I2CDATA = reg;
++	REG_I2CCNT = I2C_ENABLE | I2C_IRQEN | flags;
++	return cres();
++}
++
++static int cdata(u8 data, u8 flags)
++{
++	REG_I2CDATA = data;
++	REG_I2CCNT = I2C_ENABLE | I2C_IRQEN | flags;
++	return cres();
++}
++
++static int cget(u8 flags)
++{
++	REG_I2CCNT = I2C_ENABLE | I2C_IRQEN | flags;
++	if (!cwait())
++		return -1;
++	return REG_I2CDATA;
++}
++
++/* 16 bit register write; 1 = done */
++static int apt_write(u8 dev, u16 reg, u16 data)
++{
++	int i;
++
++	for (i = 0; i < 8; i++) {
++		if (csel(dev, I2C_START) == 1 && creg(reg >> 8, I2C_NONE) == 1 && creg(reg & 0xFF, I2C_NONE) == 1) {
++			if (cdata(data >> 8, I2C_NONE) == 1 && cdata(data & 0xFF, I2C_STOP) == 1)
++				return 1;
++		}
++		REG_I2CCNT = I2C_ENABLE | I2C_IRQEN | I2C_ERROR | I2C_STOP;
++	}
++	return 0;
++}
++
++/* 16 bit register read; 0xFFFF = failed */
++static u16 apt_read(u8 dev, u16 reg)
++{
++	int i, hi, lo;
++
++	for (i = 0; i < 8; i++) {
++		if (csel(dev, I2C_START) == 1 && creg(reg >> 8, I2C_NONE) == 1 && creg(reg & 0xFF, I2C_STOP) == 1) {
++			if (csel(dev | 1, I2C_START) == 1) {
++				hi = cget(I2C_READ | I2C_ACK);
++				lo = cget(I2C_STOP | I2C_READ);
++				if (hi < 0 || lo < 0)
++					return 0xFFFF;
++				return (hi << 8) | lo;
++			}
++		}
++		REG_I2CCNT = I2C_ENABLE | I2C_IRQEN | I2C_ERROR | I2C_STOP;
++	}
++	return 0xFFFF;
++}
++
++#define WAIT_TRIES	1500	/* about a second at the worst */
++
++static void apt_wait_clear(u8 dev, u16 reg, u16 mask)
++{
++	int n;
++
++	for (n = 0; n < WAIT_TRIES; n++)
++		if (!(apt_read(dev, reg) & mask))
++			return;
++	cam_err |= 2;
++}
++
++static void apt_wait_set(u8 dev, u16 reg, u16 mask)
++{
++	int n;
++
++	for (n = 0; n < WAIT_TRIES; n++)
++		if ((apt_read(dev, reg) & mask) == mask)
++			return;
++	cam_err |= 2;
++}
++
++static void apt_clear_bits(u8 dev, u16 reg, u16 mask)
++{
++	apt_write(dev, reg, apt_read(dev, reg) & ~mask);
++}
++
++static void apt_set_bits(u8 dev, u16 reg, u16 mask)
++{
++	apt_write(dev, reg, apt_read(dev, reg) | mask);
++}
++
++static u16 mcu_read(u8 dev, u16 reg)
++{
++	apt_write(dev, I2CREG_APT_MCU_ADDRESS, reg);
++	return apt_read(dev, I2CREG_APT_MCU_DATA0);
++}
++
++static void mcu_write(u8 dev, u16 reg, u16 data)
++{
++	apt_write(dev, I2CREG_APT_MCU_ADDRESS, reg);
++	apt_write(dev, I2CREG_APT_MCU_DATA0, data);
++}
++
++static void mcu_wait_clear(u8 dev, u16 reg, u16 mask)
++{
++	int n;
++
++	for (n = 0; n < WAIT_TRIES; n++)
++		if (!(mcu_read(dev, reg) & mask))
++			return;
++	cam_err |= 2;
++}
++
++static void mcu_set_bits(u8 dev, u16 reg, u16 mask)
++{
++	mcu_write(dev, reg, mcu_read(dev, reg) | mask);
++}
++
++static void seq_cmd(u8 dev, u8 cmd)
++{
++	mcu_write(dev, MCUREG_APT_SEQ_CMD, cmd);
++	mcu_wait_clear(dev, MCUREG_APT_SEQ_CMD, MCUREG_APT_SEQ_CMD_MASK);
++}
++
++static void wakeup(u8 dev)
++{
++	apt_clear_bits(dev, I2CREG_APT_STANDBY_CNT, I2CREG_APT_STANDBY_ENABLE);
++	apt_wait_clear(dev, I2CREG_APT_STANDBY_CNT, I2CREG_APT_STANDBY_STATUS);
++	apt_wait_set(dev, 0x301A, 0x0004);
++}
++
++static void standby(u8 dev)
++{
++	apt_set_bits(dev, I2CREG_APT_STANDBY_CNT, I2CREG_APT_STANDBY_ENABLE);
++	apt_wait_set(dev, I2CREG_APT_STANDBY_CNT, I2CREG_APT_STANDBY_STATUS);
++	apt_wait_clear(dev, 0x301A, 0x0004);
++}
++
++static void cam_init(u8 dev)
++{
++	u16 read_mode;
++
++	/* reset */
++	apt_write(dev, I2CREG_APT_RESET_MISC_CNT, I2CREG_APT_MIPI_TX_RESET | I2CREG_APT_I2C_RESET);
++	apt_write(dev, I2CREG_APT_RESET_MISC_CNT, 0);
++
++	/* initial wakeup */
++	apt_write(dev, I2CREG_APT_STANDBY_CNT, I2CREG_APT_STANDBY_STATUS | I2CREG_APT_STANDBY_IRQ_ENABLE | (1 << 5));
++	apt_write(dev, I2CREG_APT_PAD_SLEW, I2CREG_APT_PARALLEL_OUT_SLEW_RATE(1) | I2CREG_APT_PCLK_SLEW_RATE(2));
++	apt_write(dev, I2CREG_APT_CLOCKS_CNT, I2CREG_APT_CLKIN_ENABLE | 0x40DF);
++
++	/* wait for wakeup */
++	apt_wait_clear(dev, I2CREG_APT_STANDBY_CNT, I2CREG_APT_STANDBY_STATUS);
++	apt_wait_set(dev, 0x301A, 0x0004);
++
++	mcu_write(dev, 0x02F0, 0x0000);
++	mcu_write(dev, 0x02F2, 0x0210);
++	mcu_write(dev, 0x02F4, 0x001A);
++	mcu_write(dev, 0x2145, 0x02F4);
++	mcu_write(dev, MCUREG_APT_8BIT | 0x2134, 0x01);
++
++	mcu_set_bits(dev, MCUREG_APT_SEQ_CAP_MODE, MCUREG_APT_SEQ_CAP_MODE_VIDEO_ENABLE);
++	mcu_write(dev, MCUREG_APT_MODE_A_OUTPUT_FORMAT,
++		  MCUREG_APT_MODE_OUTPUT_FORMAT_YUV | MCUREG_APT_MODE_OUTPUT_FORMAT_SWAP_LUMA_CHROMA);
++	mcu_write(dev, MCUREG_APT_MODE_B_OUTPUT_FORMAT,
++		  MCUREG_APT_MODE_OUTPUT_FORMAT_YUV | MCUREG_APT_MODE_OUTPUT_FORMAT_SWAP_LUMA_CHROMA);
++
++	/* match the PLL to the console's timings */
++	apt_write(dev, I2CREG_APT_PLL_CNT, 0x2044 | I2CREG_APT_PLL_RESET_CNTR | I2CREG_APT_PLL_BYPASS);
++	apt_write(dev, I2CREG_APT_PLL_DIVS, I2CREG_APT_PLL_M(17) | I2CREG_APT_PLL_N(1));
++	apt_write(dev, I2CREG_APT_PLL_P_DIVS, I2CREG_APT_PLL_P1(0) | I2CREG_APT_PLL_P3(0));
++	apt_write(dev, I2CREG_APT_PLL_CNT, 0x2448 | I2CREG_APT_PLL_ENABLE | I2CREG_APT_PLL_BYPASS);
++	apt_write(dev, I2CREG_APT_PLL_CNT, 0x3048 | I2CREG_APT_PLL_ENABLE | I2CREG_APT_PLL_BYPASS);
++	apt_wait_set(dev, I2CREG_APT_PLL_CNT, I2CREG_APT_PLL_LOCK);
++	apt_clear_bits(dev, I2CREG_APT_PLL_CNT, I2CREG_APT_PLL_BYPASS);
++
++	/* output sizes: mode A (preview) 256x192, mode B (capture) 640x480 */
++	mcu_write(dev, MCUREG_APT_MODE_A_OUTPUT_WIDTH, 256);
++	mcu_write(dev, MCUREG_APT_MODE_A_OUTPUT_HEIGHT, 192);
++	mcu_write(dev, MCUREG_APT_MODE_B_OUTPUT_WIDTH, 640);
++	mcu_write(dev, MCUREG_APT_MODE_B_OUTPUT_HEIGHT, 480);
++
++	/* sensors */
++	read_mode = MCUREG_APT_READ_X_ODD_INC(1) | MCUREG_APT_READ_Y_ODD_INC(1);
++	if (dev == DEV_CAM1)
++		read_mode |= MCUREG_APT_READ_X_MIRROR;
++
++	mcu_write(dev, MCUREG_APT_MODE_A_SENSOR_ROW_SPEED, 1);
++	mcu_write(dev, MCUREG_APT_MODE_A_SENSOR_FINE_CORRECTION, 26);
++	mcu_write(dev, MCUREG_APT_MODE_A_SENSOR_FINE_IT_MIN, 107);
++	mcu_write(dev, MCUREG_APT_MODE_A_SENSOR_FINE_IT_MAX_MARGIN, 107);
++	mcu_write(dev, MCUREG_APT_MODE_A_SENSOR_FRAME_LENGTH, 704);
++	mcu_write(dev, MCUREG_APT_MODE_A_SENSOR_LINE_LENGTH_PCK, 843);
++	mcu_write(dev, MCUREG_APT_AE_MIN_INDEX, 0);
++	mcu_write(dev, MCUREG_APT_AE_MAX_INDEX, 6);
++	mcu_write(dev, MCUREG_APT_MODE_B_SENSOR_ROW_SPEED, 1);
++	mcu_write(dev, MCUREG_APT_MODE_B_SENSOR_FINE_CORRECTION, 26);
++	mcu_write(dev, MCUREG_APT_MODE_B_SENSOR_FINE_IT_MIN, 107);
++	mcu_write(dev, MCUREG_APT_MODE_B_SENSOR_FINE_IT_MAX_MARGIN, 107);
++	mcu_write(dev, MCUREG_APT_MODE_B_SENSOR_FRAME_LENGTH, 704);
++	mcu_write(dev, MCUREG_APT_MODE_B_SENSOR_LINE_LENGTH_PCK, 843);
++	apt_set_bits(dev, I2CREG_APT_COLOR_PIPELINE_CNT, I2CREG_APT_PGA_PIXEL_SHADING_CORRECT_ENABLE);
++	mcu_write(dev, MCUREG_APT_8BIT | 0x2208, 0x00);
++	mcu_write(dev, MCUREG_APT_AE_TARGET_BUFFER_SPEED, 32);
++	mcu_write(dev, MCUREG_APT_AE_TARGET_BASE, 112);
++	mcu_write(dev, MCUREG_APT_MODE_A_SENSOR_READ_MODE, read_mode);
++	mcu_write(dev, MCUREG_APT_MODE_B_SENSOR_READ_MODE, read_mode);
++	if (dev == DEV_CAM0) {
++		mcu_write(dev, MCUREG_APT_AE_WINDOW_POS, MCUREG_APT_AE_WINDOW_X0(2) | MCUREG_APT_AE_WINDOW_Y0(2));
++		mcu_write(dev, MCUREG_APT_AE_WINDOW_SIZE, MCUREG_APT_AE_WINDOW_WIDTH(11) | MCUREG_APT_AE_WINDOW_HEIGHT(11));
++	} else {
++		mcu_write(dev, MCUREG_APT_AE_WINDOW_POS, MCUREG_APT_AE_WINDOW_X0(0) | MCUREG_APT_AE_WINDOW_Y0(0));
++		mcu_write(dev, MCUREG_APT_AE_WINDOW_SIZE, MCUREG_APT_AE_WINDOW_WIDTH(15) | MCUREG_APT_AE_WINDOW_HEIGHT(15));
++	}
++	apt_set_bits(dev, I2CREG_APT_CLOCKS_CNT, 1 << 5);
++	mcu_write(dev, MCUREG_APT_SEQ_CAP_MODE, 0x40 | MCUREG_APT_SEQ_CAP_MODE_VIDEO_HG_ENABLE |
++		  MCUREG_APT_SEQ_CAP_MODE_VIDEO_AWB_ENABLE | MCUREG_APT_SEQ_CAP_MODE_VIDEO_ENABLE);
++	mcu_write(dev, MCUREG_APT_SEQ_PREVIEW1_AWB, 0x01);
++	if (dev == DEV_CAM0) {
++		apt_write(dev, I2CREG_APT_APERTURE_PARAMS, I2CREG_APT_APERTURE_GAIN(1) | I2CREG_APT_APERTURE_GAIN_EXP(1));
++		mcu_write(dev, MCUREG_APT_HG_LL_AP_CORR1, 1);
++	} else {
++		apt_write(dev, I2CREG_APT_APERTURE_PARAMS, I2CREG_APT_APERTURE_GAIN(0) | I2CREG_APT_APERTURE_GAIN_EXP(2));
++		mcu_write(dev, MCUREG_APT_HG_LL_AP_CORR1, 2);
++	}
++
++	seq_cmd(dev, MCUREG_APT_SEQ_CMD_REFRESH_MODE);
++	seq_cmd(dev, MCUREG_APT_SEQ_CMD_REFRESH);
++}
++
++static void cam_activate(u8 dev)
++{
++	if (dev == 0xFF)
++		return;
++	wakeup(dev);
++	apt_set_bits(dev, I2CREG_APT_RESET_MISC_CNT, I2CREG_APT_PARALLEL_ENABLE);
++	if (dev == DEV_CAM1)
++		dsivol_pm_write(0x31, 1);		/* the camera LED */
++}
++
++static void cam_deactivate(u8 dev)
++{
++	if (dev == 0xFF)
++		return;
++	apt_clear_bits(dev, I2CREG_APT_RESET_MISC_CNT, I2CREG_APT_PARALLEL_ENABLE);
++	standby(dev);
++	if (dev == DEV_CAM1)
++		dsivol_pm_write(0x31, 0);
++}
++
++unsigned int dsicam_cmd(unsigned int sub, unsigned int arg, unsigned int *err)
++{
++	unsigned int ret = 1;
++
++	cam_err = 0;
++	switch (sub) {
++	case 0:
++		cam_init(DEV_CAM0);
++		cam_init(DEV_CAM1);
++		cam_deactivate(DEV_CAM0);
++		cam_deactivate(DEV_CAM1);
++		ret = apt_read(DEV_CAM0, I2CREG_APT_CHIP_VERSION);
++		cam_active = 0xFF;
++		break;
++	case 1:
++		cam_deactivate(cam_active);
++		cam_active = 0xFF;
++		break;
++	case 2:
++		cam_deactivate(cam_active);
++		cam_active = arg == 1 ? DEV_CAM1 : (arg == 0 ? DEV_CAM0 : 0xFF);
++		cam_activate(cam_active);
++		break;
++	case 3:
++		if (cam_active == 0xFF)
++			ret = 0;
++		else
++			seq_cmd(cam_active, arg & 0xFF);
++		break;
++	default:
++		ret = 0;
++	}
++	*err = cam_err;
++	return ret;
++}
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/dsicam.h b/linux-2.6.x/arch/arm/mach-nds/arm7/dsicam.h
+new file mode 100644
+index 000000000..391634599
+--- /dev/null
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/dsicam.h
+@@ -0,0 +1,9 @@
++#ifndef _mach_nds_arm7_dsicam_h_
++#define _mach_nds_arm7_dsicam_h_
++
++/* Camera commands from the ARM9 (NDS_SD_CMD_CAMERA): sub 0 init both sensors (returns the chip version, 0x2280 for the
++ * MT9V113), 1 deinit, 2 select camera arg (0 or 1), 3 sequencer command arg (1 preview, 2 capture).
++ * *err gets a bit mask of timeouts that happened (1 I2C bus stuck, 2 a wait for a sensor bit ran out). */
++unsigned int dsicam_cmd(unsigned int sub, unsigned int arg, unsigned int *err);
++
++#endif
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/dsicam_regs.h b/linux-2.6.x/arch/arm/mach-nds/arm7/dsicam_regs.h
+new file mode 100644
+index 000000000..317ae6bc0
+--- /dev/null
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/dsicam_regs.h
+@@ -0,0 +1,429 @@
++/* Aptina MT9V113 camera register names, from BlocksDS libnds include/nds/camera.h (Copyright (C) 2023 Adrian "asie" Siekierka, zlib licence; only the #defines, unaltered). */
++#define CAMERA_CMD_INIT             0x000
++#define CAMERA_CMD_DEINIT           0x001
++#define CAMERA_CMD_SELECT           0x002
++#define CAMERA_CMD_SEND_SEQ_CMD     0x003
++#define I2CREG_APT_CHIP_VERSION                 0x0000
++#define I2CREG_APT_PLL_DIVS                     0x0010
++#define I2CREG_APT_PLL_P_DIVS                   0x0012
++#define I2CREG_APT_PLL_CNT                      0x0014
++#define I2CREG_APT_CLOCKS_CNT                   0x0016
++#define I2CREG_APT_STANDBY_CNT                  0x0018
++#define I2CREG_APT_RESET_MISC_CNT               0x001A
++#define I2CREG_APT_MCU_BOOT_MODE                0x001C
++#define I2CREG_APT_PAD_SLEW                     0x001E
++#define I2CREG_APT_VDD_DIS_COUNTER              0x0022
++#define I2CREG_APT_GPI_STATUS                   0x0024
++#define I2CREG_APT_EN_VDD_DIS_SOFT              0x0028
++#define I2CREG_APT_MCU_ADDRESS                  0x098C
++#define I2CREG_APT_MCU_DATA0                    0x0990
++#define I2CREG_APT_MCU_DATA(n)                  (0x0990 + ((n) << 1))
++#define I2CREG_APT_Y_ADDR_START                 0x3002
++#define I2CREG_APT_X_ADDR_START                 0x3004
++#define I2CREG_APT_Y_ADDR_END                   0x3006
++#define I2CREG_APT_X_ADDR_END                   0x3008
++#define I2CREG_APT_FRAME_LENGTH_LINES           0x300A
++#define I2CREG_APT_LINE_LENGTH_PCLK             0x300C
++#define I2CREG_APT_COARSE_INTEGRATION_TIME      0x3012
++#define I2CREG_APT_FINE_INTEGRATION_TIME        0x3014
++#define I2CREG_APT_ROW_SPEED                    0x3016
++#define I2CREG_APT_PIXEL_ORDER                  0x3024
++#define I2CREG_APT_ANALOG_GAIN_CODE_GLOBAL      0x3028
++#define I2CREG_APT_ANALOG_GAIN_CODE_GREEN1      0x302A
++#define I2CREG_APT_ANALOG_GAIN_CODE_RED         0x302C
++#define I2CREG_APT_ANALOG_GAIN_CODE_BLUE        0x302E
++#define I2CREG_APT_ANALOG_GAIN_CODE_GREEN2      0x3030
++#define I2CREG_APT_DIGITAL_GAIN_GREEN1          0x3032
++#define I2CREG_APT_DIGITAL_GAIN_RED             0x3034
++#define I2CREG_APT_DIGITAL_GAIN_BLUE            0x3036
++#define I2CREG_APT_DIGITAL_GAIN_GREEN2          0x3038
++#define I2CREG_APT_READ_MODE                    0x3040
++#define I2CREG_APT_GREEN1_GAIN                  0x3056
++#define I2CREG_APT_BLUE_GAIN                    0x3058
++#define I2CREG_APT_RED_GAIN                     0x305A
++#define I2CREG_APT_GREEN2_GAIN                  0x305C
++#define I2CREG_APT_COLOR_PIPELINE_CNT           0x3210
++#define I2CREG_APT_OFIFO_CNT_STATUS             0x321C
++#define I2CREG_APT_OFIFO_CNT_STATUS2            0x321E
++#define I2CREG_APT_X_ZOOM_BOUND_START           0x3222
++#define I2CREG_APT_X_ZOOM_BOUND_END             0x3224
++#define I2CREG_APT_Y_ZOOM_BOUND_START           0x3226
++#define I2CREG_APT_Y_ZOOM_BOUND_END             0x3228
++#define I2CREG_APT_X_SCALING_WEIGHT             0x322C
++#define I2CREG_APT_Y_SCALING_WEIGHT             0x322E
++#define I2CREG_APT_APERTURE_PARAMS              0x326C
++#define I2CREG_APT_DEMOSAIC_EDGE_THRESHOLD      0x328E
++#define I2CREG_APT_TEST_PATTERN                 0x3290
++#define I2CREG_APT_COLOR_CORR_MATRIX_SCALE(n)   (0x32C0 + (n))
++#define I2CREG_APT_COLOR_CORR_MATRIX(n)         (0x32C4 + (n))
++#define I2CREG_APT_DIGITAL_GAIN1_RED            0x32D4
++#define I2CREG_APT_DIGITAL_GAIN1_GREEN1         0x32D6
++#define I2CREG_APT_DIGITAL_GAIN1_GREEN2         0x32D8
++#define I2CREG_APT_DIGITAL_GAIN1_BLUE           0x32DA
++#define I2CREG_APT_TEST_OUTPUT_FORMAT           0x3330
++#define I2CREG_APT_YUV_YCBCR_CONTROL            0x337C
++#define I2CREG_APT_Y_RGB_OFFSET                 0x337E
++#define I2CREG_APT_KERNEL_CNT                   0x33F4
++#define I2CREG_APT_MIPI_CNT                     0x3400
++#define I2CREG_APT_MIPI_STATUS                  0x3402
++#define I2CREG_APT_MIPI_CUSTOM_SHORT_PKT        0x3404
++#define I2CREG_APT_MIPI_LINE_BYTE_COUNT         0x3408
++#define I2CREG_APT_MIPI_CUSTOM_SHORT_PKT_WC     0x340C
++#define I2CREG_APT_AE_ZONE_X                    0x3580
++#define I2CREG_APT_AE_ZONE_Y                    0x3582
++#define I2CREG_APT_AE_WINDOW_SIZE_LO            0x3584
++#define I2CREG_APT_AE_WINDOW_SIZE_HI            0x3586
++#define IC2REG_APT_R_GAMMA_CURVE_KNEES(n)       (0x3604 + ((n) * 2))
++#define IC2REG_APT_G_GAMMA_CURVE_KNEES(n)       (0x3618 + ((n) * 2))
++#define IC2REG_APT_B_GAMMA_CURVE_KNEES(n)       (0x362C + ((n) * 2))
++#define I2CREG_APT_POLY_ORIGIN_X                0x3642
++#define I2CREG_APT_POLY_ORIGIN_Y                0x3644
++#define I2CREG_APT_P_COEFF_GREEN1(p, n)         (0x364E + ((n) * 2) + ((p) * 40))
++#define I2CREG_APT_P_COEFF_RED(p, n)            (0x364E + ((n) * 2) + ((p) * 40))
++#define I2CREG_APT_P_COEFF_BLUE(p, n)           (0x364E + ((n) * 2) + ((p) * 40))
++#define I2CREG_APT_P_COEFF_GREEN2(p, n)         (0x364E + ((n) * 2) + ((p) * 40))
++#define I2CREG_APT_CHIP_VERSION_MT9V113         0x2280
++#define I2CREG_APT_PLL_M(n)             (n)
++#define I2CREG_APT_PLL_N(n)             ((n) << 8)
++#define I2CREG_APT_PLL_P1(n)            (n)
++#define I2CREG_APT_PLL_P3(n)            ((n) << 8)
++#define I2CREG_APT_PLL_CLOCK_DIV(n)     ((n) << 12)
++#define I2CREG_APT_PLL_BYPASS           (1 << 0)
++#define I2CREG_APT_PLL_ENABLE           (1 << 1)
++#define I2CREG_APT_PLL_RESET_CNTR       (1 << 8)
++#define I2CREG_APT_PLL_LOCK             (1 << 15)
++#define I2CREG_APT_CLKIN_ENABLE         (1 << 9)
++#define I2CREG_APT_STANDBY_ENABLE       (1 << 0)
++#define I2CREG_APT_STANDBY_STOP         (1 << 2)
++#define I2CREG_APT_STANDBY_IRQ_ENABLE   (1 << 3)
++#define I2CREG_APT_STANDBY_STATUS       (1 << 14)
++#define I2CREG_APT_I2C_RESET            (1 << 0)
++#define I2CREG_APT_MIPI_TX_RESET        (1 << 1)
++#define I2CREG_APT_MIPI_TX_ENABLE       (1 << 3)
++#define I2CREG_APT_IP_PARALLEL_ENABLE   (1 << 4)
++#define I2CREG_APT_IP_SENSOR_FULL_RES   (1 << 6)
++#define I2CREG_APT_OE_N_ENABLE          (1 << 8)
++#define I2CREG_APT_PARALLEL_ENABLE      (1 << 9)
++#define I2CREG_APT_MCU_RESET            (1 << 0)
++#define I2CREG_APT_PARALLEL_OUT_SLEW_RATE(n)    (n)
++#define I2CREG_APT_GPIO_SLEW_RATE(n)            ((n) << 4)
++#define I2CREG_APT_PCLK_SLEW_RATE(n)            ((n) << 8)
++#define I2CREG_APT_READ_X_MIRROR                (1 << 0)
++#define I2CREG_APT_READ_Y_MIRROR                (1 << 1)
++#define I2CREG_APT_READ_Y_ODD_INC(n)            ((n) << 2)
++#define I2CREG_APT_READ_X_ODD_INC(n)            ((n) << 5)
++#define I2CREG_APT_READ_LOW_POWER               (1 << 9)
++#define I2CREG_APT_READ_XY_BIN_ENABLE           (1 << 10)
++#define I2CREG_APT_READ_X_BIN_ENABLE            (1 << 11)
++#define I2CREG_APT_READ_BIN_SUM_ENABLE          (1 << 12)
++#define I2CREG_APT_READ_Y_SUM_ENABLE            (1 << 13)
++#define I2CREG_APT_GAIN_INITIAL(n)              (n)
++#define I2CREG_APT_GAIN_ANALOG(n)               ((n) << 7)
++#define I2CREG_APT_GAIN_DIGITAL(n)              ((n) << 9)
++#define I2CREG_APT_PGA_PIXEL_SHADING_CORRECT_ENABLE     (1 << 3)
++#define I2CREG_APT_APERTURE_CORRECT_ENABLE              (1 << 4)
++#define I2CREG_APT_COLOR_CORRECT_ENABLE                 (1 << 5)
++#define I2CREG_APT_GAMMA_CORRECT_ENABLE                 (1 << 7)
++#define I2CREG_APT_SCALING_ENABLE                       (1 << 8)
++#define I2CREG_APT_APERTURE_THRESHOLD(n)        (n)
++#define I2CREG_APT_APERTURE_GAIN(n)             ((n) << 8)
++#define I2CREG_APT_APERTURE_GAIN_EXP(n)         ((n) << 11)
++#define I2CREG_APT_APERTURE_GAIN_ABSOLUTE       (1 << 14)
++#define I2CREG_APT_TEST_PATTERN_ENABLE          (1 << 5)
++#define I2CREG_APT_TEST_PATTERN_8_BIT           (0)
++#define I2CREG_APT_TEST_PATTERN_10_BIT          (1 << 6)
++#define I2CREG_APT_YUV_NORMALIZE                (1 << 0)
++#define I2CREG_APT_YUV_COEFF_CONTROL            (1 << 1)
++#define I2CREG_APT_YUV_UV_UNSIGNED              (1 << 2)
++#define I2CREG_APT_YUV_CLIP                     (1 << 3)
++#define I2CREG_APT_Y_OFFSET(n)                  ((n) << 8)
++#define I2CREG_APT_KERNEL_DC_ENABLE             (1 << 0)
++#define I2CREG_APT_KERNEL_NR_ENABLE             (1 << 3)
++#define I2CREG_APT_MIPI_RESET_ENABLE            (1 << 0)
++#define I2CREG_APT_MIPI_STANDBY_ENABLE          (1 << 1)
++#define I2CREG_APT_MIPI_CONTINUOUS_CLOCK        (1 << 2)
++#define I2CREG_APT_MIPI_FRAME_BOUNDARY_SYNC     (1 << 3)
++#define I2CREG_APT_MIPI_STANDBY_WAIT_EOF        (1 << 4)
++#define I2CREG_APT_MIPI_CHANNEL(n)              ((n) << 6)
++#define I2CREG_APT_MIPI_DATA_TYPE_YUV422_8_BIT  (0x1E << 10)
++#define I2CREG_APT_MIPI_DATA_TYPE_RGB444        (0x20 << 10)
++#define I2CREG_APT_MIPI_DATA_TYPE_RGB555        (0x21 << 10)
++#define I2CREG_APT_MIPI_DATA_TYPE_RGB565        (0x22 << 10)
++#define I2CREG_APT_MIPI_DATA_TYPE_RAW_8_BIT     (0x2A << 10)
++#define I2CREG_APT_MIPI_DATA_TYPE_RAW_10_BIT    (0x2B << 10)
++#define I2CREG_APT_MIPI_DATA_TYPE_MASK          (0x3F << 10)
++#define I2CREG_APT_MIPI_STANDBY                 (1 << 0)
++#define I2CREG_APT_MIPI_IDLE                    (1 << 4)
++#define I2CREG_APT_MIPI_READY_RX                (1 << 5)
++#define I2CREG_APT_AE_ZONE_START(n)             (n)
++#define I2CREG_APT_AE_ZONE_WIDTH(n)             ((n) << 8)
++#define MCUREG_APT_16BIT                        0x0000
++#define MCUREG_APT_8BIT                         0x8000
++#define MCUREG_APT_SFR_WATCHDOG                     (MCUREG_APT_16BIT | 0x1040)
++#define MCUREG_APT_SFR_HIGH_PREC_TIMER_LO           (MCUREG_APT_16BIT | 0x1048)
++#define MCUREG_APT_SFR_HIGH_PREC_TIMER_HI           (MCUREG_APT_16BIT | 0x104A)
++#define MCUREG_APT_SFR_VIRT_PAGETABLE_ADDR          (MCUREG_APT_16BIT | 0x1050)
++#define MCUREG_APT_SFR_GPIO_DATA                    (MCUREG_APT_16BIT | 0x1070)
++#define MCUREG_APT_SFR_GPIO_OUTPUT_SET              (MCUREG_APT_16BIT | 0x1074)
++#define MCUREG_APT_SFR_GPIO_OUTPUT_CLEAR            (MCUREG_APT_16BIT | 0x1076)
++#define MCUREG_APT_SFR_GPIO_DIR                     (MCUREG_APT_16BIT | 0x1078)
++#define MCUREG_APT_SEQ_MODE                         (MCUREG_APT_8BIT  | 0x2102)
++#define MCUREG_APT_SEQ_CMD                          (MCUREG_APT_8BIT  | 0x2103)
++#define MCUREG_APT_SEQ_STATE                        (MCUREG_APT_8BIT  | 0x2104)
++#define MCUREG_APT_SEQ_FLASH_TYPE                   (MCUREG_APT_8BIT  | 0x2105)
++#define MCUREG_APT_SEQ_AE_FAST_BUFF                 (MCUREG_APT_8BIT  | 0x2109)
++#define MCUREG_APT_SEQ_AE_FAST_STEP                 (MCUREG_APT_8BIT  | 0x210A)
++#define MCUREG_APT_SEQ_AWB_CONT_BUFF                (MCUREG_APT_8BIT  | 0x210B)
++#define MCUREG_APT_SEQ_AWB_CONT_STEP                (MCUREG_APT_8BIT  | 0x210C)
++#define MCUREG_APT_SEQ_CNT                          (MCUREG_APT_8BIT  | 0x2111)
++#define MCUREG_APT_SEQ_FLASH_TH                     (MCUREG_APT_16BIT | 0x2113)
++#define MCUREG_APT_SEQ_CAP_MODE                     (MCUREG_APT_8BIT  | 0x2115)
++#define MCUREG_APT_SEQ_CAP_FRAMES                   (MCUREG_APT_8BIT  | 0x2116)
++#define MCUREG_APT_SEQ_PREVIEW0_AE                  (MCUREG_APT_8BIT  | 0x2117)
++#define MCUREG_APT_SEQ_PREVIEW0_FD                  (MCUREG_APT_8BIT  | 0x2118)
++#define MCUREG_APT_SEQ_PREVIEW0_AWB                 (MCUREG_APT_8BIT  | 0x2119)
++#define MCUREG_APT_SEQ_PREVIEW0_HG                  (MCUREG_APT_8BIT  | 0x211A)
++#define MCUREG_APT_SEQ_PREVIEW0_FLASH               (MCUREG_APT_8BIT  | 0x211B)
++#define MCUREG_APT_SEQ_PREVIEW0_SKIPFRAME           (MCUREG_APT_8BIT  | 0x211C)
++#define MCUREG_APT_SEQ_PREVIEW1_AE                  (MCUREG_APT_8BIT  | 0x211D)
++#define MCUREG_APT_SEQ_PREVIEW1_FD                  (MCUREG_APT_8BIT  | 0x211E)
++#define MCUREG_APT_SEQ_PREVIEW1_AWB                 (MCUREG_APT_8BIT  | 0x211F)
++#define MCUREG_APT_SEQ_PREVIEW1_HG                  (MCUREG_APT_8BIT  | 0x2120)
++#define MCUREG_APT_SEQ_PREVIEW1_FLASH               (MCUREG_APT_8BIT  | 0x2121)
++#define MCUREG_APT_SEQ_PREVIEW1_SKIPFRAME           (MCUREG_APT_8BIT  | 0x2122)
++#define MCUREG_APT_SEQ_PREVIEW2_AE                  (MCUREG_APT_8BIT  | 0x2123)
++#define MCUREG_APT_SEQ_PREVIEW2_FD                  (MCUREG_APT_8BIT  | 0x2124)
++#define MCUREG_APT_SEQ_PREVIEW2_AWB                 (MCUREG_APT_8BIT  | 0x2125)
++#define MCUREG_APT_SEQ_PREVIEW2_HG                  (MCUREG_APT_8BIT  | 0x2126)
++#define MCUREG_APT_SEQ_PREVIEW2_FLASH               (MCUREG_APT_8BIT  | 0x2127)
++#define MCUREG_APT_SEQ_PREVIEW2_SKIPFRAME           (MCUREG_APT_8BIT  | 0x2128)
++#define MCUREG_APT_SEQ_PREVIEW3_AE                  (MCUREG_APT_8BIT  | 0x2129)
++#define MCUREG_APT_SEQ_PREVIEW3_FD                  (MCUREG_APT_8BIT  | 0x212A)
++#define MCUREG_APT_SEQ_PREVIEW3_AWB                 (MCUREG_APT_8BIT  | 0x212B)
++#define MCUREG_APT_SEQ_PREVIEW3_HG                  (MCUREG_APT_8BIT  | 0x212C)
++#define MCUREG_APT_SEQ_PREVIEW3_FLASH               (MCUREG_APT_8BIT  | 0x212D)
++#define MCUREG_APT_SEQ_PREVIEW3_SKIPFRAME           (MCUREG_APT_8BIT  | 0x212E)
++#define MCUREG_APT_AE_WINDOW_POS                    (MCUREG_APT_8BIT  | 0x2202)
++#define MCUREG_APT_AE_WINDOW_SIZE                   (MCUREG_APT_8BIT  | 0x2203)
++#define MCUREG_APT_AE_TARGET                        (MCUREG_APT_8BIT  | 0x2206)
++#define MCUREG_APT_AE_GATE                          (MCUREG_APT_8BIT  | 0x2207)
++#define MCUREG_APT_AE_MIN_INDEX                     (MCUREG_APT_8BIT  | 0x220B)
++#define MCUREG_APT_AE_MAX_INDEX                     (MCUREG_APT_8BIT  | 0x220C)
++#define MCUREG_APT_AE_MIN_VIRTUAL_GAIN              (MCUREG_APT_8BIT  | 0x220D)
++#define MCUREG_APT_AE_MAX_VIRTUAL_GAIN              (MCUREG_APT_8BIT  | 0x220E)
++#define MCUREG_APT_AE_MAX_DIGITAL_GAIN_AE1          (MCUREG_APT_16BIT | 0x2212)
++#define MCUREG_APT_AE_STATUS                        (MCUREG_APT_8BIT  | 0x2217)
++#define MCUREG_APT_AE_LAST_LUMA                     (MCUREG_APT_8BIT  | 0x2218)
++#define MCUREG_APT_AE_CURRENT_SHUTTER_DELAY         (MCUREG_APT_16BIT | 0x2219)
++#define MCUREG_APT_AE_CURRENT_ZONE_INTEGRATION_TIME (MCUREG_APT_8BIT  | 0x221B)
++#define MCUREG_APT_AE_CURRENT_VIRTUAL_GAIN          (MCUREG_APT_8BIT  | 0x221C)
++#define MCUREG_APT_AE_CURRENT_DIGITAL_GAIN_AE1      (MCUREG_APT_16BIT | 0x221F)
++#define MCUREG_APT_AE_R9                            (MCUREG_APT_16BIT | 0x2222)
++#define MCUREG_APT_AE_R9_STEP                       (MCUREG_APT_16BIT | 0x222D)
++#define MCUREG_APT_AE_MIN_TARGET                    (MCUREG_APT_8BIT  | 0x224A)
++#define MCUREG_APT_AE_MAX_TARGET                    (MCUREG_APT_8BIT  | 0x224B)
++#define MCUREG_APT_AE_TARGET_BUFFER_SPEED           (MCUREG_APT_8BIT  | 0x224C)
++#define MCUREG_APT_AE_TARGET_BASE                   (MCUREG_APT_8BIT  | 0x224F)
++#define MCUREG_APT_AWB_WINDOW_POS                   (MCUREG_APT_8BIT  | 0x2302)
++#define MCUREG_APT_AWB_WINDOW_SIZE                  (MCUREG_APT_8BIT  | 0x2303)
++#define MCUREG_APT_AWB_CCM_L(n)                     (MCUREG_APT_16BIT | (0x2306 + ((n) * 2)))
++#define MCUREG_APT_AWB_CCM_RL(n)                    (MCUREG_APT_16BIT | (0x231C + ((n) * 2)))
++#define MCUREG_APT_AWB_CCM(n)                       (MCUREG_APT_16BIT | (0x2332 + ((n) * 2)))
++#define MCUREG_APT_AWB_GAIN_BUFFER_SPEED            (MCUREG_APT_8BIT  | 0x2348)
++#define MCUREG_APT_AWB_JUMP_DIVISOR                 (MCUREG_APT_8BIT  | 0x2348)
++#define MCUREG_APT_AWB_GAIN_MIN_R                   (MCUREG_APT_8BIT  | 0x2348)
++#define MCUREG_APT_AWB_GAIN_MAX_R                   (MCUREG_APT_8BIT  | 0x2348)
++#define MCUREG_APT_AWB_GAIN_MIN_B                   (MCUREG_APT_8BIT  | 0x2348)
++#define MCUREG_APT_AWB_GAIN_MAX_B                   (MCUREG_APT_8BIT  | 0x2348)
++#define MCUREG_APT_AWB_GAIN_R                       (MCUREG_APT_8BIT  | 0x2348)
++#define MCUREG_APT_AWB_GAIN_G                       (MCUREG_APT_8BIT  | 0x2348)
++#define MCUREG_APT_AWB_GAIN_B                       (MCUREG_APT_8BIT  | 0x2348)
++#define MCUREG_APT_AWB_CCM_POS_MIN                  (MCUREG_APT_8BIT  | 0x2351)
++#define MCUREG_APT_AWB_CCM_POS_MAX                  (MCUREG_APT_8BIT  | 0x2352)
++#define MCUREG_APT_AWB_CCM_POS                      (MCUREG_APT_8BIT  | 0x2353)
++#define MCUREG_APT_AWB_SATURATION                   (MCUREG_APT_8BIT  | 0x2354)
++#define MCUREG_APT_AWB_CNT                          (MCUREG_APT_8BIT  | 0x2355)
++#define MCUREG_APT_AWB_GAIN_R_BUF                   (MCUREG_APT_16BIT | 0x2356)
++#define MCUREG_APT_AWB_GAIN_B_BUF                   (MCUREG_APT_16BIT | 0x2358)
++#define MCUREG_APT_AWB_STEADY_B_GAIN_OUT_MIN        (MCUREG_APT_8BIT  | 0x235D)
++#define MCUREG_APT_AWB_STEADY_B_GAIN_OUT_MAX        (MCUREG_APT_8BIT  | 0x235E)
++#define MCUREG_APT_AWB_STEADY_B_GAIN_IN_MIN         (MCUREG_APT_8BIT  | 0x235F)
++#define MCUREG_APT_AWB_STEADY_B_GAIN_IN_MAX         (MCUREG_APT_8BIT  | 0x2360)
++#define MCUREG_APT_AWB_TRUE_GRAY_MIN_0              (MCUREG_APT_8BIT  | 0x2363)
++#define MCUREG_APT_AWB_TRUE_GRAY_MAX_0              (MCUREG_APT_8BIT  | 0x2364)
++#define MCUREG_APT_AWB_X0                           (MCUREG_APT_8BIT  | 0x2365)
++#define MCUREG_APT_AWB_KR_L                         (MCUREG_APT_8BIT  | 0x2366)
++#define MCUREG_APT_AWB_KG_L                         (MCUREG_APT_8BIT  | 0x2367)
++#define MCUREG_APT_AWB_KB_L                         (MCUREG_APT_8BIT  | 0x2368)
++#define MCUREG_APT_AWB_KR_R                         (MCUREG_APT_8BIT  | 0x2369)
++#define MCUREG_APT_AWB_KG_R                         (MCUREG_APT_8BIT  | 0x236A)
++#define MCUREG_APT_AWB_KB_R                         (MCUREG_APT_8BIT  | 0x236B)
++#define MCUREG_APT_FD_WINDOW_X                      (MCUREG_APT_8BIT  | 0x2402)
++#define MCUREG_APT_FD_WINDOW_HEIGHT                 (MCUREG_APT_8BIT  | 0x2403)
++#define MCUREG_APT_FD_MODE                          (MCUREG_APT_8BIT  | 0x2404)
++#define MCUREG_APT_FD_SEARCH_F1_50HZ                (MCUREG_APT_8BIT  | 0x2408)
++#define MCUREG_APT_FD_SEARCH_F2_50HZ                (MCUREG_APT_8BIT  | 0x2409)
++#define MCUREG_APT_FD_SEARCH_F1_60HZ                (MCUREG_APT_8BIT  | 0x240A)
++#define MCUREG_APT_FD_SEARCH_F2_60HZ                (MCUREG_APT_8BIT  | 0x240B)
++#define MCUREG_APT_FD_STAT_MIN                      (MCUREG_APT_8BIT  | 0x240D)
++#define MCUREG_APT_FD_STAT_MAX                      (MCUREG_APT_8BIT  | 0x240E)
++#define MCUREG_APT_FD_MIN_AMPLITUDE                 (MCUREG_APT_8BIT  | 0x2410)
++#define MCUREG_APT_FD_R9_STEP_F60_A                 (MCUREG_APT_16BIT | 0x2411)
++#define MCUREG_APT_FD_R9_STEP_F50_A                 (MCUREG_APT_16BIT | 0x2413)
++#define MCUREG_APT_FD_R9_STEP_F60_B                 (MCUREG_APT_16BIT | 0x2415)
++#define MCUREG_APT_FD_R9_STEP_F50_B                 (MCUREG_APT_16BIT | 0x2417)
++#define MCUREG_APT_MODE_A_OUTPUT_WIDTH              (MCUREG_APT_16BIT | 0x2703)
++#define MCUREG_APT_MODE_A_OUTPUT_HEIGHT             (MCUREG_APT_16BIT | 0x2705)
++#define MCUREG_APT_MODE_B_OUTPUT_WIDTH              (MCUREG_APT_16BIT | 0x2707)
++#define MCUREG_APT_MODE_B_OUTPUT_HEIGHT             (MCUREG_APT_16BIT | 0x2709)
++#define MCUREG_APT_MODE_A_MIPI_VC                   (MCUREG_APT_8BIT  | 0x270B)
++#define MCUREG_APT_MODE_B_MIPI_VC                   (MCUREG_APT_8BIT  | 0x270C)
++#define MCUREG_APT_MODE_A_SENSOR_ROW_START          (MCUREG_APT_16BIT | 0x270D)
++#define MCUREG_APT_MODE_A_SENSOR_COL_START          (MCUREG_APT_16BIT | 0x270F)
++#define MCUREG_APT_MODE_A_SENSOR_ROW_END            (MCUREG_APT_16BIT | 0x2711)
++#define MCUREG_APT_MODE_A_SENSOR_COL_END            (MCUREG_APT_16BIT | 0x2713)
++#define MCUREG_APT_MODE_A_SENSOR_ROW_SPEED          (MCUREG_APT_16BIT | 0x2715)
++#define MCUREG_APT_MODE_A_SENSOR_READ_MODE          (MCUREG_APT_16BIT | 0x2717)
++#define MCUREG_APT_MODE_A_SENSOR_FINE_CORRECTION    (MCUREG_APT_16BIT | 0x2719)
++#define MCUREG_APT_MODE_A_SENSOR_FINE_IT_MIN        (MCUREG_APT_16BIT | 0x271B)
++#define MCUREG_APT_MODE_A_SENSOR_FINE_IT_MAX_MARGIN (MCUREG_APT_16BIT | 0x271D)
++#define MCUREG_APT_MODE_A_SENSOR_FRAME_LENGTH       (MCUREG_APT_16BIT | 0x271F)
++#define MCUREG_APT_MODE_A_SENSOR_LINE_LENGTH_PCK    (MCUREG_APT_16BIT | 0x2721)
++#define MCUREG_APT_MODE_B_SENSOR_ROW_START          (MCUREG_APT_16BIT | 0x2723)
++#define MCUREG_APT_MODE_B_SENSOR_COL_START          (MCUREG_APT_16BIT | 0x2725)
++#define MCUREG_APT_MODE_B_SENSOR_ROW_END            (MCUREG_APT_16BIT | 0x2727)
++#define MCUREG_APT_MODE_B_SENSOR_COL_END            (MCUREG_APT_16BIT | 0x2729)
++#define MCUREG_APT_MODE_B_SENSOR_ROW_SPEED          (MCUREG_APT_16BIT | 0x272B)
++#define MCUREG_APT_MODE_B_SENSOR_READ_MODE          (MCUREG_APT_16BIT | 0x272D)
++#define MCUREG_APT_MODE_B_SENSOR_FINE_CORRECTION    (MCUREG_APT_16BIT | 0x272F)
++#define MCUREG_APT_MODE_B_SENSOR_FINE_IT_MIN        (MCUREG_APT_16BIT | 0x2731)
++#define MCUREG_APT_MODE_B_SENSOR_FINE_IT_MAX_MARGIN (MCUREG_APT_16BIT | 0x2733)
++#define MCUREG_APT_MODE_B_SENSOR_FRAME_LENGTH       (MCUREG_APT_16BIT | 0x2735)
++#define MCUREG_APT_MODE_B_SENSOR_LINE_LENGTH_PCK    (MCUREG_APT_16BIT | 0x2737)
++#define MCUREG_APT_MODE_A_CROP_X_START              (MCUREG_APT_16BIT | 0x2739)
++#define MCUREG_APT_MODE_A_CROP_X_END                (MCUREG_APT_16BIT | 0x273B)
++#define MCUREG_APT_MODE_A_CROP_Y_START              (MCUREG_APT_16BIT | 0x273D)
++#define MCUREG_APT_MODE_A_CROP_Y_END                (MCUREG_APT_16BIT | 0x273F)
++#define MCUREG_APT_MODE_B_CROP_X_START              (MCUREG_APT_16BIT | 0x2747)
++#define MCUREG_APT_MODE_B_CROP_X_END                (MCUREG_APT_16BIT | 0x2749)
++#define MCUREG_APT_MODE_B_CROP_Y_START              (MCUREG_APT_16BIT | 0x274B)
++#define MCUREG_APT_MODE_B_CROP_Y_END                (MCUREG_APT_16BIT | 0x274D)
++#define MCUREG_APT_MODE_A_OUTPUT_FORMAT             (MCUREG_APT_16BIT | 0x2755)
++#define MCUREG_APT_MODE_B_OUTPUT_FORMAT             (MCUREG_APT_16BIT | 0x2757)
++#define MCUREG_APT_MODE_A_SPECIAL_EFFECTS           (MCUREG_APT_16BIT | 0x2759)
++#define MCUREG_APT_MODE_B_SPECIAL_EFFECTS           (MCUREG_APT_16BIT | 0x275B)
++#define MCUREG_APT_MODE_A_Y_RGB_OFFSET              (MCUREG_APT_8BIT  | 0x275D)
++#define MCUREG_APT_MODE_B_Y_RGB_OFFSET              (MCUREG_APT_8BIT  | 0x275E)
++#define MCUREG_APT_MODE_BOTH_BRIGHT_COLOR_KILL      (MCUREG_APT_16BIT | 0x275F)
++#define MCUREG_APT_MODE_BOTH_DARK_COLOR_KILL        (MCUREG_APT_16BIT | 0x2761)
++#define MCUREG_APT_MODE_BOTH_SPECIAL_EFFECT_SEPIA   (MCUREG_APT_16BIT | 0x2763)
++#define MCUREG_APT_MODE_BOTH_FILTER_MODE            (MCUREG_APT_8BIT  | 0x2765)
++#define MCUREG_APT_MODE_BOTH_TEST_MODE              (MCUREG_APT_8BIT  | 0x2766)
++#define MCUREG_APT_HG_MAX_DARK_LEVEL                (MCUREG_APT_8BIT  | 0x2B04)
++#define MCUREG_APT_HG_PERCENT                       (MCUREG_APT_8BIT  | 0x2B06)
++#define MCUREG_APT_HG_DARK_LEVEL                    (MCUREG_APT_8BIT  | 0x2B08)
++#define MCUREG_APT_HG_AVG_LUMA                      (MCUREG_APT_8BIT  | 0x2B17)
++#define MCUREG_APT_HG_BRIGHTNESS_METRIC             (MCUREG_APT_16BIT | 0x2B1B)
++#define MCUREG_APT_HG_LLMODE                        (MCUREG_APT_8BIT  | 0x2B1F)
++#define MCUREG_APT_HG_LL_SAT1                       (MCUREG_APT_8BIT  | 0x2B20)
++#define MCUREG_APT_HG_LL_AP_CORR1                   (MCUREG_APT_8BIT  | 0x2B22)
++#define MCUREG_APT_HG_LL_SAT2                       (MCUREG_APT_8BIT  | 0x2B24)
++#define MCUREG_APT_HG_LL_INTERP_THRESHOLD2          (MCUREG_APT_8BIT  | 0x2B25)
++#define MCUREG_APT_HG_LL_AP_CORR2                   (MCUREG_APT_8BIT  | 0x2B26)
++#define MCUREG_APT_HG_LL_AP_THRESHOLD2              (MCUREG_APT_8BIT  | 0x2B27)
++#define MCUREG_APT_HG_LL_BRIGHTNESS_START           (MCUREG_APT_16BIT | 0x2B28)
++#define MCUREG_APT_HG_LL_BRIGHTNESS_STOP            (MCUREG_APT_16BIT | 0x2B2A)
++#define MCUREG_APT_HG_NR_START_R                    (MCUREG_APT_8BIT  | 0x2B2C)
++#define MCUREG_APT_HG_NR_START_G                    (MCUREG_APT_8BIT  | 0x2B2D)
++#define MCUREG_APT_HG_NR_START_B                    (MCUREG_APT_8BIT  | 0x2B2E)
++#define MCUREG_APT_HG_NR_START_OL                   (MCUREG_APT_8BIT  | 0x2B2F)
++#define MCUREG_APT_HG_NR_STOP_R                     (MCUREG_APT_8BIT  | 0x2B30)
++#define MCUREG_APT_HG_NR_STOP_G                     (MCUREG_APT_8BIT  | 0x2B31)
++#define MCUREG_APT_HG_NR_STOP_B                     (MCUREG_APT_8BIT  | 0x2B32)
++#define MCUREG_APT_HG_NR_STOP_OL                    (MCUREG_APT_8BIT  | 0x2B33)
++#define MCUREG_APT_HG_NR_GAIN_START                 (MCUREG_APT_8BIT  | 0x2B34)
++#define MCUREG_APT_HG_NR_GAIN_STOP                  (MCUREG_APT_8BIT  | 0x2B35)
++#define MCUREG_APT_HG_CLUSTERDC_THRESHOLD           (MCUREG_APT_8BIT  | 0x2B36)
++#define MCUREG_APT_HG_GAMMA_MORPH_CNT               (MCUREG_APT_8BIT  | 0x2B37)
++#define MCUREG_APT_HG_GAMMA_MORPH_START             (MCUREG_APT_16BIT | 0x2B38)
++#define MCUREG_APT_HG_GAMMA_MORPH_STOP              (MCUREG_APT_16BIT | 0x2B3A)
++#define MCUREG_APT_HG_GAMMA_TABLE_A(n)              ((MCUREG_APT_8BIT | 0x2B3C) + (n))
++#define MCUREG_APT_HG_GAMMA_TABLE_B(n)              ((MCUREG_APT_8BIT | 0x2B4F) + (n))
++#define MCUREG_APT_HG_FTB_START_BM                  (MCUREG_APT_16BIT | 0x2B62)
++#define MCUREG_APT_HG_FTB_STOP_BM                   (MCUREG_APT_16BIT | 0x2B64)
++#define MCUREG_APT_HG_CLUSTER_DC_BM                 (MCUREG_APT_16BIT | 0x2B66)
++#define MCUREG_APT_SFR_GPIO(n)              (1 << (9 + (n)))
++#define MCUREG_APT_SEQ_MODE_AE_ENABLE       (1 << 0)
++#define MCUREG_APT_SEQ_MODE_FD_ENABLE       (1 << 1)
++#define MCUREG_APT_SEQ_MODE_AWB_ENABLE      (1 << 2)
++#define MCUREG_APT_SEQ_MODE_HG_ENABLE       (1 << 3)
++#define MCUREG_APT_SEQ_CMD_RUN              (0)
++#define MCUREG_APT_SEQ_CMD_PREVIEW          (1)
++#define MCUREG_APT_SEQ_CMD_CAPTURE          (2)
++#define MCUREG_APT_SEQ_CMD_STANDBY          (3)
++#define MCUREG_APT_SEQ_CMD_LOCK             (4)
++#define MCUREG_APT_SEQ_CMD_REFRESH          (5)
++#define MCUREG_APT_SEQ_CMD_REFRESH_MODE     (6)
++#define MCUREG_APT_SEQ_CMD_MASK             (0xFF)
++#define MCUREG_APT_SEQ_CAP_MODE_XENON_FLASH         (1 << 0)
++#define MCUREG_APT_SEQ_CAP_MODE_VIDEO_ENABLE        (1 << 1)
++#define MCUREG_APT_SEQ_CAP_MODE_FLASH_OFF           (1 << 2)
++#define MCUREG_APT_SEQ_CAP_MODE_VIDEO_AE_ENABLE     (1 << 3)
++#define MCUREG_APT_SEQ_CAP_MODE_VIDEO_AWB_ENABLE    (1 << 4)
++#define MCUREG_APT_SEQ_CAP_MODE_VIDEO_HG_ENABLE     (1 << 5)
++#define MCUREG_APT_AE_WINDOW_X0(n)          (n)
++#define MCUREG_APT_AE_WINDOW_Y0(n)          ((n) << 4)
++#define MCUREG_APT_AE_WINDOW_WIDTH(n)       (n)
++#define MCUREG_APT_AE_WINDOW_HEIGHT(n)      ((n) << 4)
++#define MCUREG_APT_AE_STATUS_AT_LIMIT       (1 << 0)
++#define MCUREG_APT_AE_STATUS_R9_CHANGED     (1 << 1)
++#define MCUREG_APT_AE_STATUS_READY          (1 << 2)
++#define MCUREG_APT_AWB_STEADY               (1 << 0)
++#define MCUREG_APT_AWB_LIMIT_REACHED        (1 << 1)
++#define MCUREG_APT_AWB_FORCE_UNIT_DGAINS    (1 << 5)
++#define MCUREG_APT_AWB_NORMALIZE_CCM_OFF    (1 << 6)
++#define MCUREG_APT_READ_X_MIRROR            (1 << 0)
++#define MCUREG_APT_READ_Y_MIRROR            (1 << 1)
++#define MCUREG_APT_READ_Y_ODD_INC(n)        ((n) << 2)
++#define MCUREG_APT_READ_X_ODD_INC(n)        ((n) << 5)
++#define MCUREG_APT_READ_LOW_POWER           (1 << 9)
++#define MCUREG_APT_READ_XY_BIN_ENABLE       (1 << 10)
++#define MCUREG_APT_READ_X_BIN_ENABLE        (1 << 11)
++#define MCUREG_APT_MODE_OUTPUT_FORMAT_SWAP_CHANNELS     (1 << 0)
++#define MCUREG_APT_MODE_OUTPUT_FORMAT_SWAP_LUMA_CHROMA  (1 << 1)
++#define MCUREG_APT_MODE_OUTPUT_FORMAT_PROGRESSIVE_BAYER (1 << 2)
++#define MCUREG_APT_MODE_OUTPUT_FORMAT_MONOCHROME        (1 << 3)
++#define MCUREG_APT_MODE_OUTPUT_FORMAT_YUV               (0)
++#define MCUREG_APT_MODE_OUTPUT_FORMAT_RGB565            (1 << 5)
++#define MCUREG_APT_MODE_OUTPUT_FORMAT_RGB555            ((1 << 5) | (1 << 6))
++#define MCUREG_APT_MODE_OUTPUT_FORMAT_RGBX4444          ((1 << 5) | (2 << 6))
++#define MCUREG_APT_MODE_OUTPUT_FORMAT_XRGB4444          ((1 << 5) | (3 << 6))
++#define MCUREG_APT_MODE_OUTPUT_FORMAT_MASK              (7 << 5)
++#define MCUREG_APT_MODE_OUTPUT_FORMAT_PROCESSED_BAYER   (1 << 8)
++#define MCUREG_APT_MODE_SPECIAL_EFFECT_NONE                 (0)
++#define MCUREG_APT_MODE_SPECIAL_EFFECT_MONO                 (1)
++#define MCUREG_APT_MODE_SPECIAL_EFFECT_SEPIA                (2)
++#define MCUREG_APT_MODE_SPECIAL_EFFECT_NEGATIVE             (3)
++#define MCUREG_APT_MODE_SPECIAL_EFFECT_SOLARIZATION         (4)
++#define MCUREG_APT_MODE_SPECIAL_EFFECT_SOLARIZATION_UV      (5)
++#define MCUREG_APT_MODE_SPECIAL_EFFECT_MASK                 (7)
++#define MCUREG_APT_MODE_SPECIAL_EFFECT_DITHER_BITWIDTH(n)   ((n) << 3)
++#define MCUREG_APT_MODE_SPECIAL_EFFECT_DITHER_LUMA          (1 << 6)
++#define MCUREG_APT_MODE_BRIGHT_COLOR_KILL_SATURATION_POINT(n)   (n)
++#define MCUREG_APT_MODE_BRIGHT_COLOR_KILL_GAIN(n)               ((n) << 3)
++#define MCUREG_APT_MODE_BRIGHT_COLOR_KILL_THRESHOLD(n)          ((n) << 6)
++#define MCUREG_APT_MODE_BRIGHT_COLOR_KILL_USE_LUMA              (1 << 9)
++#define MCUREG_APT_MODE_BRIGHT_COLOR_KILL_ENABLE                (1 << 10)
++#define MCUREG_APT_MODE_DARK_COLOR_KILL_GAIN(n)         (n)
++#define MCUREG_APT_MODE_DARK_COLOR_KILL_THRESHOLD(n)    ((n) << 3)
++#define MCUREG_APT_MODE_DARK_COLOR_KILL_USE_LUMA        (1 << 6)
++#define MCUREG_APT_MODE_DARK_COLOR_KILL_ENABLE          (1 << 7)
++#define MCUREG_APT_MODE_SPECIAL_EFFECT_SEPIA_CR(x)      (x)
++#define MCUREG_APT_MODE_SPECIAL_EFFECT_SEPIA_CB(x)      ((x) << 8)
++#define MCUREG_APT_MODE_TEST_MODE_NONE                  (0)
++#define MCUREG_APT_MODE_TEST_MODE_FLAT                  (1)
++#define MCUREG_APT_MODE_TEST_MODE_RAMP                  (2)
++#define MCUREG_APT_MODE_TEST_MODE_COLOR_BARS            (3)
++#define MCUREG_APT_MODE_TEST_MODE_VERTICAL_STRIPES      (4)
++#define MCUREG_APT_MODE_TEST_MODE_NOISE                 (5)
++#define MCUREG_APT_MODE_TEST_MODE_HORIZONTAL_STRIPES    (6)
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/dsivol.c b/linux-2.6.x/arch/arm/mach-nds/arm7/dsivol.c
+index 5be3f9097..494ed8e75 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/arm7/dsivol.c
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/dsivol.c
+@@ -133,6 +133,29 @@ static int i2c_read_reg(u8 dev, u8 reg)
+ 	return -1;
+ }
+ 
++/* one power management chip register write over I2C (libnds i2cWriteRegister sequence); 1 = done */
++int dsivol_pm_write(u8 reg, u8 value)
++{
++	int i, r;
++
++	for (i = 0; i < 4; i++) {
++		r = i2c_select_device(I2C_PM);
++		if (r < 0)
++			return 0;
++		if (r == 1 && i2c_select_register(reg) == 1) {
++			i2c_delay();
++			REG_I2CDATA = value;
++			REG_I2CCNT = I2C_ENABLE | I2C_IRQEN;
++			i2c_delay();
++			REG_I2CCNT = I2C_ENABLE | I2C_IRQEN | I2C_ERROR | I2C_STOP;
++			if (i2c_result() == 1)
++				return 1;
++		}
++		REG_I2CCNT = I2C_ENABLE | I2C_IRQEN | I2C_STOP | I2C_ERROR;
++	}
++	return 0;
++}
++
+ /* the sound engine is switched on (on) or off */
+ void dsivol_sound_power(int on)
+ {
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/dsivol.h b/linux-2.6.x/arch/arm/mach-nds/arm7/dsivol.h
+index 9722c1edf..438df9dd1 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/arm7/dsivol.h
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/dsivol.h
+@@ -3,5 +3,6 @@
+ 
+ void dsivol_sound_power(int on);
+ void dsivol_poll(void);
++int dsivol_pm_write(unsigned char reg, unsigned char value);
+ 
+ #endif
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c b/linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c
+index 09d67425c..f5fe65be2 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c
+@@ -38,6 +38,7 @@
+ 
+ #include "sdmmc.h"
+ #include "dsitouch.h"
++#include "dsicam.h"
+ 
+ typedef volatile u16 vu16;
+ typedef volatile u32 vu32;
+@@ -861,6 +862,11 @@ static void nds_sd_request_inner(struct nds_sd_block *b)
+ 		b->result = NDS_SD_OK;
+ 		return;
+ 
++	case NDS_SD_CMD_CAMERA:
++		b->info[0] = dsicam_cmd(b->count, b->sector, &b->info[1]);
++		b->result = NDS_SD_OK;
++		return;
++
+ 	case NDS_SD_CMD_POWEROFF:
+ 		dsi_poweroff_diag(b->diag);
+ 		b->result = NDS_SD_OK;
+diff --git a/linux-2.6.x/drivers/block/dldi_c.c b/linux-2.6.x/drivers/block/dldi_c.c
+index fa465b2a9..ef4016f78 100644
+--- a/linux-2.6.x/drivers/block/dldi_c.c
++++ b/linux-2.6.x/drivers/block/dldi_c.c
+@@ -189,6 +189,27 @@ void dsisd_poweroff(void)
+ }
+ #endif
+ 
++/*
++ * Camera sensor control: ask the ARM7 (arm7/dsicam.c). sub 0 init, 1 deinit, 2 select camera arg, 3 sequencer command arg.
++ * Returns the ARM7's result code (0 = ok) or -1 if it did not answer; *value and *err are its answer (chip version etc.
++ * and a mask of timeouts). Setting up the sensors takes a while, so the wait is long.
++ */
++int dsisd_camera_cmd(unsigned int sub, unsigned int arg, unsigned int *value, unsigned int *err)
++{
++	long save;
++	int ret;
++
++	down(&sd_mutex);
++	save = sd_timeout;
++	sd_timeout = 10 * HZ;
++	ret = sd_request_locked(NDS_SD_CMD_CAMERA, arg, sub);
++	sd_timeout = save;
++	*value = ret == NDS_SD_OK ? sd_block.info[0] : 0;
++	*err = ret == NDS_SD_OK ? sd_block.info[1] : 0xffffffff;
++	up(&sd_mutex);
++	return ret;
++}
++
+ /* Print the ARM7's DSi touch counters every 2 s while they change (no userland tool needed). */
+ static struct work_struct tdiag_work;
+ static u32 tdiag_last[3];
+diff --git a/linux-2.6.x/drivers/video/ndsfb.c b/linux-2.6.x/drivers/video/ndsfb.c
+index d2d64b87b..13157ea00 100644
+--- a/linux-2.6.x/drivers/video/ndsfb.c
++++ b/linux-2.6.x/drivers/video/ndsfb.c
+@@ -28,6 +28,9 @@
+ #include <asm/arch/power.h>
+ #include <asm/io.h>
+ #include <asm/arch/fifo.h>
++#include <asm/arch/dsisd.h>
++#include <asm/cacheflush.h>
++#include <asm/semaphore.h>
+ 
+ #define	VCOUNT  	 (*(volatile u16*)0x04000006)
+ #define DISPLAY_CR       (*(volatile u32*)0x04000000)
+@@ -245,6 +248,8 @@ static int ndsfb_blank(int blank_mode, struct fb_info *info);
+ #define NDSFB_GX_SETUP	0x4e05
+ #define NDSFB_GX_SUBMIT	0x4e06
+ #define NDSFB_VSYNC	0x4e07	/* wait for the next vertical blank */
++#define NDSFB_CAM_CMD	0x4e09	/* camera set-up: struct ndsfb_cam */
++#define NDSFB_CAM_FRAME	0x4e0a	/* capture one 256x192 RGB555 preview frame into a user buffer of 98304 bytes */
+ #define NDSFB_GX_TEXLOAD	0x4e08	/* copy texture data into the 3D engine's texture memory */
+ static DECLARE_WAIT_QUEUE_HEAD(ndsfb_flip_wq);
+ static volatile int ndsfb_flip_pending;
+@@ -390,6 +395,166 @@ static int ndsfb_gx_texload(struct ndsfb_gx_tex __user *arg)
+ 	return 0;
+ }
+ 
++/*
++ * DSi cameras. The ARM7 talks to the two Aptina sensors (arm7/dsicam.c, asked through dsisd_camera_cmd()); the ARM9 owns the camera
++ * interface (0x04004200) and its DMA. Derived from BlocksDS libnds source/arm9/peripherals/camera.twl.c (Copyright (C) 2023
++ * Adrian "asie" Siekierka, zlib licence), altered: Linux delays instead of BIOS calls, bounded waits.
++ *   NDSFB_CAM_CMD, struct ndsfb_cam: cmd 0 = switch the camera interface on and set the sensors up (value = chip version, 0x2280 is the
++ *   MT9V113), 1 = off, 2 = select camera arg (0 or 1, the sensor is woken up), the answer is in value/err (err: ARM7 timeout mask,
++ *   bits 8..: SCFG_EXT).
++ *   NDSFB_CAM_FRAME, user pointer: one preview frame, 256x192 pixels of RGB555 (the camera interface converts), 98304 bytes.
++ */
++struct ndsfb_cam {
++	unsigned int cmd, arg;
++	unsigned int value, err;
++};
++
++extern int dsisd_camera_cmd(unsigned int sub, unsigned int arg, unsigned int *value, unsigned int *err);
++
++#define REG_SCFG_CLK	(*(volatile u16 *)0x04004004)
++#define REG_SCFG_EXT	(*(volatile u32 *)0x04004008)
++#define SCFG_CLK_CAMIF	(1 << 2)
++#define SCFG_CLK_CAMEXT	(1 << 8)
++#define REG_CAM_MCNT	(*(volatile u16 *)0x04004200)
++#define REG_CAM_CNT	(*(volatile u16 *)0x04004202)
++#define CAM_MCNT_RESET_DISABLE	(1 << 1)
++#define CAM_MCNT_PWR_18V_IO	(1 << 5)
++#define CAM_CNT_FLUSH		(1 << 5)
++#define CAM_CNT_IRQ		(1 << 11)
++#define CAM_CNT_FORMAT_RGB	(1 << 13)
++#define CAM_CNT_ENABLE		(1 << 15)
++#define CAM_FRAME_W	256
++#define CAM_FRAME_H	192
++#define CAM_NDMA	3		/* the NDMA channel used for frames */
++#define NDMA_SRC(n)	(*(volatile u32 *)(0x04004104 + (n) * 0x1C))
++#define NDMA_DEST(n)	(*(volatile u32 *)(0x04004108 + (n) * 0x1C))
++#define NDMA_LENGTH(n)	(*(volatile u32 *)(0x0400410C + (n) * 0x1C))
++#define NDMA_BLENGTH(n)	(*(volatile u32 *)(0x04004110 + (n) * 0x1C))
++#define NDMA_BDELAY(n)	(*(volatile u32 *)(0x04004114 + (n) * 0x1C))
++#define NDMA_CR(n)	(*(volatile u32 *)(0x0400411C + (n) * 0x1C))
++
++static u16 cam_frame[CAM_FRAME_W * CAM_FRAME_H] __attribute__((aligned(32)));
++static DECLARE_MUTEX(cam_mutex);
++static int cam_preview_set;		/* the sensor has been told to preview since it was last selected */
++
++static void ndsfb_cam_off(void)
++{
++	unsigned int v, e;
++
++	if (REG_CAM_MCNT & CAM_MCNT_PWR_18V_IO)
++		dsisd_camera_cmd(1, 0, &v, &e);
++	REG_CAM_CNT &= ~0x8F00;
++	REG_CAM_CNT |= CAM_CNT_FLUSH;
++	REG_SCFG_CLK &= ~SCFG_CLK_CAMEXT;
++	udelay(200);
++	REG_CAM_MCNT = 0;
++	REG_SCFG_CLK &= ~SCFG_CLK_CAMIF;
++	udelay(200);
++	cam_preview_set = 0;
++}
++
++static int ndsfb_cam_cmd(struct ndsfb_cam __user *arg)
++{
++	struct ndsfb_cam c;
++	unsigned int v = 0, e = 0;
++	int ret = 0;
++
++	if (copy_from_user(&c, arg, sizeof(c)))
++		return -EFAULT;
++	down(&cam_mutex);
++	switch (c.cmd) {
++	case 0:
++		if (!(REG_SCFG_EXT & 1))		/* the new DMA unit has to be switched on */
++			REG_SCFG_EXT |= 1;
++		if (REG_CAM_MCNT || (REG_SCFG_CLK & (SCFG_CLK_CAMIF | SCFG_CLK_CAMEXT)))
++			ndsfb_cam_off();
++		REG_SCFG_CLK |= SCFG_CLK_CAMIF;
++		REG_CAM_MCNT = 0;
++		udelay(200);
++		REG_SCFG_CLK |= SCFG_CLK_CAMEXT;
++		udelay(200);
++		REG_CAM_MCNT |= CAM_MCNT_RESET_DISABLE | CAM_MCNT_PWR_18V_IO;
++		mdelay(5);
++		REG_SCFG_CLK &= ~SCFG_CLK_CAMEXT;
++		REG_CAM_CNT &= ~CAM_CNT_ENABLE;
++		REG_CAM_CNT |= CAM_CNT_FLUSH;
++		REG_CAM_CNT = (REG_CAM_CNT & ~0x0300) | 0x0200;
++		REG_CAM_CNT |= 0x0400;
++		REG_CAM_CNT |= CAM_CNT_IRQ;
++		REG_SCFG_CLK |= SCFG_CLK_CAMEXT;
++		udelay(200);
++		ret = dsisd_camera_cmd(0, 0, &v, &e);
++		REG_SCFG_CLK &= ~SCFG_CLK_CAMEXT;
++		REG_SCFG_CLK |= SCFG_CLK_CAMEXT;
++		udelay(200);
++		e |= REG_SCFG_EXT << 8;
++		break;
++	case 1:
++		ndsfb_cam_off();
++		break;
++	case 2:
++		cam_preview_set = 0;
++		ret = dsisd_camera_cmd(2, c.arg, &v, &e);
++		break;
++	default:
++		ret = -EINVAL;
++	}
++	up(&cam_mutex);
++	c.value = v;
++	c.err = e;
++	if (copy_to_user(arg, &c, sizeof(c)))
++		return -EFAULT;
++	return ret > 0 ? -EIO : ret;
++}
++
++static int ndsfb_cam_frame(void __user *dst)
++{
++	unsigned int v, e;
++	int ret = 0, i;
++
++	down(&cam_mutex);
++	if (!(REG_CAM_MCNT & CAM_MCNT_PWR_18V_IO)) {
++		ret = -ENODEV;			/* NDSFB_CAM_CMD 0 first */
++		goto out;
++	}
++	if (!cam_preview_set) {
++		if (dsisd_camera_cmd(3, 1, &v, &e) != NDS_SD_OK || !v) {
++			ret = -EIO;
++			goto out;
++		}
++		cam_preview_set = 1;
++	}
++	REG_CAM_CNT &= ~CAM_CNT_ENABLE;
++	REG_CAM_CNT &= ~0x200F;
++	REG_CAM_CNT |= CAM_CNT_FORMAT_RGB | 3;		/* RGB out, 4 scanlines per block */
++	REG_CAM_CNT |= CAM_CNT_FLUSH;
++	REG_CAM_CNT |= CAM_CNT_ENABLE;
++	dmac_flush_range((unsigned long)cam_frame, (unsigned long)cam_frame + sizeof(cam_frame));
++	NDMA_SRC(CAM_NDMA) = 0x04004204;		/* REG_CAM_DATA */
++	NDMA_DEST(CAM_NDMA) = (u32)cam_frame;
++	NDMA_LENGTH(CAM_NDMA) = (CAM_FRAME_W * CAM_FRAME_H) >> 1;
++	NDMA_BLENGTH(CAM_NDMA) = 512;
++	NDMA_BDELAY(CAM_NDMA) = 2;
++	NDMA_CR(CAM_NDMA) = (2 << 13) | (4 << 16) | (11 << 24) | (1u << 31);	/* source fixed, block scaler 4, start by camera, on */
++	for (i = 0; i < 300 && (NDMA_CR(CAM_NDMA) & (1u << 31)); i++)	/* up to ~600 ms */
++		msleep(2);
++	if (NDMA_CR(CAM_NDMA) & (1u << 31)) {
++		NDMA_CR(CAM_NDMA) = 0;
++		ret = -ETIMEDOUT;
++	}
++	REG_CAM_CNT &= ~CAM_CNT_ENABLE;
++	if (!ret) {
++		dmac_flush_range((unsigned long)cam_frame, (unsigned long)cam_frame + sizeof(cam_frame));
++		for (i = 0; i < CAM_FRAME_W * CAM_FRAME_H; i++)
++			cam_frame[i] |= 0x8000;		/* opaque: the frame is used as a texture and as a frame buffer picture */
++		if (copy_to_user(dst, cam_frame, sizeof(cam_frame)))
++			ret = -EFAULT;
++	}
++out:
++	up(&cam_mutex);
++	return ret;
++}
++
+ static int gx_reg_ok(unsigned int off)
+ {
+ 	return (off >= 0x400 && off < 0x600) || off == 0x060 || off == 0x350 || off == 0x354;
+@@ -773,6 +938,14 @@ static int ndsfb_ioctl(struct inode *inode, struct file *file,
+ 				return -EINVAL;
+ 			ndsfb_gx_setup(arg != 0);
+ 			return 0;
++		case NDSFB_CAM_CMD:
++			if (info->par != 0)
++				return -EINVAL;
++			return ndsfb_cam_cmd((struct ndsfb_cam __user *)argp);
++		case NDSFB_CAM_FRAME:
++			if (info->par != 0)
++				return -EINVAL;
++			return ndsfb_cam_frame(argp);
+ 		case NDSFB_GX_TEXLOAD:
+ 			if (info->par != 0)
+ 				return -EINVAL;
+diff --git a/linux-2.6.x/include/asm-arm/arch-nds/dsisd.h b/linux-2.6.x/include/asm-arm/arch-nds/dsisd.h
+index 3d2b8de75..653c0abd6 100644
+--- a/linux-2.6.x/include/asm-arm/arch-nds/dsisd.h
++++ b/linux-2.6.x/include/asm-arm/arch-nds/dsisd.h
+@@ -19,6 +19,7 @@
+ #define NDS_SD_CMD_INIT		0
+ #define NDS_SD_CMD_READ		1
+ #define NDS_SD_CMD_WRITE	2
++#define NDS_SD_CMD_CAMERA	9	/* not SD: camera sensor control; count = sub command, sector = argument, answer in info[0] (value) and info[1] (error mask), see arm7/dsicam.h */
+ #define NDS_SD_CMD_POWEROFF	7	/* not SD: DSi power off via the I2C power chip; answers (diag[]) only if the console stayed on */
+ #define NDS_SD_CMD_ROOTINIT	6	/* not SD I/O: locate sd:/linux/ROOTFS.IMG (ext2 root image); from then on the card is only reachable inside it and DSILOG.TXT */
+ #define NDS_SD_CMD_LOGINIT	5	/* not SD I/O: locate sd:/linux/DSILOG.TXT, answer with its sector extents in data[] */
+diff --git a/user/microwin/Makefile b/user/microwin/Makefile
+index 8f325dde6..a2a2eaf04 100644
+--- a/user/microwin/Makefile
++++ b/user/microwin/Makefile
+@@ -18,6 +18,8 @@ real_romfs:
+ 	$(ROMFSINST) /bin/dsgx
+ 	$(ROMFSINST) /bin/dsplay
+ 	$(ROMFSINST) /bin/dsmemo
++	$(ROMFSINST) /bin/dscam
++	$(ROMFSINST) /bin/dsgallery
+ 	$(ROMFSINST) -e CONFIG_USER_MICROWIN_BIN_LANDMINE    /bin/landmine
+ 	$(ROMFSINST) -e CONFIG_USER_MICROWIN_BIN_LAUNCHER    /bin/launcher
+ 	$(ROMFSINST) -e CONFIG_USER_MICROWIN_BIN_MOVE        /bin/move
+diff --git a/user/microwin/src/demos/nanox/Makefile b/user/microwin/src/demos/nanox/Makefile
+index 2e6bcacfd..aa2ab4b16 100644
+--- a/user/microwin/src/demos/nanox/Makefile
++++ b/user/microwin/src/demos/nanox/Makefile
+@@ -85,10 +85,12 @@ OBJS =	demo.o \
+ 	dsgl3d.o \
+ 	dsgx.o \
+ 	dsplay.o \
+-	dsmemo.o
++	dsmemo.o \
++	dscam.o \
++	dsgallery.o
+ 
+ TARGETS = \
+-	$(TOP)/bin/dsdesk $(TOP)/bin/dsnotes $(TOP)/bin/dsfiles $(TOP)/bin/dsbench $(TOP)/bin/dsgl3d $(TOP)/bin/dsgx $(TOP)/bin/dsplay $(TOP)/bin/dsmemo \
++	$(TOP)/bin/dsdesk $(TOP)/bin/dsnotes $(TOP)/bin/dsfiles $(TOP)/bin/dsbench $(TOP)/bin/dsgl3d $(TOP)/bin/dsgx $(TOP)/bin/dsplay $(TOP)/bin/dsmemo $(TOP)/bin/dscam $(TOP)/bin/dsgallery \
+ 	$(TOP)/bin/demo $(TOP)/bin/move $(TOP)/bin/landmine \
+ 	$(TOP)/bin/world $(TOP)/bin/nxclock \
+ 	$(TOP)/bin/nxlsclients $(TOP)/bin/nxev \
+@@ -187,6 +189,14 @@ $(TOP)/bin/dsfiles: dsfiles.o $(NANOXCLIENTLIBS) $(TOP)/config
+ 	@echo "Linking $@ ..."
+ 	$(CC) $(CFLAGS) $(LDFLAGS) $< -o $@ $(LD_NANOXCLIENTLIBS)
+ 
++$(TOP)/bin/dscam: dscam.o dsgx.h dsgx_win.h dsbmp.h $(NANOXCLIENTLIBS) $(TOP)/config
++	@echo "Linking $@ ..."
++	$(CC) $(CFLAGS) $(LDFLAGS) $< -o $@ $(LD_NANOXCLIENTLIBS) $(LIBM)
++
++$(TOP)/bin/dsgallery: dsgallery.o dsgx.h dsgx_win.h dsbmp.h $(NANOXCLIENTLIBS) $(TOP)/config
++	@echo "Linking $@ ..."
++	$(CC) $(CFLAGS) $(LDFLAGS) $< -o $@ $(LD_NANOXCLIENTLIBS) $(LIBM)
++
+ $(TOP)/bin/dsmemo: dsmemo.o w95.h $(NANOXCLIENTLIBS) $(TOP)/config
+ 	@echo "Linking $@ ..."
+ 	$(CC) $(CFLAGS) $(LDFLAGS) dsmemo.o -o $@ $(LD_NANOXCLIENTLIBS)
+diff --git a/user/microwin/src/demos/nanox/dsbmp.h b/user/microwin/src/demos/nanox/dsbmp.h
+new file mode 100644
+index 000000000..11eab360e
+--- /dev/null
++++ b/user/microwin/src/demos/nanox/dsbmp.h
+@@ -0,0 +1,106 @@
++/*
++ * dsbmp.h - the photo files of dscam and dsgallery: 24 bit uncompressed BMP, 256x192, bottom-up rows (opens on a PC).
++ * The frames in memory are 256x192 DS pixels (RGB555, red in the low bits, bit 15 set).
++ */
++#ifndef DSBMP_H
++#define DSBMP_H
++
++#include <stdio.h>
++#include <string.h>
++#include <unistd.h>
++#include <fcntl.h>
++
++#define PHOTO_DIR	"/home/photos"
++#define PW		256
++#define PH		192
++
++static void bmp_put32(unsigned char *p, unsigned long v)
++{
++	p[0] = v;
++	p[1] = v >> 8;
++	p[2] = v >> 16;
++	p[3] = v >> 24;
++}
++
++static unsigned char c5to8(int v)
++{
++	return (unsigned char)((v << 3) | (v >> 2));
++}
++
++/* write the frame; flipx/flipy mirror it, swap exchanges red and blue (for a sensor whose colour order is the other way) */
++static int bmp_write(const char *path, const unsigned short *frame, int flipx, int flipy, int swap)
++{
++	unsigned char h[54], row[PW * 3];
++	int f = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644), y, x;
++
++	if (f < 0)
++		return -1;
++	memset(h, 0, sizeof(h));
++	h[0] = 'B';
++	h[1] = 'M';
++	bmp_put32(h + 2, 54 + PW * PH * 3);
++	bmp_put32(h + 10, 54);
++	bmp_put32(h + 14, 40);
++	bmp_put32(h + 18, PW);
++	bmp_put32(h + 22, PH);
++	h[26] = 1;
++	h[28] = 24;
++	bmp_put32(h + 34, PW * PH * 3);
++	if (write(f, h, 54) != 54) {
++		close(f);
++		return -1;
++	}
++	for (y = PH - 1; y >= 0; y--) {		/* bottom-up */
++		int sy = flipy ? PH - 1 - y : y;
++
++		for (x = 0; x < PW; x++) {
++			unsigned short p = frame[sy * PW + (flipx ? PW - 1 - x : x)];
++			int r = p & 31, g = (p >> 5) & 31, b = (p >> 10) & 31;
++
++			if (swap) {
++				int t = r;
++
++				r = b;
++				b = t;
++			}
++			row[x * 3 + 0] = c5to8(b);
++			row[x * 3 + 1] = c5to8(g);
++			row[x * 3 + 2] = c5to8(r);
++		}
++		if (write(f, row, sizeof(row)) != (int)sizeof(row)) {
++			close(f);
++			return -1;
++		}
++	}
++	close(f);
++	return 0;
++}
++
++/* read a photo written by bmp_write into frame (DS pixels, bit 15 set); 0 = ok */
++static int bmp_read(const char *path, unsigned short *frame)
++{
++	unsigned char h[54], row[PW * 3];
++	int f = open(path, O_RDONLY), y, x;
++
++	if (f < 0)
++		return -1;
++	if (read(f, h, 54) != 54 || h[0] != 'B' || h[1] != 'M' || h[18] != (PW & 255) || h[19] != (PW >> 8) ||
++	    h[22] != PH || h[23] != 0 || h[28] != 24 || h[30] != 0) {
++		close(f);
++		return -2;
++	}
++	lseek(f, h[10] | (h[11] << 8), SEEK_SET);
++	for (y = PH - 1; y >= 0; y--) {
++		if (read(f, row, sizeof(row)) != (int)sizeof(row)) {
++			close(f);
++			return -3;
++		}
++		for (x = 0; x < PW; x++)
++			frame[y * PW + x] = 0x8000 | (row[x * 3 + 2] >> 3) | ((row[x * 3 + 1] >> 3) << 5) |
++					    ((row[x * 3 + 0] >> 3) << 10);
++	}
++	close(f);
++	return 0;
++}
++
++#endif
+diff --git a/user/microwin/src/demos/nanox/dscam.c b/user/microwin/src/demos/nanox/dscam.c
+new file mode 100644
+index 000000000..94d145608
+--- /dev/null
++++ b/user/microwin/src/demos/nanox/dscam.c
+@@ -0,0 +1,207 @@
++/*
++ * dscam - camera test for the DSLinuxDSi desktop: a live preview of the DSi camera in a window, and photos.
++ * The kernel (NDSFB_CAM_CMD / NDSFB_CAM_FRAME, see drivers/video/ndsfb.c) switches the camera on and delivers 256x192 RGB555 frames;
++ * each frame is loaded as a texture and drawn on the 3D layer (dsgx.h), which is far faster than pushing pixels through Nano-X.
++ * Keys: space, Enter or a tap in the window = photo (saved as /home/photos/photoNNN.bmp), c = the other camera, f = flip the
++ * picture upside down, m = mirror it, b = swap red and blue (if the colours look wrong), q or Esc = quit.
++ * The overlay text says what is going on, including the numbers from the set-up if it fails.
++ */
++#include <errno.h>
++#include <sys/stat.h>
++#include <sys/time.h>
++#include "dsgx_win.h"
++#include "dsbmp.h"
++
++#define NDSFB_CAM_CMD	0x4e09
++#define NDSFB_CAM_FRAME	0x4e0a
++
++struct ndsfb_cam {
++	unsigned int cmd, arg;
++	unsigned int value, err;
++};
++
++static unsigned short frame[PW * PH] __attribute__((aligned(32)));
++
++static long usec(void)
++{
++	struct timeval tv;
++
++	gettimeofday(&tv, NULL);
++	return tv.tv_sec * 1000000L + tv.tv_usec;
++}
++
++static int cam_cmd(unsigned int cmd, unsigned int arg, struct ndsfb_cam *out)
++{
++	struct ndsfb_cam c;
++	int r;
++
++	c.cmd = cmd;
++	c.arg = arg;
++	c.value = c.err = 0;
++	r = ioctl(gx_fb, NDSFB_CAM_CMD, &c);
++	if (out)
++		*out = c;
++	return r;
++}
++
++static void draw_picture(int flipx, int flipy)
++{
++	double hw = 2.0, hh = 1.5;		/* a 4:3 quad at z = -2; the window's frustum is 2 wide at distance 1 */
++	double s0 = flipx ? PW : 0, s1 = flipx ? 0 : PW, t0 = flipy ? PH : 0, t1 = flipy ? 0 : PH;
++
++	gx_mode(GX_MODELVIEW);
++	gx_identity();
++	gx_polyattr(0, GX_CULL_NONE, 31);
++	gx_texture(0, 256, 256, 0);		/* the frame fills the upper 192 rows of a 256x256 texture */
++	gx_begin(GX_QUADS);
++	gx_color(31, 31, 31);
++	gx_texcoord(s0, t0); gx_vertex(-hw, hh, -2.0);
++	gx_texcoord(s0, t1); gx_vertex(-hw, -hh, -2.0);
++	gx_texcoord(s1, t1); gx_vertex(hw, -hh, -2.0);
++	gx_texcoord(s1, t0); gx_vertex(hw, hh, -2.0);
++	gx_end();
++	gx_swap();
++	gx_flush();
++}
++
++int main(int argc, char **argv)
++{
++	GR_EVENT ev;
++	struct gxw w;
++	struct ndsfb_cam c;
++	int running = 1, cam = 0, flipx = 0, flipy = 0, swap = 0, ready = 0, frames = 0, fails = 0, got_frame = 0;
++	long fps_t = 0, msg_until = 0;
++	char txt[48], msg[48];
++
++	if (gx_open() < 0)
++		return 1;
++	if (GrOpen() < 0) {
++		fprintf(stderr, "dscam: cannot connect to Nano-X\n");
++		return 1;
++	}
++	gxw_create(&w, "Camera", 30, 8, 160, 120, 1.0, 20.0);
++	GrSelectEvents(w.win, GR_EVENT_MASK_EXPOSURE | GR_EVENT_MASK_KEY_DOWN | GR_EVENT_MASK_CLOSE_REQ |
++		       GR_EVENT_MASK_BUTTON_DOWN);
++	gx_control(GX_CTRL_TEXTURE);
++	gx_flush();
++	gxw_text(&w, 0, "camera: starting...");
++
++	if (cam_cmd(0, 0, &c) < 0 || c.value != 0x2280) {
++		sprintf(txt, "init failed v%04x e%x", c.value & 0xffff, c.err & 0xffff);
++		gxw_text(&w, 0, txt);
++		sprintf(txt, "scfg %x", c.err >> 8);
++		gxw_text(&w, 1, txt);
++		strcpy(msg, "press q to quit");
++	} else if (cam_cmd(2, cam, &c) < 0) {
++		sprintf(txt, "select failed e%x", c.err & 0xffff);
++		gxw_text(&w, 0, txt);
++	} else {
++		ready = 1;
++		strcpy(msg, "space: photo");
++	}
++
++	while (running) {
++		int changed = 0;
++
++		GrCheckNextEvent(&ev);
++		if (gxw_event(&w, &ev))
++			running = 0;
++		if (ev.type == GR_EVENT_TYPE_BUTTON_DOWN && ready) {
++			ev.type = GR_EVENT_TYPE_KEY_DOWN;
++			ev.keystroke.ch = ' ';
++		}
++		if (ev.type == GR_EVENT_TYPE_KEY_DOWN) {
++			switch (ev.keystroke.ch) {
++			case MWKEY_ESCAPE:
++			case 'q':
++				running = 0;
++				break;
++			case 'c':
++				if (ready) {
++					cam = !cam;
++					got_frame = 0;
++					cam_cmd(2, cam, &c);
++					changed = 1;
++				}
++				break;
++			case 'f':
++				flipy = !flipy;
++				break;
++			case 'm':
++				flipx = !flipx;
++				break;
++			case 'b':
++				swap = !swap;
++				break;
++			case ' ':
++			case MWKEY_ENTER:
++				if (ready && got_frame) {
++					char path[64];
++					int n;
++
++					mkdir(PHOTO_DIR, 0755);
++					for (n = 1; n < 1000; n++) {
++						sprintf(path, PHOTO_DIR "/photo%03d.bmp", n);
++						if (access(path, F_OK) != 0)
++							break;
++					}
++					if (bmp_write(path, frame, flipx, flipy, swap) == 0) {
++						sprintf(msg, "saved photo%03d", n);
++					} else {
++						strcpy(msg, "cannot save photo");
++					}
++					msg_until = usec() + 3000000L;
++					changed = 1;
++				}
++				break;
++			}
++		}
++		gxw_update(&w);
++		if (!w.visible) {		/* minimised: do not keep the camera busy */
++			usleep(100000);
++			w.dirty = 1;
++			continue;
++		}
++		if (ready) {
++			int r = ioctl(gx_fb, NDSFB_CAM_FRAME, frame);
++
++			if (r == 0) {
++				fails = 0;
++				frames++;
++				got_frame = 1;
++				gx_texture_load(0, frame, sizeof(frame));
++				draw_picture(flipx, flipy);
++			} else if (++fails == 5) {
++				sprintf(txt, "no frames (%d)", errno);
++				gxw_text(&w, 0, txt);
++			} else if (fails > 5) {
++				usleep(100000);
++			}
++		} else {
++			usleep(50000);
++		}
++		if (fps_t == 0)
++			fps_t = usec();
++		if (changed || usec() - fps_t >= 1000000L) {
++			if (usec() - fps_t >= 1000000L) {
++				if (ready && fails < 5) {
++					sprintf(txt, "cam %d  %d fps", cam, frames);
++					gxw_text(&w, 0, txt);
++				}
++				frames = 0;
++				fps_t = usec();
++			}
++			if (msg_until && usec() > msg_until) {
++				msg_until = 0;
++				strcpy(msg, "space: photo");
++			}
++			gxw_text(&w, 1, msg);
++			gxw_text(&w, 2, "c:cam  f:flip");
++			gxw_text(&w, 3, "m:mirror  b:rb");
++		}
++	}
++	cam_cmd(1, 0, NULL);			/* cameras off (and the LED) */
++	gx_close();
++	GrClose();
++	return 0;
++}
+diff --git a/user/microwin/src/demos/nanox/dsdesk.c b/user/microwin/src/demos/nanox/dsdesk.c
+index b04ef3feb..9a2e0daf3 100644
+--- a/user/microwin/src/demos/nanox/dsdesk.c
++++ b/user/microwin/src/demos/nanox/dsdesk.c
+@@ -32,6 +32,8 @@ static const struct item accessories[] = {
+ 	{ "Clock", "/usr/bin/nxclock" },
+ };
+ static const struct item multimedia[] = {
++	{ "Camera", "/boot/dscam" },
++	{ "Photos", "/boot/dsgallery" },
+ 	{ "Voice memos", "/boot/dsmemo" },
+ 	{ "Sound test", "/boot/dsplay" },
+ 	{ "3D gears", "/boot/dsgl3d" },
+diff --git a/user/microwin/src/demos/nanox/dsgallery.c b/user/microwin/src/demos/nanox/dsgallery.c
+new file mode 100644
+index 000000000..01ce2cb8f
+--- /dev/null
++++ b/user/microwin/src/demos/nanox/dsgallery.c
+@@ -0,0 +1,197 @@
++/*
++ * dsgallery - photo viewer for the DSLinuxDSi desktop: shows the photos of dscam (/home/photos/photoNNN.bmp, 256x192 BMP).
++ * Each photo is loaded as a texture and drawn on the 3D layer (dsgx.h), like the camera preview.
++ * Keys: left/right (or , and .) = previous/next, d = delete (press twice), c = open the camera, q or Esc = quit.
++ * A tap on the left third of the window goes to the previous photo, on the right third to the next one.
++ */
++#include <stdlib.h>
++#include <dirent.h>
++#include "dsgx_win.h"
++#include "dsbmp.h"
++
++#define MAXPHOTOS 200
++
++static char names[MAXPHOTOS][24];
++static int nphotos, sel;
++static unsigned short frame[PW * PH] __attribute__((aligned(32)));
++
++static int cmpnames(const void *a, const void *b)
++{
++	return strcmp((const char *)a, (const char *)b);
++}
++
++static void scan(void)
++{
++	DIR *d = opendir(PHOTO_DIR);
++	struct dirent *e;
++
++	nphotos = 0;
++	if (d) {
++		while ((e = readdir(d)) != NULL && nphotos < MAXPHOTOS) {
++			int n = strlen(e->d_name);
++
++			if (n > 8 && n < 24 && !strncmp(e->d_name, "photo", 5) && !strcmp(e->d_name + n - 4, ".bmp"))
++				strcpy(names[nphotos++], e->d_name);
++		}
++		closedir(d);
++	}
++	qsort(names, nphotos, sizeof(names[0]), cmpnames);
++	if (sel >= nphotos)
++		sel = nphotos - 1;
++	if (sel < 0)
++		sel = 0;
++}
++
++static int load(void)
++{
++	char path[64];
++
++	if (!nphotos)
++		return -1;
++	sprintf(path, PHOTO_DIR "/%s", names[sel]);
++	if (bmp_read(path, frame))
++		return -2;
++	return gx_texture_load(0, frame, sizeof(frame));
++}
++
++static void draw(int have)
++{
++	double hw = 2.0, hh = 1.5;
++
++	gx_mode(GX_MODELVIEW);
++	gx_identity();
++	gx_polyattr(0, GX_CULL_NONE, 31);
++	if (have) {
++		gx_texture(0, 256, 256, 0);
++		gx_begin(GX_QUADS);
++		gx_color(31, 31, 31);
++		gx_texcoord(0, 0); gx_vertex(-hw, hh, -2.0);
++		gx_texcoord(0, PH); gx_vertex(-hw, -hh, -2.0);
++		gx_texcoord(PW, PH); gx_vertex(hw, -hh, -2.0);
++		gx_texcoord(PW, 0); gx_vertex(hw, hh, -2.0);
++		gx_end();
++	} else {				/* nothing to show: a dark grey panel */
++		gx_cmd(GXR_TEXIMAGE, 0);
++		gx_begin(GX_QUADS);
++		gx_color(4, 4, 4);
++		gx_vertex(-hw, hh, -2.0);
++		gx_vertex(-hw, -hh, -2.0);
++		gx_vertex(hw, -hh, -2.0);
++		gx_vertex(hw, hh, -2.0);
++		gx_end();
++	}
++	gx_swap();
++	gx_flush();
++}
++
++static void label(struct gxw *w, int have, int armed)
++{
++	char t[40];
++
++	if (nphotos)
++		sprintf(t, "%s", names[sel]);
++	else
++		strcpy(t, "no photos yet");
++	gxw_text(w, 0, t);
++	sprintf(t, "%d / %d%s", nphotos ? sel + 1 : 0, nphotos, armed ? "  delete?" : "");
++	gxw_text(w, 1, t);
++	gxw_text(w, 2, have || !nphotos ? "< >  d:del  c:cam" : "cannot read photo");
++}
++
++int main(int argc, char **argv)
++{
++	GR_EVENT ev;
++	struct gxw w;
++	int running = 1, have = 0, armed = 0, redraw = 1;
++
++	if (gx_open() < 0)
++		return 1;
++	if (GrOpen() < 0) {
++		fprintf(stderr, "dsgallery: cannot connect to Nano-X\n");
++		return 1;
++	}
++	scan();
++	if (nphotos)
++		sel = nphotos - 1;			/* the newest photo first */
++	gxw_create(&w, "Photos", 30, 8, 160, 120, 1.0, 20.0);
++	GrSelectEvents(w.win, GR_EVENT_MASK_EXPOSURE | GR_EVENT_MASK_KEY_DOWN | GR_EVENT_MASK_CLOSE_REQ |
++		       GR_EVENT_MASK_BUTTON_DOWN);
++	gx_control(GX_CTRL_TEXTURE);
++	gx_flush();
++	have = load() == 0;
++
++	while (running) {
++		int key = 0;
++
++		GrGetNextEventTimeout(&ev, 200);
++		if (gxw_event(&w, &ev))
++			running = 0;
++		if (ev.type == GR_EVENT_TYPE_BUTTON_DOWN) {
++			if (ev.button.x < w.rw / 3)
++				key = MWKEY_LEFT;
++			else if (ev.button.x > w.rw * 2 / 3)
++				key = MWKEY_RIGHT;
++		} else if (ev.type == GR_EVENT_TYPE_KEY_DOWN) {
++			key = ev.keystroke.ch;
++		}
++		if (key != 'd' && armed) {
++			armed = 0;
++			redraw = 1;
++		}
++		switch (key) {
++		case MWKEY_ESCAPE:
++		case 'q':
++			running = 0;
++			break;
++		case MWKEY_LEFT:
++		case ',':
++			if (sel > 0) {
++				sel--;
++				have = load() == 0;
++				redraw = 1;
++			}
++			break;
++		case MWKEY_RIGHT:
++		case '.':
++			if (sel + 1 < nphotos) {
++				sel++;
++				have = load() == 0;
++				redraw = 1;
++			}
++			break;
++		case 'd':
++			if (!nphotos)
++				break;
++			if (!armed) {
++				armed = 1;
++			} else {
++				char path[64];
++
++				armed = 0;
++				sprintf(path, PHOTO_DIR "/%s", names[sel]);
++				unlink(path);
++				scan();
++				have = load() == 0;
++			}
++			redraw = 1;
++			break;
++		case 'c':
++			if (vfork() == 0) {
++				execl("/boot/dscam", "/boot/dscam", (char *)NULL);
++				_exit(127);
++			}
++			break;
++		}
++		gxw_update(&w);
++		if (!w.visible)
++			continue;
++		if (ev.type == GR_EVENT_TYPE_TIMEOUT || ev.type == GR_EVENT_TYPE_EXPOSURE || redraw) {
++			draw(have);			/* cheap: refresh the 3D picture, in case the window moved */
++			label(&w, have, armed);
++			redraw = 0;
++		}
++	}
++	gx_close();
++	GrClose();
++	return 0;
++}
+diff --git a/vendors/Nintendo/DSI/Makefile b/vendors/Nintendo/DSI/Makefile
+index c97c4fffd..0dd192181 100644
+--- a/vendors/Nintendo/DSI/Makefile
++++ b/vendors/Nintendo/DSI/Makefile
+@@ -165,6 +165,8 @@ finishrom:
+ 	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/dsgx $(ROMFSDIR)/boot/dsgx
+ 	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/dsplay $(ROMFSDIR)/boot/dsplay
+ 	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/dsmemo $(ROMFSDIR)/boot/dsmemo
++	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/dscam $(ROMFSDIR)/boot/dscam
++	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/dsgallery $(ROMFSDIR)/boot/dsgallery
+ 	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/landmine $(ROMFSDIR)/boot/landmine
+ 	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/ntetris $(ROMFSDIR)/boot/ntetris
+ 	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/madplay $(ROMFSDIR)/$(OPTDIR)
+-- 
+2.56.0
+
