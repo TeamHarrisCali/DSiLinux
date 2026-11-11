@@ -1,0 +1,451 @@
+From 473e41fbe25c91e204bdaf0fd44d8abc1b145414 Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 03:51:00 -0600
+Subject: [PATCH] DSI desktop on the top screen: bottom screen = trackpad
+ (relative pointer, tap = click, R/L = left/right click) above the touch
+ keyboard; Nano-X reads /dev/input/mice; nxterm default window fits 256x192;
+ desktop binaries also in the ROM
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ linux-2.6.x/arch/arm/mach-nds/button.c        |   9 ++
+ .../drivers/input/touchscreen/nds_ts.c        | 107 ++++++++++++++++++
+ user/microwin/src/demos/nanox/nxterm.c        |  13 ++-
+ user/microwin/src/drivers/mou_touchscreen.c   |  76 ++++++-------
+ vendors/Nintendo/DSI/Makefile                 |   3 +
+ vendors/Nintendo/DSI/desktop                  |  35 +++---
+ 6 files changed, 185 insertions(+), 58 deletions(-)
+
+diff --git a/linux-2.6.x/arch/arm/mach-nds/button.c b/linux-2.6.x/arch/arm/mach-nds/button.c
+index 4cc7f6fd6..86228ed59 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/button.c
++++ b/linux-2.6.x/arch/arm/mach-nds/button.c
+@@ -42,6 +42,10 @@ static short ndsbuttons2[] = {
+ };
+ #endif
+ 
++#ifdef CONFIG_TOUCHSCREEN_NDS
++extern void ndspad_buttons(int left, int right);
++#endif
++
+ static irqreturn_t ndsbutton_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+ {
+ 	int i;
+@@ -52,6 +56,11 @@ static irqreturn_t ndsbutton_interrupt(int irq, void *dev_id, struct pt_regs *re
+ 
+         input_sync(&ndsbutton_dev);
+ 
++#ifdef CONFIG_TOUCHSCREEN_NDS
++	/* R shoulder button = left click, L = right click of the touch screen trackpad */
++	ndspad_buttons(!((state >> 8) & 1), !((state >> 9) & 1));
++#endif
++
+ 	return IRQ_HANDLED ;
+ }
+ 
+diff --git a/linux-2.6.x/drivers/input/touchscreen/nds_ts.c b/linux-2.6.x/drivers/input/touchscreen/nds_ts.c
+index 48b619dff..4016c9255 100644
+--- a/linux-2.6.x/drivers/input/touchscreen/nds_ts.c
++++ b/linux-2.6.x/drivers/input/touchscreen/nds_ts.c
+@@ -15,6 +15,7 @@
+ #include <linux/init.h> 
+ #include <linux/interrupt.h> 
+ #include <linux/version.h>
++#include <linux/jiffies.h>
+ #include <linux/kbd_kern.h>
+ #include <asm/arch/fifo.h>
+ 
+@@ -141,9 +142,90 @@ static struct fifo_cb my_callback = {
+ 	.handler.touch_handler = ndstouch_input_event
+ };
+ 
++/*
++ * Trackpad: the upper 9 tile rows (72 pixel) of the touch screen, above the keyboard, move a relative pointer, like a
++ * laptop trackpad. A short tap is a left click. It is its own input device (the mouse code then offers it as
++ * /dev/input/mice) so the keyboard keys keep going to the console. The shoulder buttons are clicks too:
++ * R = left, L = right (see ndspad_buttons(), called from arch/arm/mach-nds/button.c).
++ */
++#define PAD_ROWS	9			/* tile rows 0..8 */
++#define PAD_GAIN	2			/* pointer pixels per touch pixel */
++#define PAD_TAP_MAX_MOVE	4		/* touch pixels */
++#define PAD_TAP_MAX_TIME	(HZ / 3)
++
++static struct input_dev ndspad_dev = {
++	.name = "Nintendo DS trackpad",
++	.evbit = { BIT(EV_KEY) | BIT(EV_REL) },
++	.keybit = { [LONG(BTN_LEFT)] = BIT(BTN_LEFT) | BIT(BTN_RIGHT) },
++	.relbit = { BIT(REL_X) | BIT(REL_Y) },
++};
++
++static int pad_active;			/* the current touch started on the trackpad */
++static int pad_lx, pad_ly, pad_moved;
++static unsigned long pad_t0;
++
++static int in_pad(u8 x, u8 y)
++{
++	if (y >= PAD_ROWS * 8)
++		return 0;
++	if (y < 16 && x >= 240)		/* the K key (mouse mode switch) */
++		return 0;
++	return 1;
++}
++
++static void pad_touch(int touched, u8 x, u8 y)
++{
++	if (touched) {
++		if (!pad_active) {
++			pad_active = 1;
++			pad_lx = x;
++			pad_ly = y;
++			pad_moved = 0;
++			pad_t0 = jiffies;
++		} else {
++			int dx = (int)x - pad_lx, dy = (int)y - pad_ly;
++
++			if (dx || dy) {
++				pad_moved += (dx < 0 ? -dx : dx) + (dy < 0 ? -dy : dy);
++				input_report_rel(&ndspad_dev, REL_X, dx * PAD_GAIN);
++				input_report_rel(&ndspad_dev, REL_Y, dy * PAD_GAIN);
++				input_sync(&ndspad_dev);
++				pad_lx = x;
++				pad_ly = y;
++			}
++		}
++	} else if (pad_active) {
++		pad_active = 0;
++		if (pad_moved <= PAD_TAP_MAX_MOVE && time_before(jiffies, pad_t0 + PAD_TAP_MAX_TIME)) {
++			input_report_key(&ndspad_dev, BTN_LEFT, 1);
++			input_sync(&ndspad_dev);
++			input_report_key(&ndspad_dev, BTN_LEFT, 0);
++			input_sync(&ndspad_dev);
++		}
++	}
++}
++
++/* shoulder buttons: R = left click, L = right click */
++void ndspad_buttons(int left, int right)
++{
++	static int l, r;
++
++	if (left != l) {
++		l = left;
++		input_report_key(&ndspad_dev, BTN_LEFT, l);
++	}
++	if (right != r) {
++		r = right;
++		input_report_key(&ndspad_dev, BTN_RIGHT, r);
++	}
++	input_sync(&ndspad_dev);
++}
++
+ static u16* const bgmap = (u16*)SCREEN_BASE_BLOCK_SUB(4);
+ static u16* const fgmap = (u16*)SCREEN_BASE_BLOCK_SUB(5);
+ 
++static void draw_pad(void);
++
+ static void draw_keyboard(int gfx_id)
+ {
+ 	int i;
+@@ -175,6 +257,23 @@ static void draw_keyboard(int gfx_id)
+ 	fgmap[0 * 32 + 31] = keyboard_Map_Qwerty_Upper[ 8 * 32 + 20];
+ 	fgmap[1 * 32 + 30] = keyboard_Map_Qwerty_Upper[ 9 * 32 + 19];
+ 	fgmap[1 * 32 + 31] = keyboard_Map_Qwerty_Upper[ 9 * 32 + 20];
++	draw_pad();
++}
++
++/* blue-grey panel over the trackpad area: map entries use palette bank 1 whose entry 6 (the solid tile's colour) differs */
++static void draw_pad(void)
++{
++	int x, y;
++
++	PALETTE_SUB[16 + 6] = 0x580c;	/* RGB555 blue-grey */
++	for (y = 0; y < PAD_ROWS; y++) {
++		for (x = 0; x < 32; x++) {
++			if (y < 2 && x >= 30)
++				continue;	/* K key */
++			bgmap[y * 32 + x] = 0x1000;
++			fgmap[y * 32 + x] = 0x1000;
++		}
++	}
+ }
+ 
+ static void update_keyboard(u16 pressedKey)
+@@ -263,6 +362,7 @@ switch_to_keyboard_mode(void)
+ 
+ 	input_report_abs(&ndstouch_dev, ABS_PRESSURE, 0);
+ 
++	draw_pad();
+ 	update_keyboard(0);
+ }
+ 
+@@ -309,6 +409,11 @@ static void ndstouch_input_event(u8 touched, u8 x, u8 y)
+ 
+ 	switch(mode) {
+ 		case KEYBOARD_MODE:
++			/* a touch that starts on the trackpad only moves the pointer, one that starts on the keyboard only types */
++			if (pad_active || (touched && !wasTouched && in_pad(x, y))) {
++				pad_touch(touched, x, y);
++				break;
++			}
+ 			/* convert to tile indexes */
+ 			x /= 8;
+ 			y /= 8;
+@@ -397,6 +502,7 @@ static int __init touchscreen_init(void)
+ 	}
+ 
+ 	input_register_device(&ndstouch_dev);
++	input_register_device(&ndspad_dev);
+ 
+ 	register_fifocb(&my_callback);
+ 
+@@ -405,6 +511,7 @@ static int __init touchscreen_init(void)
+ 
+ static void __exit touchscreen_exit(void)
+ {
++	input_unregister_device(&ndspad_dev);
+ 	input_unregister_device(&ndstouch_dev);
+ }
+ 
+diff --git a/user/microwin/src/demos/nanox/nxterm.c b/user/microwin/src/demos/nanox/nxterm.c
+index dc5ffae00..eb2b7042a 100644
+--- a/user/microwin/src/demos/nanox/nxterm.c
++++ b/user/microwin/src/demos/nanox/nxterm.c
+@@ -910,12 +910,19 @@ int main(int argc, char **argv)
+ 	*--argv = thesh;
+     }
+ 
+-    col = 80;
+-    row = 25;
++    /* the Nintendo DS screen is 256x192: a default window that fits, -g COLSxROWS to change it */
++    col = 30;
++    row = 11;
+     xp = 0;
+     yp = 0;
+     if (geometry) 
+     {
++	int gc, gr;
++
++	if (sscanf(geometry, "%dx%d", &gc, &gr) == 2 && gc > 0 && gr > 0) {
++	    col = gc;
++	    row = gr;
++	}
+ 	if (col < 1) 
+ 	{
+ 	    col = 80;
+@@ -937,7 +944,7 @@ int main(int argc, char **argv)
+ 
+     winw=col*fi.maxwidth;
+     winh=row*fi.height;
+-    w1 = GrNewWindow(GR_ROOT_WINDOW_ID, 10,10,winw, winh,0,BLACK,LTBLUE);
++    w1 = GrNewWindow(GR_ROOT_WINDOW_ID, 4,4,winw, winh,0,BLACK,LTBLUE);
+     props.flags = GR_WM_FLAGS_TITLE;
+     props.title = TITLE;
+     GrSetWMProperties(w1, &props);
+diff --git a/user/microwin/src/drivers/mou_touchscreen.c b/user/microwin/src/drivers/mou_touchscreen.c
+index 29ea0a57d..8e55d8a93 100644
+--- a/user/microwin/src/drivers/mou_touchscreen.c
++++ b/user/microwin/src/drivers/mou_touchscreen.c
+@@ -60,21 +60,24 @@ static int pd_fd = -1;
+ extern SCREENDEVICE scrdev;
+ 
+ static int PD_Open(MOUSEDEVICE *pmd)
+-{	       
++{
++#ifdef TOUCHSCREEN_NDS
++	/* Nintendo DS: the touch screen trackpad (kernel driver nds_ts) is offered as a PS/2 mouse by the input layer */
++	if((pd_fd = open("/dev/input/mice", O_RDONLY | O_NONBLOCK)) < 0) {
++		EPRINTF("Error %d opening /dev/input/mice\n", errno);
++		return -1;
++	}
++	return pd_fd;
++#else
+ 	if((pd_fd = open(TS_DEVICE_FILE, O_NONBLOCK)) < 0) {
+ 		EPRINTF("Error %d opening %s touchscreen device [%s]\n", 
+ 			errno, TS_DEVICE, TS_DEVICE_FILE);
+ 		return -1;
+ 	}
+ 
+-#ifdef TOUCHSCREEN_NDS
+-	// grab all input events
+-	if (ioctl(pd_fd, EVIOCGRAB, 1) < 0)
+-		EPRINTF("Can't get exclusive access to %s\n", TS_DEVICE_FILE);
+-#endif
+-
+ 	GdHideCursor(&scrdev);  
+ 	return pd_fd;
++#endif
+ }
+ 
+ static void PD_Close(void)
+@@ -83,9 +86,6 @@ static void PD_Close(void)
+  
+ 	if(pd_fd < 0) return;
+  
+-#ifdef TOUCHSCREEN_NDS
+-	ioctl(pd_fd, EVIOCGRAB, 0);
+-#endif
+ 	close(pd_fd);
+ 	pd_fd = -1;
+ }
+@@ -93,24 +93,46 @@ static void PD_Close(void)
+ static int PD_GetButtonInfo(void)
+ {
+ 	/* get "mouse" buttons supported */
++#ifdef TOUCHSCREEN_NDS
++	return MWBUTTON_L | MWBUTTON_R;
++#else
+ 	return MWBUTTON_L;
++#endif
+ }
+ 
+ static void PD_GetDefaultAccel(int *pscale,int *pthresh)
+ {
++#ifdef TOUCHSCREEN_NDS
++	*pscale = 2;
++	*pthresh = 8;
++#else
+ 	*pscale = 3;
+ 	*pthresh = 5;
++#endif
+ }
+ 
+-static int PD_Read(MWCOORD *px, MWCOORD *py, MWCOORD *pz, int *pb, int mode)
++static int PD_Read(MWCOORD *px, MWCOORD *py, MWCOORD *pz, int *pb)
+ {
++#ifdef TOUCHSCREEN_NDS
++	/* 3 byte PS/2 mouse packets: flags (bit 0 left, bit 1 right), dx, dy (up is positive) */
++	unsigned char pkt[3];
++	int n = read(pd_fd, pkt, sizeof(pkt));
++
++	if(n != sizeof(pkt)) {
++		if(n == -1 && errno != EINTR && errno != EAGAIN) {
++			EPRINTF("Error %d reading /dev/input/mice\n", errno);
++			return -1;
++		}
++		return 0;
++	}
++	*px = (signed char)pkt[1];
++	*py = -(signed char)pkt[2];
++	*pz = 0;
++	*pb = ((pkt[0] & 1) ? MWBUTTON_L : 0) | ((pkt[0] & 2) ? MWBUTTON_R : 0);
++	return 1;	/* relative movement */
++#else
+ 	struct ts_event event;
+ 	int bytes_read;
+-#ifdef TOUCHSCREEN_NDS
+-	static int pressed;
+-	static int xcoord;
+-	static int ycoord;
+-#endif
+   
+ 	/* read a data point */
+ 	bytes_read = read(pd_fd, &event, sizeof(event));
+@@ -127,28 +149,6 @@ static int PD_Read(MWCOORD *px, MWCOORD *py, MWCOORD *pz, int *pb, int mode)
+ 		return 0;
+ 	}
+ 
+-#ifdef TOUCHSCREEN_NDS
+-	switch (event.type) {
+-	case EV_SYN:
+-		*px = xcoord;
+-		*py = ycoord;
+-		*pz = pressed ? 50 : 0;
+-		*pb = pressed ? MWBUTTON_L : 0;
+-		return pressed ? 2 : 3;
+-	case EV_KEY:
+-		if (event.code == BTN_TOUCH) 
+-			pressed = event.value;
+-		break;
+-	case EV_ABS:
+-		if (event.code == ABS_X) {
+-			xcoord = event.value;
+-		} else if (event.code == ABS_Y) {
+-			ycoord = event.value;
+-		}
+-		break;
+-	}
+-	return 0;
+-#else
+ 	*px = event.x;
+ 	*py = event.y;
+ 
+diff --git a/vendors/Nintendo/DSI/Makefile b/vendors/Nintendo/DSI/Makefile
+index b6edabd94..d0bc70be0 100644
+--- a/vendors/Nintendo/DSI/Makefile
++++ b/vendors/Nintendo/DSI/Makefile
+@@ -149,6 +149,9 @@ finishrom:
+ 	# If we have external RAM, we can spend some of our precious internal RAM
+         # to speed up some applications.
+ 	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/nano-X $(ROMFSDIR)/$(OPTDIR)
++	# The desktop programs also live in the ROM (/boot), so a newer desktop works without replacing ROOTFS.IMG
++	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/nano-X $(ROMFSDIR)/boot/nano-X
++	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/nxterm $(ROMFSDIR)/boot/nxterm
+ 	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/madplay $(ROMFSDIR)/$(OPTDIR)
+ 	# Compress the data area of these programs
+ 	$(CROSS)flthdr -d $(ROMFSDIR)/$(OPTDIR)/*
+diff --git a/vendors/Nintendo/DSI/desktop b/vendors/Nintendo/DSI/desktop
+index abc47fc3a..5aa0031ff 100644
+--- a/vendors/Nintendo/DSI/desktop
++++ b/vendors/Nintendo/DSI/desktop
+@@ -1,31 +1,33 @@
+ #!/bin/sh
+-# DSLinuxDSi desktop: the Nano-X window system on the bottom (touch) screen, /dev/fb1. The top screen keeps the
+-# text console. While /dev/fb1 is open the touch driver turns into an absolute pointer and the touch keyboard goes away.
++# DSLinuxDSi desktop: the Nano-X window system on the TOP screen (/dev/fb0). The bottom (touch) screen is the input
++# pad: the upper part is a trackpad (drag = move the pointer, tap = left click; R button = left click, L = right
++# click), the lower part is the touch keyboard.
+ #   /boot/desktop        server + window manager + one terminal
+-#   /boot/desktop kbd    the same, plus the on-screen keyboard (nxkbd)
+-#   /boot/desktop stop   stop it (the touch keyboard comes back)
++#   /boot/desktop stop   stop it and give the top screen back to the text console
+ # Everything it prints goes to /tmp/desktop.log (also saved by /boot/savelog).
+ LOG=/tmp/desktop.log
+ 
+ if [ "$1" = "stop" ]; then
+-	for p in nxkbd nxterm nanowm nano-X; do kill `pidof $p` 2>/dev/null; done
++	for p in nxterm nanowm nano-X; do kill `pidof $p` 2>/dev/null; done
++	sleep 1
++	fbset -fb /dev/fb0 -depth 8 -n >> $LOG 2>&1
+ 	echo "desktop: stopped" >> $LOG
+ 	exit 0
+ fi
+ 
+-export FRAMEBUFFER=/dev/fb1
+-echo "desktop: start (fb1)" > $LOG
+-[ -c /dev/fb1 ] || { echo "desktop: no /dev/fb1" >> $LOG; echo "desktop: no /dev/fb1"; exit 1; }
+-[ -c /dev/touch ] || echo "desktop: no /dev/touch" >> $LOG
++export FRAMEBUFFER=/dev/fb0
++echo "desktop: start (fb0, trackpad on the bottom screen)" > $LOG
++[ -c /dev/fb0 ] || { echo "desktop: no /dev/fb0" >> $LOG; echo "desktop: no /dev/fb0"; exit 1; }
++[ -c /dev/input/mice ] || echo "desktop: no /dev/input/mice" >> $LOG
+ 
+-# 16 bit colour on the touch screen, like the stock DSLinux setup
+-fbset -fb /dev/fb1 -depth 16 -n >> $LOG 2>&1
+-fbset -fb /dev/fb1 >> $LOG 2>&1
++# 16 bit colour, like the stock DSLinux setup
++fbset -fb /dev/fb0 -depth 16 -n >> $LOG 2>&1
++fbset -fb /dev/fb0 >> $LOG 2>&1
+ ifconfig lo up >> $LOG 2>&1
+ grep Mem /proc/meminfo >> $LOG 2>&1
+ 
+ # -p keep running when the last client exits; -e the Esc key does not quit the server
+-nano-X -p -e >> $LOG 2>&1 &
++/boot/nano-X -p -e >> $LOG 2>&1 &
+ sleep 3
+ if [ -z "`pidof nano-X`" ]; then
+ 	echo "desktop: nano-X did not start, see $LOG"
+@@ -33,8 +35,7 @@ if [ -z "`pidof nano-X`" ]; then
+ fi
+ nanowm >> $LOG 2>&1 &
+ sleep 1
+-[ "$1" = "kbd" ] && { nxkbd >> $LOG 2>&1 & }
+-nxterm >> $LOG 2>&1 &
++/boot/nxterm >> $LOG 2>&1 &
+ sleep 2
+-echo "desktop: running: `pidof nano-X nanowm nxterm nxkbd`" >> $LOG
+-echo "desktop: started on the bottom screen (log: $LOG)"
++echo "desktop: running: `pidof nano-X nanowm nxterm`" >> $LOG
++echo "desktop: started on the top screen (log: $LOG)"
+-- 
+2.56.0
+
