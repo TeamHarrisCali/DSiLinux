@@ -1,0 +1,35 @@
+From f9b77811eb142bc1fc9a4e61b4150ec7ce2bcbbb Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <noreply@example.invalid>
+Date: Tue, 10 Nov 2026 21:36:58 -0600
+Subject: [PATCH] DSI rc: RAM rc.conf silences the rc.conf warning banner; run
+ rc.common as a child and keep its output in /tmp/rc.common.log
+
+---
+ vendors/Nintendo/DSI/rc | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/vendors/Nintendo/DSI/rc b/vendors/Nintendo/DSI/rc
+index f783ae37e..42cb3b110 100644
+--- a/vendors/Nintendo/DSI/rc
++++ b/vendors/Nintendo/DSI/rc
+@@ -81,6 +81,8 @@ then
+ 	if ls /tmp/etc | grep -q .
+ 	then
+ 		/usr/bin/cp /boot/rc.common /etc/rc.common
++		# an (almost) empty rc.conf in RAM silences the big "rc.conf does not exist" banner; rc.defaults still applies
++		[ -e /etc/rc.conf ] || echo '# DSLinuxDSi: RAM copy. Defaults come from /etc/rc.defaults; add overrides here.' > /etc/rc.conf
+ 	fi
+ fi
+ mount -t ramfs none /var/run
+@@ -106,4 +108,7 @@ mknod /var/run/ttypf c 3 15
+ # boot self-test (see /boot/selftest). It must come BEFORE rc.common: when the card has no linux/ folder, sourcing
+ # the missing rc.common aborts this script.
+ [ -x /boot/selftest ] && /boot/selftest
+-. /etc/rc.common
++# Run rc.common as a child shell, keep its output in /tmp/rc.common.log (re-read it with: cat /tmp/rc.common.log)
++# and show it. (rc.common ends with 'exit 0', which now only ends the child.)
++/bin/sh /etc/rc.common > /tmp/rc.common.log 2>&1
++/usr/bin/cat /tmp/rc.common.log
+-- 
+2.56.0
+

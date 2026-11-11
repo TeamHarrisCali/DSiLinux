@@ -248,6 +248,12 @@ Another hypothesis, not excluded: the `fwver` binary itself lives on a card regi
 "p" build (`out/dsi-mode/dslinux-dsimode-p-uc3.nds`, `-uc2`): `fwver` only runs if `show_firmware_version_dsi="YES"` in `/etc/rc.conf`; marker `rc: firmware version`; the firmware MTD read now times out after 5 s (`-EIO`) instead of blocking forever. Built; not run.
 If it still stops after `rc: firmware version`, wait 1-2 minutes and look for `dsisd:` / I/O error lines; the ARM9 read timeout is 30 s.
 
+## "p" build: FIRST BOOT TO A `#` PROMPT on the real console (user report)
+With `fwver` skipped the startup completes and the shell prompt appears. (The user also saw "a warning that flew by"; most likely the big `WARNING ... /etc/rc.conf does not exist` banner, harmless.)
+"q" build (`out/dsi-mode/dslinux-dsimode-q-uc3.nds`, `-uc2`): `rc` creates a near-empty `/etc/rc.conf` in the RAM copy of `/etc` (silences the banner; `rc.defaults` still applies), and runs `rc.common` as a child shell with its output kept in
+`/tmp/rc.common.log` and shown. Logs to read at the prompt: `cat /tmp/rc.common.log`, `cat /tmp/ramcopy.log`, `dmesg | grep dsisd`. Built; not run.
+Not yet checked on the console: touch at the prompt, typing commands, what is on the card (`ls /usr/bin`, `free`), I/O errors during real use.
+
 ## 3c. Faster ARM9 clock, 3d. Wi-Fi/cameras/DSP
 Not started. 3c is small but needs the SD result first; 3d unchanged from the feasibility finding.
 
