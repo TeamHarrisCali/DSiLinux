@@ -64,6 +64,31 @@ Both SD builds boot on the console (no panic: the DLDI driver is no longer calle
 - `R=3`: card init failed; `info` is the failing step (1 CMD0, 2 CMD8, 3 CMD8 echo, 4 ACMD41, 5 ACMD41 timeout, 6 CMD2, 7 CMD3, 8 CMD9, 9 CMD7, 10 ACMD42, 11 ACMD6, 12 voltage).
 - Read it on the console with `dmesg | grep dsisd` at the prompt.
 
+## Why "16 MB" was never real: the ROM header (found from the user's v2 screenshot)
+The v2 screenshot (taken to be melonDS; the numbers differ from the console's) read:
+`dsisd: init result 2, SCFG_EXT 93ff3b06, TMIO rev 0000 ...` / `NDS: main RAM above 4 MB is MIRRORED (only 4 MB real!)`.
+- `93ff3b06` is the DSi-unlocked SCFG value *with the RAM-limit bits (15:14) at 0 = 4 MB*. The emulator gave my ROM DS-mode memory.
+- Cause: the ROMs are built with the 2008 `ndstool`, which writes a plain **DS header (unit code 0)**. Loaders (melonDS, TWiLight Menu++) start such a
+  ROM in DS mode: 4 MB of RAM, mirrored. Everything I said about "16 MB working" (Stage 2 `MemTotal: 14072 kB`, the init stack address, the photo) only shows the
+  kernel *believed* 16 MB. That statement is retracted for Stage 2 as well; the Stage 2 doc is corrected below.
+- The real console earlier reported `SCFG_EXT 00000000` for the ARM7, consistent with DS mode as well (SCFG locked, SD interface off).
+- Fix attempt (this commit): re-pack the same kernel with BlocksDS's `ndstool` so the header says **unit code 3 (DSi only)** or 2 (DS or DSi),
+  with a DSi title ID and a dummy ARM9i segment. `-uc` alone does nothing with raw binaries or plain ELFs; ndstool writes the DSi header only when the ARM9 ELF
+  carries a DSi segment, so `scripts/dsi-elf.sh` wraps the binaries in ELFs with a 4-byte segment at 0x02400000 (`scripts/make-dsimode.sh`).
+  Verified: `ndstool -i` shows `Unit code 0x03`, `TWL flags 0x01`, `DSi9 RAM address 0x2400000`. Not yet verified: that melonDS/TWiLight then give 16 MB.
+
+## Boot self-test (no typing)
+`/boot/selftest` runs at the end of boot (`rc`) and prints, for example:
+```
+======== DSLinuxDSi self-test ========
+MemTotal:  14072 kB
+RAM : PASS - 16 MB real          (or: FAIL - only 4 MB real (DS mode))
+SD  : FAIL - see below           (or: PASS - card found)
+dsisd: init result ...           (+ the diag line)
+======================================
+```
+It sits just above the prompt, so a single photo of the top screen is enough.
+
 ## 3c. Faster ARM9 clock, 3d. Wi-Fi/cameras/DSP
 Not started. 3c is small but needs the SD result first; 3d unchanged from the feasibility finding.
 

@@ -42,3 +42,6 @@ For the userland, enable Config > Emu settings > DLDI, choose "Folder" or "Image
 
 ## Real hardware (added after the user's photo)
 See [STAGE3.md](STAGE3.md): a Stage 2 build booted the kernel on a real DSi XL with the 16 MB RAM in use, then panicked in the DLDI driver that TWiLight patched in.
+
+## Correction (later)
+The 16 MB claims above are withdrawn: the ROM header was a DS header, so loaders gave 4 MB mirrored RAM. See the "Why 16 MB was never real" section in STAGE3.md.
