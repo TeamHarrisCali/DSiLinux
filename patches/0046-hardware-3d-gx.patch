@@ -1,0 +1,621 @@
+From b47dd1458603a0a644987e703e1a7d4510c8f80c Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 06:03:40 -0600
+Subject: [PATCH] Hardware 3D, step 1: kernel NDSFB_GX_SETUP/SUBMIT (command
+ words to the geometry engine, 3D layer behind the bitmap layers) and dsgx,
+ the gears on the DS 3D engine (+ a triangle test); /boot/gl hw and /boot/gl
+ tri
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ linux-2.6.x/drivers/video/ndsfb.c |  76 ++++++
+ user/TinySDGL/Makefile            |   1 +
+ user/TinySDGL/examples/Makefile   |   5 +-
+ user/TinySDGL/examples/dsgx.c     | 420 ++++++++++++++++++++++++++++++
+ vendors/Nintendo/DSI/Makefile     |   1 +
+ vendors/Nintendo/DSI/gl           |   6 +-
+ 6 files changed, 507 insertions(+), 2 deletions(-)
+ create mode 100644 user/TinySDGL/examples/dsgx.c
+
+diff --git a/linux-2.6.x/drivers/video/ndsfb.c b/linux-2.6.x/drivers/video/ndsfb.c
+index e3cdc283f..eff73376b 100644
+--- a/linux-2.6.x/drivers/video/ndsfb.c
++++ b/linux-2.6.x/drivers/video/ndsfb.c
+@@ -242,6 +242,8 @@ static int ndsfb_blank(int blank_mode, struct fb_info *info);
+ #define NDSFB_FLIP_ASYNC	0x4e02
+ #define NDSFB_FLIP_WAIT	0x4e03
+ #define NDSFB_CURSOR	0x4e04
++#define NDSFB_GX_SETUP	0x4e05
++#define NDSFB_GX_SUBMIT	0x4e06
+ static DECLARE_WAIT_QUEUE_HEAD(ndsfb_flip_wq);
+ static volatile int ndsfb_flip_pending;
+ static int ndsfb_flip_y;
+@@ -301,6 +303,69 @@ struct ndsfb_cursor {
+ 	unsigned short tiles[64];	/* 16x16 pixels as four 8x8 tiles of 4 bit pixels, 1D order */
+ };
+ 
++/*
++ * Hardware 3D (the DS geometry and rendering engines, drawing on BG0 of the main screen, below the bitmap layers:
++ * wherever the frame buffer has a transparent pixel (bit 15 clear in 16 bit, index 0 in 8 bit) the 3D picture shows
++ * through). The engines' registers are kernel-only (MPU), so programs hand over command words:
++ *   NDSFB_GX_SETUP  arg 1: power the 3D engines, put BG0 behind BG2/BG3 and switch it to 3D; arg 0: off
++ *   NDSFB_GX_SUBMIT struct ndsfb_gx_submit: count pairs (register offset, value), written in order to the
++ *                   engines' command registers (a command with several parameters is several pairs with the
++ *                   same offset). Only offsets 0x400-0x5ff (command ports), 0x060, 0x350, 0x354 are accepted.
++ * The geometry FIFO stalls the CPU when it is full, which is how a program is paced.
++ */
++struct ndsfb_gx_submit {
++	unsigned long words;		/* user pointer to count * 2 unsigned ints */
++	unsigned int count;
++};
++static int ndsfb_gx_on;
++
++static void ndsfb_gx_setup(int on)
++{
++	if (on) {
++		POWER_CR |= POWER_MATRIX | POWER_3D_CORE;
++		*(volatile u32 *)0x04000060 = 0;		/* DISP3DCNT: plain */
++		*(volatile u32 *)0x04000350 = 0;		/* rear plane: transparent black */
++		*(volatile u32 *)0x04000354 = 0x7fff;		/* rear plane depth: far */
++		BG0_CR = 3;					/* lowest priority: bitmaps cover it */
++		ndsfb_gx_on = 1;
++		DISPLAY_CR |= (1 << 3) | (1 << 8);		/* BG0 is 3D, BG0 on */
++	} else {
++		DISPLAY_CR &= ~((1 << 3) | (1 << 8));
++		ndsfb_gx_on = 0;
++		POWER_CR &= ~(POWER_MATRIX | POWER_3D_CORE);
++	}
++}
++
++static int gx_reg_ok(unsigned int off)
++{
++	return (off >= 0x400 && off < 0x600) || off == 0x060 || off == 0x350 || off == 0x354;
++}
++
++static int ndsfb_gx_submit(struct ndsfb_gx_submit __user *arg)
++{
++	struct ndsfb_gx_submit s;
++	unsigned int buf[256], done = 0, i, n;
++
++	if (!ndsfb_gx_on)
++		return -EINVAL;
++	if (copy_from_user(&s, arg, sizeof(s)))
++		return -EFAULT;
++	while (done < s.count) {
++		n = s.count - done;
++		if (n > 128)
++			n = 128;
++		if (copy_from_user(buf, (void __user *)(s.words + done * 8), n * 8))
++			return -EFAULT;
++		for (i = 0; i < n; i++) {
++			if (!gx_reg_ok(buf[2 * i]))
++				return -EINVAL;
++			*(volatile u32 *)(0x04000000 + buf[2 * i]) = buf[2 * i + 1];
++		}
++		done += n;
++	}
++	return 0;
++}
++
+ #define OBJ_PALETTE	((volatile u16 *)0x05000200)
+ #define OAM		((volatile u16 *)0x07000000)
+ #define OBJ_TILES	((volatile u16 *)0x06400000)
+@@ -537,6 +602,8 @@ static int ndsfb_set_par(struct fb_info *info)
+ 		}
+ 		if (ndsfb_cursor_ready)
+ 			DISPLAY_CR |= (1 << 12) | (1 << 4);
++		if (ndsfb_gx_on)
++			DISPLAY_CR |= (1 << 3) | (1 << 8);
+ 		writeb(VRAM_ENABLE | VRAM_A_MAIN_BG_0x6000000, VRAM_A_CR);
+ 		if (info->var.xres_virtual == 512)
+ 			if (info->fix.visual == FB_VISUAL_TRUECOLOR)
+@@ -637,6 +704,15 @@ static int ndsfb_ioctl(struct inode *inode, struct file *file,
+ 			if (info->par != 0)
+ 				return -EINVAL;
+ 			return ndsfb_cursor_ioctl((struct ndsfb_cursor __user *)argp);
++		case NDSFB_GX_SETUP:
++			if (info->par != 0)
++				return -EINVAL;
++			ndsfb_gx_setup(arg != 0);
++			return 0;
++		case NDSFB_GX_SUBMIT:
++			if (info->par != 0)
++				return -EINVAL;
++			return ndsfb_gx_submit((struct ndsfb_gx_submit __user *)argp);
+ 		case FBIOGET_VBLANK:
+ 			{
+ 				struct fb_vblank vblank;
+diff --git a/user/TinySDGL/Makefile b/user/TinySDGL/Makefile
+index ed554b2e5..68850b1f0 100644
+--- a/user/TinySDGL/Makefile
++++ b/user/TinySDGL/Makefile
+@@ -15,3 +15,4 @@ romfs:
+ 	$(ROMFSINST) examples/triangle /usr/bin
+ 	$(ROMFSINST) examples/gears /usr/bin
+ 	$(ROMFSINST) examples/dsgears /usr/bin
++	$(ROMFSINST) examples/dsgx /usr/bin
+diff --git a/user/TinySDGL/examples/Makefile b/user/TinySDGL/examples/Makefile
+index 556d4674c..d996bfe6f 100644
+--- a/user/TinySDGL/examples/Makefile
++++ b/user/TinySDGL/examples/Makefile
+@@ -1,6 +1,6 @@
+ include ../makeinclude
+ 
+-PROGS =  mElite gears triangle dsgears
++PROGS =  mElite gears triangle dsgears dsgx
+ 
+ all: $(PROGS)
+ 
+@@ -10,6 +10,9 @@ clean:
+ gears: gears.o
+ 	$(CC) $(LFLAGS) $^ -o $@ $(GL_LIBS) $(UI_LIBS) -lm
+ 
++dsgx: dsgx.o
++	$(CC) $(LFLAGS) $^ -o $@ -lm
++
+ dsgears: dsgears.o
+ 	$(CC) $(LFLAGS) $^ -o $@ $(GL_LIBS) $(UI_LIBS) -lm
+ 
+diff --git a/user/TinySDGL/examples/dsgx.c b/user/TinySDGL/examples/dsgx.c
+new file mode 100644
+index 000000000..caa640a49
+--- /dev/null
++++ b/user/TinySDGL/examples/dsgx.c
+@@ -0,0 +1,420 @@
++/*
++ * dsgx - the gears demo on the Nintendo DS's hardware 3D engine (no TinyGL, no SDL).
++ *
++ *   dsgx          the three lit gears, 3 seconds of numbers on exit
++ *   dsgx tri      one colour triangle: the smallest test of the pipeline
++ *
++ * Runs on the text screen (stop the desktop first). The kernel (drivers/video/ndsfb.c) lets a program write
++ * command words to the geometry engine; the engine transforms, lights, clips and fills, and draws on BG0 behind the
++ * frame buffer's bitmap layers, so the frame buffer is cleared to transparent pixels (0). Esc or q quits.
++ *
++ * Number formats of the engine: matrices 1.19.12 (4096 = 1.0), vertex 16 bit 1.3.12, normals and light
++ * directions 1.0.9 packed 3 x 10 bits, colours RGB555.
++ */
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <math.h>
++#include <fcntl.h>
++#include <unistd.h>
++#include <termios.h>
++#include <sys/ioctl.h>
++#include <sys/mman.h>
++#include <sys/time.h>
++#include <linux/fb.h>
++#include <linux/kd.h>
++
++#define NDSFB_GX_SETUP	0x4e05
++#define NDSFB_GX_SUBMIT	0x4e06
++
++#ifndef M_PI
++#define M_PI 3.14159265
++#endif
++
++/* command ports (offset from 0x04000000) */
++#define GX_CONTROL	0x060
++#define GX_CLEARCOLOR	0x350
++#define GX_CLEARDEPTH	0x354
++#define MTX_MODE	0x440
++#define MTX_PUSH	0x444
++#define MTX_POP		0x448
++#define MTX_IDENTITY	0x454
++#define MTX_MULT_4X4	0x460
++#define MTX_MULT_3X3	0x468
++#define MTX_TRANS	0x470
++#define GX_COLOR	0x480
++#define GX_NORMAL	0x484
++#define GX_VTX16	0x48C
++#define GX_POLYATTR	0x4A4
++#define GX_DIFAMB	0x4C0
++#define GX_SPEEMI	0x4C4
++#define GX_LIGHTVEC	0x4C8
++#define GX_LIGHTCOL	0x4CC
++#define GX_BEGIN	0x500
++#define GX_END		0x504
++#define GX_SWAP		0x540
++#define GX_VIEWPORT	0x580
++
++struct gx_submit {
++	unsigned long words;
++	unsigned int count;
++};
++
++static int fb = -1;
++static unsigned int cmd[2 * 4096];
++static int ncmd;
++
++static void flush_cmds(void)
++{
++	struct gx_submit s;
++
++	if (!ncmd)
++		return;
++	s.words = (unsigned long)cmd;
++	s.count = ncmd;
++	if (ioctl(fb, NDSFB_GX_SUBMIT, &s) < 0)
++		perror("dsgx: NDSFB_GX_SUBMIT");
++	ncmd = 0;
++}
++
++static void W(unsigned int reg, unsigned int val)
++{
++	if (ncmd >= 4096)
++		flush_cmds();
++	cmd[2 * ncmd] = reg;
++	cmd[2 * ncmd + 1] = val;
++	ncmd++;
++}
++
++static int f12(double x)
++{
++	return (int)(x * 4096.0 + (x < 0 ? -0.5 : 0.5));
++}
++
++static unsigned int pack_dir(double x, double y, double z)
++{
++	double l = sqrt(x * x + y * y + z * z);
++	int a, b, c;
++
++	if (l > 0) {
++		x /= l; y /= l; z /= l;
++	}
++	a = (int)(x * 511.0 + (x < 0 ? -0.5 : 0.5));
++	b = (int)(y * 511.0 + (y < 0 ? -0.5 : 0.5));
++	c = (int)(z * 511.0 + (z < 0 ? -0.5 : 0.5));
++	return (a & 0x3ff) | ((b & 0x3ff) << 10) | ((c & 0x3ff) << 20);
++}
++
++#define RGB15(r, g, b)	((r) | ((g) << 5) | ((b) << 10))
++
++/* ---- gear geometry, recorded once (the same shapes as gears.c) ---- */
++#define MAXV 1200
++struct vtx {
++	unsigned int xy, z;		/* VTX_16 parameters */
++	unsigned int normal;		/* NORMAL parameter in effect for this vertex */
++	unsigned int newnormal;		/* 1 when it differs from the previous vertex's */
++};
++struct strip {
++	int type, first, count;
++};
++struct gearmesh {
++	struct vtx v[MAXV];
++	struct strip s[8];
++	int nv, ns;
++	unsigned int color;		/* diffuse colour */
++};
++
++static struct gearmesh *rec;
++static unsigned int cur_normal;
++static int last_emitted_normal_idx;
++
++static void rec_normal(double x, double y, double z)
++{
++	cur_normal = pack_dir(x, y, z);
++}
++
++static void rec_begin(int type)
++{
++	rec->s[rec->ns].type = type;
++	rec->s[rec->ns].first = rec->nv;
++	rec->s[rec->ns].count = 0;
++}
++
++static void rec_vertex(double x, double y, double z)
++{
++	struct vtx *v = &rec->v[rec->nv++];
++
++	v->xy = (f12(x) & 0xffff) | ((unsigned int)(f12(y) & 0xffff) << 16);
++	v->z = f12(z) & 0xffff;
++	v->normal = cur_normal;
++	rec->s[rec->ns].count++;
++}
++
++static void rec_end(void)
++{
++	rec->ns++;
++}
++
++static void gear(struct gearmesh *m, double inner_radius, double outer_radius, double width, int teeth,
++		 double tooth_depth)
++{
++	int i;
++	double r0, r1, r2, angle, da, u, v, len;
++
++	rec = m;
++	m->nv = 0;
++	m->ns = 0;
++	r0 = inner_radius;
++	r1 = outer_radius - tooth_depth / 2.0;
++	r2 = outer_radius + tooth_depth / 2.0;
++	da = 2.0 * M_PI / teeth / 4.0;
++
++	rec_normal(0.0, 0.0, 1.0);
++	rec_begin(3);			/* quad strip: front face */
++	for (i = 0; i <= teeth; i++) {
++		angle = i * 2.0 * M_PI / teeth;
++		rec_vertex(r0 * cos(angle), r0 * sin(angle), width * 0.5);
++		rec_vertex(r1 * cos(angle), r1 * sin(angle), width * 0.5);
++		rec_vertex(r0 * cos(angle), r0 * sin(angle), width * 0.5);
++		rec_vertex(r1 * cos(angle + 3 * da), r1 * sin(angle + 3 * da), width * 0.5);
++	}
++	rec_end();
++
++	rec_begin(3);			/* outward faces of teeth */
++	for (i = 0; i < teeth; i++) {
++		angle = i * 2.0 * M_PI / teeth;
++
++		rec_vertex(r1 * cos(angle), r1 * sin(angle), width * 0.5);
++		rec_vertex(r1 * cos(angle), r1 * sin(angle), -width * 0.5);
++		u = r2 * cos(angle + da) - r1 * cos(angle);
++		v = r2 * sin(angle + da) - r1 * sin(angle);
++		len = sqrt(u * u + v * v);
++		u /= len;
++		v /= len;
++		rec_normal(v, -u, 0.0);
++		rec_vertex(r2 * cos(angle + da), r2 * sin(angle + da), width * 0.5);
++		rec_vertex(r2 * cos(angle + da), r2 * sin(angle + da), -width * 0.5);
++		rec_normal(cos(angle), sin(angle), 0.0);
++		rec_vertex(r2 * cos(angle + 2 * da), r2 * sin(angle + 2 * da), width * 0.5);
++		rec_vertex(r2 * cos(angle + 2 * da), r2 * sin(angle + 2 * da), -width * 0.5);
++		u = r1 * cos(angle + 3 * da) - r2 * cos(angle + 2 * da);
++		v = r1 * sin(angle + 3 * da) - r2 * sin(angle + 2 * da);
++		rec_normal(v, -u, 0.0);
++		rec_vertex(r1 * cos(angle + 3 * da), r1 * sin(angle + 3 * da), width * 0.5);
++		rec_vertex(r1 * cos(angle + 3 * da), r1 * sin(angle + 3 * da), -width * 0.5);
++		rec_normal(cos(angle), sin(angle), 0.0);
++	}
++	rec_vertex(r1 * cos(0), r1 * sin(0), width * 0.5);
++	rec_vertex(r1 * cos(0), r1 * sin(0), -width * 0.5);
++	rec_end();
++
++	rec_begin(3);			/* inside radius cylinder */
++	for (i = 0; i <= teeth; i++) {
++		angle = i * 2.0 * M_PI / teeth;
++		rec_normal(-cos(angle), -sin(angle), 0.0);
++		rec_vertex(r0 * cos(angle), r0 * sin(angle), -width * 0.5);
++		rec_vertex(r0 * cos(angle), r0 * sin(angle), width * 0.5);
++	}
++	rec_end();
++}
++
++static void draw_mesh(const struct gearmesh *m)
++{
++	int i, j;
++
++	W(GX_DIFAMB, m->color | (1 << 15) | (RGB15(6, 6, 6) << 16));
++	W(GX_SPEEMI, 0);
++	for (i = 0; i < m->ns; i++) {
++		unsigned int last = 0xffffffff;
++
++		W(GX_BEGIN, m->s[i].type);
++		for (j = m->s[i].first; j < m->s[i].first + m->s[i].count; j++) {
++			if (m->v[j].normal != last) {
++				W(GX_NORMAL, m->v[j].normal);
++				last = m->v[j].normal;
++			}
++			W(GX_VTX16, m->v[j].xy);
++			W(GX_VTX16, m->v[j].z);
++		}
++		W(GX_END, 0);
++	}
++}
++
++/* column-major rotation about an axis (1 = x, 2 = y, 3 = z), degrees */
++static void rotate(int axis, double deg)
++{
++	double c = cos(deg * M_PI / 180.0), s = sin(deg * M_PI / 180.0);
++	int m[9] = { 4096, 0, 0, 0, 4096, 0, 0, 0, 4096 };
++	int i;
++
++	switch (axis) {
++	case 1: m[4] = f12(c); m[5] = f12(s); m[7] = f12(-s); m[8] = f12(c); break;
++	case 2: m[0] = f12(c); m[2] = f12(-s); m[6] = f12(s); m[8] = f12(c); break;
++	default: m[0] = f12(c); m[1] = f12(s); m[3] = f12(-s); m[4] = f12(c); break;
++	}
++	for (i = 0; i < 9; i++)
++		W(MTX_MULT_3X3, m[i]);
++}
++
++static void translate(double x, double y, double z)
++{
++	W(MTX_TRANS, f12(x));
++	W(MTX_TRANS, f12(y));
++	W(MTX_TRANS, f12(z));
++}
++
++static void frustum(double l, double r, double b, double t, double n, double f)
++{
++	double m[16] = {
++		2 * n / (r - l), 0, 0, 0,
++		0, 2 * n / (t - b), 0, 0,
++		(r + l) / (r - l), (t + b) / (t - b), -(f + n) / (f - n), -1,
++		0, 0, -2 * f * n / (f - n), 0
++	};
++	int i;
++
++	for (i = 0; i < 16; i++)
++		W(MTX_MULT_4X4, f12(m[i]));
++}
++
++static long usec(void)
++{
++	struct timeval tv;
++
++	gettimeofday(&tv, NULL);
++	return tv.tv_sec * 1000000L + tv.tv_usec;
++}
++
++int main(int argc, char **argv)
++{
++	struct fb_fix_screeninfo fix;
++	struct fb_var_screeninfo var;
++	struct termios old, raw;
++	unsigned char *mem;
++	static struct gearmesh g[3];
++	int tty, i, running = 1, tri = (argc > 1 && !strcmp(argv[1], "tri"));
++	long frames = 0, t0, t1;
++	double angle = 0.0, view_rotx = 20.0, view_roty = 30.0;
++
++	fb = open("/dev/fb0", O_RDWR);
++	if (fb < 0) {
++		perror("dsgx: /dev/fb0");
++		return 1;
++	}
++	ioctl(fb, FBIOGET_FSCREENINFO, &fix);
++	ioctl(fb, FBIOGET_VSCREENINFO, &var);
++	mem = mmap(NULL, fix.smem_len, PROT_READ | PROT_WRITE, MAP_SHARED, fb, 0);
++	tty = open("/dev/tty0", O_RDWR);
++	if (tty >= 0)
++		ioctl(tty, KDSETMODE, KD_GRAPHICS);	/* the console stops drawing */
++	/* the frame buffer must not hide the 3D picture: transparent pixels everywhere (pixel 0) */
++	if (mem != MAP_FAILED) {
++		volatile unsigned long *p = (volatile unsigned long *)mem;
++		unsigned long n = (var.xres_virtual * var.yres_virtual * (var.bits_per_pixel / 8)) / 4;
++
++		for (i = 0; (unsigned long)i < n && i < 256 * 192 / 2; i++)
++			p[i] = 0;
++	}
++	if (ioctl(fb, NDSFB_GX_SETUP, 1) < 0) {
++		perror("dsgx: NDSFB_GX_SETUP (is this kernel new enough?)");
++		return 1;
++	}
++
++	tcgetattr(0, &old);
++	raw = old;
++	raw.c_lflag &= ~(ICANON | ECHO);
++	raw.c_cc[VMIN] = 0;
++	raw.c_cc[VTIME] = 0;
++	tcsetattr(0, TCSANOW, &raw);
++
++	if (!tri) {
++		gear(&g[0], 1.0, 4.0, 1.0, 20, 0.7);
++		gear(&g[1], 0.5, 2.0, 2.0, 10, 0.7);
++		gear(&g[2], 1.3, 2.0, 0.5, 10, 0.7);
++		g[0].color = RGB15(25, 3, 0);
++		g[1].color = RGB15(0, 25, 6);
++		g[2].color = RGB15(6, 6, 31);
++	}
++
++	/* one time set-up: clear values, viewport, projection */
++	W(GX_CONTROL, 0);
++	W(GX_CLEARCOLOR, 0);		/* transparent */
++	W(GX_CLEARDEPTH, 0x7fff);
++	W(GX_VIEWPORT, 0 | (0 << 8) | (255 << 16) | (191 << 24));
++	W(MTX_MODE, 0);
++	W(MTX_IDENTITY, 0);
++	if (tri)
++		frustum(-1.0, 1.0, -0.75, 0.75, 1.0, 100.0);
++	else
++		frustum(-1.0, 1.0, -0.75, 0.75, 5.0, 60.0);
++	flush_cmds();
++
++	t0 = usec();
++	while (running) {
++		char c;
++
++		if (read(0, &c, 1) == 1 && (c == 27 || c == 'q'))
++			break;
++
++		/* camera and light: light direction is where the light travels (OpenGL position (5,5,10) w = 0) */
++		W(MTX_MODE, 2);
++		W(MTX_IDENTITY, 0);
++		W(GX_LIGHTCOL, (0 << 30) | RGB15(31, 31, 31));
++		W(GX_LIGHTVEC, (0u << 30) | pack_dir(-5.0, -5.0, -10.0));
++		if (tri)
++			W(GX_POLYATTR, (3 << 6) | (31 << 16));	/* no lighting, no culling, opaque */
++		else
++			W(GX_POLYATTR, 1 | (3 << 6) | (31 << 16));	/* light 0, no culling, opaque */
++
++		if (tri) {
++			translate(0.0, 0.0, -3.0);
++			rotate(3, angle);
++			W(GX_BEGIN, 0);
++			W(GX_COLOR, RGB15(31, 0, 0));
++			W(GX_VTX16, (f12(-1.0) & 0xffff) | ((unsigned int)f12(-1.0) << 16));
++			W(GX_VTX16, 0);
++			W(GX_COLOR, RGB15(0, 31, 0));
++			W(GX_VTX16, (f12(1.0) & 0xffff) | ((unsigned int)f12(-1.0) << 16));
++			W(GX_VTX16, 0);
++			W(GX_COLOR, RGB15(0, 0, 31));
++			W(GX_VTX16, (f12(0.0) & 0xffff) | ((unsigned int)f12(1.0) << 16));
++			W(GX_VTX16, 0);
++			W(GX_END, 0);
++		} else {
++			translate(0.0, 0.0, -45.0);
++			rotate(1, view_rotx);
++			rotate(2, view_roty);
++
++			W(MTX_PUSH, 0);
++			translate(-3.0, -2.0, 0.0);
++			rotate(3, angle);
++			draw_mesh(&g[0]);
++			W(MTX_POP, 1);
++
++			W(MTX_PUSH, 0);
++			translate(3.1, -2.0, 0.0);
++			rotate(3, -2.0 * angle - 9.0);
++			draw_mesh(&g[1]);
++			W(MTX_POP, 1);
++
++			W(MTX_PUSH, 0);
++			translate(-3.1, 4.2, 0.0);
++			rotate(3, -2.0 * angle - 25.0);
++			draw_mesh(&g[2]);
++			W(MTX_POP, 1);
++		}
++		W(GX_SWAP, 0);
++		flush_cmds();
++		angle += 2.0;
++		frames++;
++	}
++	t1 = usec();
++
++	tcsetattr(0, TCSANOW, &old);
++	ioctl(fb, NDSFB_GX_SETUP, 0);
++	if (tty >= 0)
++		ioctl(tty, KDSETMODE, KD_TEXT);
++	printf("dsgx %s: %ld frames in %.2f s = %.1f frames per second\n", tri ? "triangle" : "gears", frames,
++	       (t1 - t0) / 1e6, frames * 1e6 / (double)(t1 - t0));
++	return 0;
++}
+diff --git a/vendors/Nintendo/DSI/Makefile b/vendors/Nintendo/DSI/Makefile
+index 4cae8fa57..8f45c7312 100644
+--- a/vendors/Nintendo/DSI/Makefile
++++ b/vendors/Nintendo/DSI/Makefile
+@@ -161,6 +161,7 @@ finishrom:
+ 	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/dsfiles $(ROMFSDIR)/boot/dsfiles
+ 	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/dsbench $(ROMFSDIR)/boot/dsbench
+ 	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/dsgears $(ROMFSDIR)/boot/dsgears
++	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/dsgx $(ROMFSDIR)/boot/dsgx
+ 	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/madplay $(ROMFSDIR)/$(OPTDIR)
+ 	# Compress the data area of these programs
+ 	$(CROSS)flthdr -d $(ROMFSDIR)/$(OPTDIR)/*
+diff --git a/vendors/Nintendo/DSI/gl b/vendors/Nintendo/DSI/gl
+index 9b0305344..76680146d 100644
+--- a/vendors/Nintendo/DSI/gl
++++ b/vendors/Nintendo/DSI/gl
+@@ -2,12 +2,16 @@
+ # 3D speed test on the text screen: TinySDGL's "gears" (a software OpenGL, no 3D hardware used).
+ # The desktop owns the screen: stop it first (Start menu > Exit desktop, or /boot/desktop stop).
+ # It prints frames per second every few seconds. Esc or q ends it, the arrow keys turn the gears.
++# /boot/gl hw: the same gears on the DS hardware 3D engine; /boot/gl tri: one coloured triangle (smallest test).
+ # /boot/gl profile: a 15 second profiling run (dsgears) that prints a table of where the time of a frame goes.
+ if [ -n "`pidof nano-X`" ]; then
+ 	echo "gl: stop the desktop first (Start menu > Exit desktop)"
+ 	exit 1
+ fi
+-if [ "$1" = "profile" ]; then
++if [ "$1" = "hw" ] || [ "$1" = "tri" ]; then
++	echo "dsgx: the DS's hardware 3D engine. Esc or q to quit"
++	if [ "$1" = "tri" ]; then /boot/dsgx tri; else /boot/dsgx; fi
++elif [ "$1" = "profile" ]; then
+ 	echo "dsgears: 5 tests of 3 s, then a table of where a frame's time goes"
+ 	/boot/dsgears
+ else
+-- 
+2.56.0
+
