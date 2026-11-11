@@ -24,7 +24,7 @@ the changes are in `patches/` (28 small patches, in order) and explained in `doc
 | Userland from the card, shell prompt | console | `/etc`, `/var`, `/home` get RAM copies at boot so the system can write while the card stays untouched (changes are lost at power-off) |
 | One writable file on the card: `sd:/linux/DSILOG.TXT` | console | See "Writing to the card" |
 | Writable ext2 root image `sd:/linux/ROOTFS.IMG`, card confined to it and the log file (reads too) | console (`v` build) | Reported by the user: files can be written and read. Persistence across a reboot and `e2fsck` of the image on a PC not yet reported |
-| `poweroff` actually powering off | **still not working: `y` printed "ARM7 did not answer" (hang in the ARM7 power code); `z` records progress and prints it** | `v`, `w`, `x` all left the DSi on. The `x` photo showed the power chip answering over I2C, so the fault was in the ARM7's SPI power write (it switched the SPI bus off before the data byte finished). `y` fixes that |
+| `poweroff` actually powering off the DSi | console (`z` build) | Works (user report). Earlier tries (DS power bit as it was, an I2C write) left the DSi on; the ARM7's own SPI write to the power chip, with bounded waits, is what worked. If it ever fails, the kernel prints a `dsi poweroff: still on ...` line with the chip state |
 | Boot self-test (RAM, SD, confinement) printed at the end of boot | console | `/boot/selftest` |
 | ARM9 at 134 MHz | console (nothing to change) | The `u` build reads the clock register (read-only) and the self-test shows `CLK : PASS - ARM9 at 134 MHz (the fastest)`; the loader sets it. The optional `CONFIG_NDS_DSI_FASTCPU` writes the same bit and changes nothing |
 
@@ -56,7 +56,7 @@ Without `ROOTFS.IMG` the build falls back to the earlier mode: the card is mount
 
 Checked: the ARM7's file-finding and guard code on a PC against test cards containing both files (the extent maps onto the image's real ext2 superblock; the guard accepts exactly the
 two files' sectors and rejects neighbours, the MBR, the boot sector and a request that straddles the end; a too-fragmented file is refused); the image itself (`e2fsck` clean, root-owned, only features the 2.6.14 kernel supports).
-On the console: the log-file write, and (user report) writing and reading files on the ext2 root. Not yet confirmed: the read confinement lines, a reboot-persistence test and an `e2fsck` of the image after use.
+On the console: the log-file write; the ext2 root (files written and read; a file survived a reboot; self-test `CONF: PASS` and `ROOT: ext2 read-write (persistent)`); `sync; poweroff` switches the DSi off. Not yet checked: an `e2fsck` of the image on a PC after use (it will report the image as not cleanly unmounted, since the root is not remounted read-only at power-off; `e2fsck -fp` is silent about that).
 Cautions: ext2 has no journal, so shut down with `sync; poweroff` (after a power loss run `e2fsck -fp ROOTFS.IMG` on the PC); keep the pristine image in `out/dsi-card/sd-root/linux/`; a card with little free space
 can fragment the file into more than 255 pieces (then it is refused and the fallback mode is used; the boot log says how many extents it has).
 The NAND is never selected (the driver only uses SD port 0).
@@ -65,7 +65,7 @@ The NAND is never selected (the driver only uses SD port 0).
 
 All ROMs are built into `out/dsi-mode/` (git-ignored; rebuild with the scripts below). See `out/dsi-mode/README.txt`.
 
-- `dslinux-dsimode-z-uc3.nds`: the current build (DSi-only header): `v` plus a `poweroff` attempt that prints diagnostics if the DSi stays on (see the table); needs `ROOTFS.IMG` for the writable root, otherwise it behaves like `u`. `old/u-readonly-card-clock-line/` is the last build confirmed on the console.
+- `dslinux-dsimode-z-uc3.nds`: the current build (DSi-only header): the writable ext2 root plus a working `poweroff`; needs `ROOTFS.IMG` for the writable root, otherwise it behaves like `u`. `old/u-readonly-card-clock-line/` is the last build confirmed on the console.
 - (previous line:) `dslinux-dsimode-u-uc3.nds`: the build before the writable root (DSi-only header). Its self-test also has a `CLK :` line (ARM9 134 MHz or 67 MHz, read from the clock register) and the BogoMIPS line. `-uc2` is the same with a "DS or DSi" header; use it only if uc3 will not launch.
 - `old/r-log-file-works/`: the last build that was confirmed on the console (boots to a prompt, writes the log). `s` (tar-only RAM copies, `old/s-tar-m-no-clock-line/`) was run on the console too: clean log, all checks passing. `u` adds only the clock lines.
 

@@ -318,6 +318,8 @@ The Nintendo TWL SDK documents `PM_ForceToPowerOff` as an ARM7 write to the `PMI
 y on the console: still on, and the kernel printed `dsisd: ARM7 did not answer (cmd 7)`: the ARM7 got stuck in the power-chip code (power_read/power_write wait for the SPI bus with a BIOS delay call, no timeout), so the byte-wait fix was never proven either way.
 z build (patch 0028): the power-off uses its own SPI access (bounded waits, no BIOS calls); it writes progress marks (stage 1-4, SPICNT before/after, register values) into the shared block, and the ARM9 prints them after the 3 s timeout even if the ARM7 never answered: `dsi poweroff: still on (ret N). scfg .. ctl-before .. wr-ok .. ctl-after .. stage .. spicnt-start .. spicnt-end ..`. Compiled only.
 
+z on the console: **`poweroff` switches the DSi off** (user report). So the failures were all in the ARM7 power code (the old helpers waited on the bus with a BIOS delay call, and cut the bus before the data byte finished); the I2C route was unnecessary and is gone. The diagnostic line is kept: it prints only if the console stays on.
+
 ## 3c. Faster ARM9 clock: nothing to do (measured on the console)
 `CONFIG_NDS_DSI_FASTCPU` writes `SCFG_CLK` (0x04004004) bit 0 early in boot. On the console the t-fast ROM printed `NDS: ARM9 SCFG_CLK 0001 -> 0001: 134 MHz requested and accepted`: the register already held `0001` before the write, so the loader had
 already put the ARM9 at 134 MHz and the option changes nothing. All DSi-mode boots show `66.76 BogoMIPS (lpj=333824)`: with the ARM946E's delay loop taking about 4 cycles per iteration (sub plus a taken branch), 33.4 M iterations per second means roughly 134 MHz.
