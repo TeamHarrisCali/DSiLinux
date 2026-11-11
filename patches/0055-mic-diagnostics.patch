@@ -1,0 +1,259 @@
+From a19dabd662bcfb45f4af4f99ed59ce210a111f6e Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 07:47:22 -0600
+Subject: [PATCH] Mic diagnostics: ARM7 counters (timer irqs, FIFO full/empty,
+ period messages, settings) via NDS_SD_CMD_MICDIAG and /proc/dsimic; capture
+ prepare/trigger/period printks
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ .../arch/arm/mach-nds/arm7/microphone.c       | 35 +++++++++++++++++++
+ .../arch/arm/mach-nds/arm7/microphone.h       |  3 ++
+ linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c    |  6 ++++
+ linux-2.6.x/arch/arm/mach-nds/volume.c        | 22 ++++++++++++
+ linux-2.6.x/drivers/block/dldi_c.c            | 16 +++++++++
+ linux-2.6.x/include/asm-arm/arch-nds/dsisd.h  |  1 +
+ linux-2.6.x/sound/arm/nds-sound.c             |  6 ++++
+ 7 files changed, 89 insertions(+)
+
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/microphone.c b/linux-2.6.x/arch/arm/mach-nds/arm7/microphone.c
+index 6e09b11db..aa0dea01a 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/arm7/microphone.c
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/microphone.c
+@@ -32,6 +32,10 @@
+ 
+ static s16 dsi_last;
+ 
++/* diagnostics, fetched by the ARM9 (mic_diag, /proc/dsimic) */
++static u32 dbg_on, dbg_start, dbg_stop, dbg_irq, dbg_full, dbg_empty, dbg_have, dbg_wraps;
++
++
+ static void dsi_spin(int n)
+ {
+ 	while (n-- > 0)
+@@ -66,6 +70,10 @@ static s16 dsi_sample(void)
+ {
+ 	int n = 64;
+ 
++	if (REG_MICCNT & MICCNT_EMPTY)
++		dbg_empty++;
++	else
++		dbg_full++;
+ 	while (!(REG_MICCNT & MICCNT_EMPTY) && n--)
+ 		dsi_last = (s16)(REG_MICDATA & 0xffff);
+ 	return dsi_last;
+@@ -87,6 +95,7 @@ static u32 period_size = 0; //number of bytes to read before signaling arm9
+  ********************/
+ void mic_on()
+ {
++	dbg_on++;
+ 	if (dsitouch_active())
+ 		dsi_mic_amp(1);
+ 	else
+@@ -168,6 +177,7 @@ void mic_set_period_size(u32 size)
+  ********************/
+ void mic_start()
+ {
++	dbg_start++;
+ 	// Setup timer3, since timer0 is used for wifi, 
+ 	// and timers 1 and 2 are for sound.
+ 	if (dsitouch_active()) {		/* DSi: FIFO on, 32.7 kHz, normal format, emptied */
+@@ -186,6 +196,7 @@ void mic_start()
+  *********************/
+ int mic_stop(void)
+ {
++	dbg_stop++;
+ 	//turn off the timer.
+ 	REG_TM3CNT_H &= ~NDS_TCR_ENB;
+ 	if (dsitouch_active())
+@@ -202,6 +213,7 @@ int mic_stop(void)
+  ********************/
+ void mic_timer_handler(void)
+ {
++	dbg_irq++;
+ 	if (mic_format & MIC_FORMAT_8BIT)
+ 	{
+ 		if (mic_buffer8) 
+@@ -224,6 +236,7 @@ void mic_timer_handler(void)
+ 	}
+ 	if ((period_size > 0) && (current_ptr % period_size == 0))
+ 	{
++		dbg_have++;
+ 		if (mic_format & MIC_FORMAT_8BIT)
+ 			nds_fifo_send(FIFO_MIC | FIFO_MIC_HAVEDATA /*| mic_buffer8[current_ptr]*/);
+ 		else
+@@ -232,6 +245,28 @@ void mic_timer_handler(void)
+ 	if (current_ptr >= buffer_size)
+ 	{
+ 		//buffer wraps around.
++		dbg_wraps++;
+ 		current_ptr = 0;
+ 	}
+ }
++
++/* counters for /proc/dsimic: touch[] = events, diag[] = settings */
++void mic_diag(u32 *touch, u32 *diag)
++{
++	touch[0] = dbg_on;
++	touch[1] = dbg_start;
++	touch[2] = dbg_stop;
++	touch[3] = dbg_irq;
++	touch[4] = dbg_full;
++	touch[5] = dbg_empty;
++	touch[6] = dbg_have;
++	touch[7] = dbg_wraps;
++	diag[0] = (u32)(mic_buffer16 ? mic_buffer16 : (u16 *)mic_buffer8);
++	diag[1] = buffer_size;
++	diag[2] = period_size;
++	diag[3] = mic_rate;
++	diag[4] = mic_format;
++	diag[5] = ((u32)(u16)dsi_last << 16) | current_ptr;
++	diag[6] = REG_MICCNT | (REG_TM3CNT_H << 16);
++	diag[7] = NDS_IE;
++}
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/microphone.h b/linux-2.6.x/arch/arm/mach-nds/arm7/microphone.h
+index 8b91b9698..7ac7634ea 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/arm7/microphone.h
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/microphone.h
+@@ -30,3 +30,6 @@ int mic_stop(void);
+ 
+ /* Timer handler */
+ void mic_timer_handler(void);
++
++/* counters for the ARM9 (NDS_SD_CMD_MICDIAG) */
++void mic_diag(u32 *touch, u32 *diag);
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c b/linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c
+index f5fe65be2..81b595197 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c
+@@ -39,6 +39,7 @@
+ #include "sdmmc.h"
+ #include "dsitouch.h"
+ #include "dsicam.h"
++#include "microphone.h"
+ 
+ typedef volatile u16 vu16;
+ typedef volatile u32 vu32;
+@@ -862,6 +863,11 @@ static void nds_sd_request_inner(struct nds_sd_block *b)
+ 		b->result = NDS_SD_OK;
+ 		return;
+ 
++	case NDS_SD_CMD_MICDIAG:
++		mic_diag(b->touch, b->diag);
++		b->result = NDS_SD_OK;
++		return;
++
+ 	case NDS_SD_CMD_CAMERA:
+ 		b->info[0] = dsicam_cmd(b->count, b->sector, &b->info[1]);
+ 		b->result = NDS_SD_OK;
+diff --git a/linux-2.6.x/arch/arm/mach-nds/volume.c b/linux-2.6.x/arch/arm/mach-nds/volume.c
+index 63144e4c4..7d141de7c 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/volume.c
++++ b/linux-2.6.x/arch/arm/mach-nds/volume.c
+@@ -33,8 +33,30 @@ static int vol_read_proc(char *page, char **start, off_t off, int count, int *eo
+ 	return len - off;
+ }
+ 
++extern int dsisd_micdiag(unsigned int *out);
++
++/* /proc/dsimic: the microphone's counters from the ARM7 (for finding out where the data stops) */
++static int mic_read_proc(char *page, char **start, off_t off, int count, int *eof, void *data)
++{
++	unsigned int d[16];
++	int len;
++
++	if (dsisd_micdiag(d) != 0)
++		len = sprintf(page, "ARM7 did not answer\n");
++	else
++		len = sprintf(page, "mic_on=%u start=%u stop=%u irq=%u fifo_full=%u fifo_empty=%u period_msgs=%u wraps=%u\n"
++			      "buf=%08x size=%u period=%u rate=%u fmt=%u last=%08x miccnt/tm3=%08x ie=%08x\n",
++			      d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7], d[8], d[9], d[10], d[11], d[12], d[13], d[14], d[15]);
++	*eof = 1;
++	if (off >= len)
++		return 0;
++	*start = page + off;
++	return len - off;
++}
++
+ static int __init nds_volume_init(void)
+ {
++	create_proc_read_entry("dsimic", 0444, NULL, mic_read_proc, NULL);
+ 	create_proc_read_entry("dsivolume", 0444, NULL, vol_read_proc, NULL);
+ 	return 0;
+ }
+diff --git a/linux-2.6.x/drivers/block/dldi_c.c b/linux-2.6.x/drivers/block/dldi_c.c
+index ef4016f78..186c489ae 100644
+--- a/linux-2.6.x/drivers/block/dldi_c.c
++++ b/linux-2.6.x/drivers/block/dldi_c.c
+@@ -210,6 +210,22 @@ int dsisd_camera_cmd(unsigned int sub, unsigned int arg, unsigned int *value, un
+ 	return ret;
+ }
+ 
++/* The ARM7's microphone counters (arm7/microphone.c): out[0..7] events, out[8..15] settings. 0 = ok. */
++int dsisd_micdiag(unsigned int *out)
++{
++	int ret, i;
++
++	down(&sd_mutex);
++	ret = sd_request_locked(NDS_SD_CMD_MICDIAG, 0, 0);
++	if (ret == NDS_SD_OK)
++		for (i = 0; i < 8; i++) {
++			out[i] = sd_block.touch[i];
++			out[8 + i] = sd_block.diag[i];
++		}
++	up(&sd_mutex);
++	return ret;
++}
++
+ /* Print the ARM7's DSi touch counters every 2 s while they change (no userland tool needed). */
+ static struct work_struct tdiag_work;
+ static u32 tdiag_last[3];
+diff --git a/linux-2.6.x/include/asm-arm/arch-nds/dsisd.h b/linux-2.6.x/include/asm-arm/arch-nds/dsisd.h
+index 653c0abd6..f0cf11caa 100644
+--- a/linux-2.6.x/include/asm-arm/arch-nds/dsisd.h
++++ b/linux-2.6.x/include/asm-arm/arch-nds/dsisd.h
+@@ -19,6 +19,7 @@
+ #define NDS_SD_CMD_INIT		0
+ #define NDS_SD_CMD_READ		1
+ #define NDS_SD_CMD_WRITE	2
++#define NDS_SD_CMD_MICDIAG	10	/* not SD: the microphone counters (touch[] events, diag[] settings), see arm7/microphone.c */
+ #define NDS_SD_CMD_CAMERA	9	/* not SD: camera sensor control; count = sub command, sector = argument, answer in info[0] (value) and info[1] (error mask), see arm7/dsicam.h */
+ #define NDS_SD_CMD_POWEROFF	7	/* not SD: DSi power off via the I2C power chip; answers (diag[]) only if the console stayed on */
+ #define NDS_SD_CMD_ROOTINIT	6	/* not SD I/O: locate sd:/linux/ROOTFS.IMG (ext2 root image); from then on the card is only reachable inside it and DSILOG.TXT */
+diff --git a/linux-2.6.x/sound/arm/nds-sound.c b/linux-2.6.x/sound/arm/nds-sound.c
+index 9a7213adf..8c418226e 100644
+--- a/linux-2.6.x/sound/arm/nds-sound.c
++++ b/linux-2.6.x/sound/arm/nds-sound.c
+@@ -305,6 +305,8 @@ static int snd_nds_capture_prepare(snd_pcm_substream_t * substream)
+ 
+ 	//pointer to the chip so we can log the period that are finished by the arm7.
+ 	capture_chip = chip;
++	printk(KERN_INFO "nds-sound: capture prepare rate %u fmt %d buffer %u period %u\n", runtime->rate,
++	       (int)runtime->format, (unsigned)chip->buffer_size, (unsigned)chip->period_size);
+ 	return 0;
+ }
+ 
+@@ -355,6 +357,7 @@ static int snd_nds_playback_trigger(snd_pcm_substream_t * substream, int cmd)
+  *************************************/
+ static int snd_nds_capture_trigger(snd_pcm_substream_t * substream, int cmd)
+ {
++	printk(KERN_INFO "nds-sound: capture trigger %d\n", cmd);
+ 
+ 	switch (cmd) 
+ 	{
+@@ -487,9 +490,12 @@ static int __devinit snd_nds_new_pcm(struct nds *chip)
+ static void nds_mic_handler(void) 
+ {
+ 	struct nds *chip = capture_chip;
++	static unsigned int nmsg;
+ 	snd_pcm_substream_t *substream;
+ 	snd_pcm_runtime_t *runtime;
+ 	u8 period;
++	if (++nmsg <= 3 || nmsg % 200 == 0)
++		printk(KERN_INFO "nds-sound: mic period message %u (chip %p)\n", nmsg, chip);
+ 	if (chip)
+ 	{
+ 		substream = chip->substream;
+-- 
+2.56.0
+
