@@ -149,6 +149,16 @@ Builds clean; not run anywhere.
 - BlocksDS's own TMIO init enables four ARM7 SCFG_EXT bits first (`SDMMC|INTERRUPT|AES|DMA`, bits 18, 8, 17, 0; "some loaders ... don't set the SCFG bits correctly"). The console read `93fffb06`: bits 18, 8, 17 set, **bit 0 (DMA) clear**; my driver never set it. Plausible cause; not confirmed.
 "g" ROMs (`out/dsi-mode/dslinux-dsimode-g-uc3.nds`, `-uc2`): sets those four bits before touching the controller; a mutex now serializes all ARM7 requests; the failure diagnostics now include the OR of all status bits seen (`seen`). Built; not run.
 
+## Results of the "g" build (user's photo, DSi mode)
+- `RAM : PASS - 16 MB real` (MemTotal 14084 kB) and now an honest `SD : FAIL`: `init result 3`, `info 1` (failing step CMD0), `sectors 0`.
+- `SCFG_EXT 93fffb07` after, `ext 93fffb06` before: the libnds SCFG bits were written (bit 0 set). So that was not the cause.
+- `st@fail ffffffff` (software timeout), `st 208004a0`, `seen 608004a0`, `cmd/n 0001`: only CMD0 was sent. The accumulated status shows `CMD_BUSY` (bit 30) was seen and no error bits,
+  but never `RESP_END` (bit 0). The controller accepted and finished the command without ever reporting a response end.
+- Hypothesis: my polling loop acknowledged the status register on **every poll**; libnds acknowledges once per interrupt, after the hardware has latched the bits.
+  Acknowledging continuously can clear RESP_END the moment it appears.
+"h" ROMs (`out/dsi-mode/dslinux-dsimode-h-uc3.nds`, `-uc2`): polling is now read-only (bits stay latched) and the status is acknowledged only before each command. Built; not run.
+If it still fails the diag line (`seen`) will show what the controller reports.
+
 ## 3c. Faster ARM9 clock, 3d. Wi-Fi/cameras/DSP
 Not started. 3c is small but needs the SD result first; 3d unchanged from the feasibility finding.
 

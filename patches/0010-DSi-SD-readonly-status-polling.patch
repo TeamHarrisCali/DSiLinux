@@ -1,0 +1,48 @@
+From 002ca44341817506f47d339e6b8abf5b9b2fe97d Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <noreply@example.invalid>
+Date: Tue, 10 Nov 2026 20:48:43 -0600
+Subject: [PATCH] DSi SD: poll the TMIO status read-only; acknowledge only
+ before each command
+
+The g build set the SCFG bits (SCFG_EXT 93fffb06 -> 93fffb07) but CMD0 still saw CMD_BUSY without RESP_END. The driver acknowledged the status on
+every poll, which can clear RESP_END as it appears; libnds acknowledges once per interrupt after the bits are latched.
+---
+ linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c | 12 ++++++++++--
+ 1 file changed, 10 insertions(+), 2 deletions(-)
+
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c b/linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c
+index 1ac495b56..421c1931f 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c
+@@ -181,11 +181,18 @@ static u16 clk_div(u32 clk)
+ 	return (u16)((1u << shift) >> 2);
+ }
+ 
+-/* Same effect as upstream's interrupt handler: collect status, acknowledge */
++/* Upstream's interrupt handler reads the status and then acknowledges it, once per interrupt, i.e. only after the
++ * hardware has already latched the bits. Acknowledging on every poll while a command is running (the first version of
++ * this driver) can clear a bit the instant it appears, and the first hardware test then never saw RESP_END for CMD0.
++ * So polling only reads (the bits stay latched); the status is acknowledged once before and once after a command. */
+ static void poll_status(void)
+ {
+ 	g_status |= R32(SD_STATUS);
+-	R32(SD_STATUS) = STATUS_CMD_BUSY;	/* never acknowledge CMD_BUSY */
++}
++
++static void ack_status(void)
++{
++	R32(SD_STATUS) = STATUS_CMD_BUSY;	/* write 0 to every other bit; never acknowledge CMD_BUSY */
+ }
+ 
+ static void set_port(void)
+@@ -218,6 +225,7 @@ static u32 tmio_cmd(u16 cmd, u32 arg, u16 blocks, void *buf)
+ 	u32 cap;
+ 	u32 *p = (u32 *)buf;
+ 
++	ack_status();		/* drop anything latched by the previous command */
+ 	g_status = 0;
+ 	g_last_cmd = cmd & 0xff;
+ 	g_ncmd++;
+-- 
+2.56.0
+
