@@ -286,6 +286,21 @@ The `u` build (`out/dsi-mode/dslinux-dsimode-u-uc3.nds`, `-uc2`) reads `SCFG_CLK
 `CLK : PASS - ARM9 at 134 MHz (the fastest)` (or `ARM9 at 67 MHz (not the fastest)` / `? (no clock line)`) plus the `Calibrating delay loop` line. **Verified on the console** (user's photo of the `u` ROM): `CLK : PASS - ARM9 at 134 MHz (the fastest)`, `Calibrating delay loop... 66.76 BogoMIPS (lpj=333824)`, RAM/SD/CONF PASS, `Savelog: written to sd:/linux/DSILOG.TXT`. (A first attempt at this build still had the fast option on, left over in the kernel config; it was caught by checking
 the image for the write message and rebuilt with the option off.)
 
+## Writable ext2 root ("v" build), confined by the ARM7
+User request: real filesystem writes, not only logs, but nothing may go outside `/linux`, and it must feel like a real distro.
+Why not plain FAT: FAT has no ownership, permissions or symlinks (not a distro), and every file creation changes the FAT tables and directory entries outside the folder.
+Design: an **ext2 image file** `sd:/linux/ROOTFS.IMG` (preallocated on a PC, never grows) is the root. The ARM7 finds its sectors from the FAT32 itself (same code as for `DSILOG.TXT`, generalised to two files, up to 255 extents for the image)
+and, once the image is registered, **refuses every card read or write outside the image and the log file**. The kernel registers only `/dev/dsiroot` (block device 240:8, sector n = sector n of the file, translated through the extents),
+not the whole card; `rc` mounts it as ext2 read-write at `/media/linux`, where the old symlinks (`/etc`, `/usr`, `/bin`, `/var`, `/home`, `/lib`) already point. No RAM copies, no loop driver, no FAT mount.
+Without the image the previous read-only FAT mode (now `/boot/rc.fat`) is used. `rc.common` always comes from the built-in filesystem (`/boot/rc.common`).
+Image: `scripts/make-rootimg.sh [MiB]` (ext2 rev 1, 1 KiB blocks, 128-byte inodes, features only `filetype sparse_super large_file`, owned by root via fakeroot, quiet `rc.conf` included); kernel gets `CONFIG_EXT2_FS=y` (+40 KB).
+Tests done on the PC only: the ARM7 code compiled with a host compiler against a 600 MiB test card holding `DSILOG.TXT` and a 160 MiB `ROOTFS.IMG`: one extent each; the extent maps onto the image's ext2 superblock (magic `53ef`);
+the guard accepts exactly the two files' sectors and rejects the sectors next to them, the MBR, boot sector, FAT area, the end of the card, and a 4-sector request straddling the image end; with too small an extent limit the file is refused;
+`e2fsck -fn` clean; `debugfs` shows root ownership and permissions. **Not run on the console.** First things to look at there: the log line `dsisd: root image sd:/linux/ROOTFS.IMG: N sectors in M extents; card now confined to it`, then `CONF:`/`ROOT:` in the self-test,
+then a persistence test (`echo x > /home/t; sync; poweroff`, boot again, `cat /home/t`).
+Known limits/risks: ext2 has no journal (use `sync; poweroff`; `e2fsck -fp` on the PC repairs); a heavily fragmented image (over 255 pieces) is refused; the old FAT copy of the userland in `sd:/linux/etc usr ...` becomes unreachable in this mode and can be deleted on the PC;
+writes are single 2 KiB requests to a polling ARM7 driver, so they are slow.
+
 ## 3c. Faster ARM9 clock: nothing to do (measured on the console)
 `CONFIG_NDS_DSI_FASTCPU` writes `SCFG_CLK` (0x04004004) bit 0 early in boot. On the console the t-fast ROM printed `NDS: ARM9 SCFG_CLK 0001 -> 0001: 134 MHz requested and accepted`: the register already held `0001` before the write, so the loader had
 already put the ARM9 at 134 MHz and the option changes nothing. All DSi-mode boots show `66.76 BogoMIPS (lpj=333824)`: with the ARM946E's delay loop taking about 4 cycles per iteration (sub plus a taken branch), 33.4 M iterations per second means roughly 134 MHz.

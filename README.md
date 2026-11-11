@@ -5,7 +5,7 @@ its internal SD slot and its touchscreen, launched from TWiLight Menu++ through 
 
 This repository holds the notes, build scripts and patches. The source tree is a separate clone of
 [ipwndev/DSLinux](https://github.com/ipwndev/DSLinux) (GPL-2.0, a mirror of the official SVN) that you create in `work/dslinux`;
-the changes are in `patches/` (23 small patches, in order) and explained in `docs/`.
+the changes are in `patches/` (24 small patches, in order) and explained in `docs/`.
 
 ## What works, and how it was tested
 
@@ -23,6 +23,7 @@ the changes are in `patches/` (23 small patches, in order) and explained in `doc
 | Card confined to its `linux/` folder | console | Mounted read-only at a scratch directory, only `linux/` bind-mounted, scratch directory unmounted; self-test line `CONF: PASS` and `ls /media` shows only `linux` |
 | Userland from the card, shell prompt | console | `/etc`, `/var`, `/home` get RAM copies at boot so the system can write while the card stays untouched (changes are lost at power-off) |
 | One writable file on the card: `sd:/linux/DSILOG.TXT` | console | See "Writing to the card" |
+| Writable ext2 root image `sd:/linux/ROOTFS.IMG`, card confined to it and the log file (reads too) | compiled; PC tests of the ARM7 code | **Not yet run on the console** |
 | Boot self-test (RAM, SD, confinement) printed at the end of boot | console | `/boot/selftest` |
 | ARM9 at 134 MHz | console (nothing to change) | The `u` build reads the clock register (read-only) and the self-test shows `CLK : PASS - ARM9 at 134 MHz (the fastest)`; the loader sets it. The optional `CONFIG_NDS_DSI_FASTCPU` writes the same bit and changes nothing |
 
@@ -33,38 +34,47 @@ the changes are in `patches/` (23 small patches, in order) and explained in `doc
 - **Cameras, DSP, DSi-mode sound:** not attempted or not tested.
 - **Extra login terminals and `gpm`:** off by default (they stalled the first boots in 16 MB mode); `extra_terminals="YES"` in `/etc/rc.conf` turns them on, untested.
 - **`fwver` (DS firmware version at boot):** skipped by default; its firmware read could wait forever in DSi mode.
-- **General SD writing:** deliberately not provided (see below).
+- **Writes outside `ROOTFS.IMG` and `DSILOG.TXT`:** impossible by design (see above).
 - **DS and DS-Lite builds:** the original DSLinux builds are unchanged here; only the Stage 1 build was run (in melonDS).
 
-## Writing to the card (the only way it can happen)
+## Writing to the card, and the rule "nothing outside /linux"
 
-You asked that nothing go outside `/linux`. General read-write FAT would also change the card's allocation tables and directory entries,
-so there is none. The one exception is a log file:
+The card is **never** mounted as a FAT filesystem that the system can write. Instead, two preallocated files inside `sd:/linux/` are the only
+things that can be touched, and the **ARM7 (not the kernel) enforces it**:
 
-1. On a PC, put a 1 MiB file named exactly `DSILOG.TXT` (zeros; `scripts/make-logfile.sh`) into the card's `linux/` folder.
-2. At boot the ARM7 reads the card's FAT32 itself, finds that file's sectors and **refuses every write outside them**, including raw writes from a root shell. The write-protect slider is honoured.
-3. The file never grows, so no directory or FAT entry changes. `/dev/dsilog` (character device 241:0) writes into it; `/boot/savelog` saves dmesg and the boot logs there at the end of every boot.
-4. Read the file on a PC (text, followed by zeros).
+1. `sd:/linux/ROOTFS.IMG`: an **ext2 filesystem image** (512 MiB by default) that holds the whole system. It is the read-write root (`/etc`, `/usr`, `/var`, `/home`, passwords,
+   permissions, symlinks, everything persistent), like a real distro. Build it with `scripts/make-rootimg.sh` and copy it onto the card as one file.
+2. `sd:/linux/DSILOG.TXT`: the 1 MiB boot-log file (`/dev/dsilog`, `/boot/savelog`).
 
-Checked: the parser on a PC against a test image with the same layout (the guard accepts exactly the file's sectors, nothing next to them);
-on the console, the log was written and read back (1,048,576 bytes unchanged, about 10 KiB of log, no errors).
-Not checked: the rest of the card byte for byte before and after, so an independent filesystem check on the PC is a sensible extra step.
+At boot the ARM7 reads the card's FAT32 itself (MBR, boot sector, `LINUX` folder, each file's directory entry and cluster chain) and keeps the files' sector ranges.
+Once `ROOTFS.IMG` is registered it **refuses every read and every write outside those two files**, including raw access by root. The kernel exposes only `/dev/dsiroot`
+(the image as a block device, mapped through the extents); the whole card is not a device at all. The files never grow, so no directory entry or FAT entry is ever modified.
+A driver bug can therefore at worst damage the image or the log file, never the rest of the card.
+
+Without `ROOTFS.IMG` the build falls back to the earlier mode: the card is mounted read-only, confined to its `linux/` folder, with RAM copies of `/etc /var /home`.
+
+Checked: the ARM7's file-finding and guard code on a PC against test cards containing both files (the extent maps onto the image's real ext2 superblock; the guard accepts exactly the
+two files' sectors and rejects neighbours, the MBR, the boot sector and a request that straddles the end; a too-fragmented file is refused); the image itself (`e2fsck` clean, root-owned, only features the 2.6.14 kernel supports).
+On the console, the earlier log-file write was verified. **Not yet run on the console: the ext2 root (the first general writes) and the read confinement.**
+Cautions: ext2 has no journal, so shut down with `sync; poweroff` (after a power loss run `e2fsck -fp ROOTFS.IMG` on the PC); keep the pristine image in `out/dsi-card/sd-root/linux/`; a card with little free space
+can fragment the file into more than 255 pieces (then it is refused and the fallback mode is used; the boot log says how many extents it has).
 The NAND is never selected (the driver only uses SD port 0).
 
 ## Which file to use
 
 All ROMs are built into `out/dsi-mode/` (git-ignored; rebuild with the scripts below). See `out/dsi-mode/README.txt`.
 
-- `dslinux-dsimode-u-uc3.nds`: the current build (DSi-only header). Its self-test also has a `CLK :` line (ARM9 134 MHz or 67 MHz, read from the clock register) and the BogoMIPS line. `-uc2` is the same with a "DS or DSi" header; use it only if uc3 will not launch.
+- `dslinux-dsimode-v-uc3.nds`: the current build (DSi-only header); needs `ROOTFS.IMG` for the writable root, otherwise it behaves like `u`. `old/u-readonly-card-clock-line/` is the last build confirmed on the console.
+- (previous line:) `dslinux-dsimode-u-uc3.nds`: the build before the writable root (DSi-only header). Its self-test also has a `CLK :` line (ARM9 134 MHz or 67 MHz, read from the clock register) and the BogoMIPS line. `-uc2` is the same with a "DS or DSi" header; use it only if uc3 will not launch.
 - `old/r-log-file-works/`: the last build that was confirmed on the console (boots to a prompt, writes the log). `s` (tar-only RAM copies, `old/s-tar-m-no-clock-line/`) was run on the console too: clean log, all checks passing. `u` adds only the clock lines.
 
 ## Installing on the SD card
 
 Nothing here touches the NAND or Unlaunch. Back up your card first if it matters to you; the build only reads it, except for the log file.
 
-1. Copy `dslinux-dsimode-u-uc3.nds` to any folder on the card (for example `sd:/dslinux/`).
+1. Copy `dslinux-dsimode-v-uc3.nds` to any folder on the card (for example `sd:/dslinux/`).
 2. Copy the whole folder `out/dsi-card/sd-root/linux` to the **root** of the card, so you get `sd:/linux/etc`, `sd:/linux/usr`, `sd:/linux/var`, `sd:/linux/home` and `sd:/linux/lib` (about 109 MB). It must be a folder named `linux` directly at the root.
-3. For logging: `sd:/linux/DSILOG.TXT` (1 MiB) as above, and the card's write-protect slider open.
+3. Writable system: `sd:/linux/ROOTFS.IMG` (512 MiB, from `out/dsi-card/sd-root/linux/ROOTFS.IMG`) copied as ONE file, plus `sd:/linux/DSILOG.TXT` (1 MiB), and the card's write-protect slider open. Shut down with `sync; poweroff`.
 4. Start the `.nds` from TWiLight Menu++. If it offers a "Run in" setting, choose DSi mode.
 5. At the end of boot a self-test prints `RAM`, `SD`, `CONF` lines, then you get a `#` prompt. Logs at the prompt: `cat /tmp/rc.common.log`, `cat /tmp/ramcopy.log`, `dmesg | grep dsisd`. The on-screen keyboard is the touch keyboard on the bottom screen. The busybox `grep` has no `-E`.
 
@@ -77,7 +87,7 @@ docker build -t dslinux-wheezy scripts/          # Debian Wheezy i386 with the b
 git clone --depth 1 https://github.com/ipwndev/DSLinux work/dslinux   # then apply patches/ in order (git am)
 scripts/prepare-tree.sh                           # recreates empty directories the git mirror drops, fixes autotools timestamps
 scripts/build-dsi.sh                              # Nintendo/DSI product (selects it, builds, packs ROMs)
-APPFLAGS=1 TAG=u scripts/make-dsimode.sh          # re-pack with a DSi header (needs BlocksDS's ndstool)
+APPFLAGS=1 TAG=v scripts/make-dsimode.sh          # re-pack with a DSi header (needs BlocksDS's ndstool)
 ```
 
 `docs/` has the whole story: `FEASIBILITY.md` (what was known at the start), `STAGE1.md`, `STAGE2.md`, `STAGE3.md` (every step, including the wrong turns and retractions).

@@ -1,0 +1,735 @@
+From f3ca737d3c15eb4bb76f719f3bd739b6e1494d7b Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <noreply@example.invalid>
+Date: Wed, 11 Nov 2026 02:53:52 -0600
+Subject: [PATCH] DSI: ext2 root image sd:/linux/ROOTFS.IMG as /dev/dsiroot,
+ real read-write distro; ARM7 confines the card to ROOTFS.IMG and DSILOG.TXT
+ (reads too)
+
+The ARM7 finds both files' sectors from the FAT32 itself and refuses every card access outside them once the root image is registered.
+The kernel exposes only /dev/dsiroot (no whole-card device) and mounts ext2 read-write at /media/linux; without the image the previous
+read-only FAT mode (rc.fat) is used. rc.common now always comes from the built-in filesystem.
+---
+ linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c   | 140 +++++++++++++------
+ linux-2.6.x/drivers/block/dldi_c.c           | 111 ++++++++++++++-
+ linux-2.6.x/include/asm-arm/arch-nds/dsisd.h |   2 +
+ vendors/Nintendo/DSI/Makefile                |   2 +
+ vendors/Nintendo/DSI/config.linux-2.6.x      |   2 +-
+ vendors/Nintendo/DSI/rc                      |  96 +++----------
+ vendors/Nintendo/DSI/rc.fat                  |  71 ++++++++++
+ vendors/Nintendo/DSI/selftest                |  17 ++-
+ 8 files changed, 310 insertions(+), 131 deletions(-)
+ create mode 100644 vendors/Nintendo/DSI/rc.fat
+
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c b/linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c
+index 050f5ed7b..c159db087 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c
+@@ -511,17 +511,26 @@ static void wait_not_busy(void)
+ /* Handle one request block. The caller (main.c) sends the reply FIFO word. */
+ #ifdef CONFIG_NDS_DSISD_LOGFILE
+ /*
+- * The ONLY place this driver may write: the preallocated file sd:/linux/DSILOG.TXT.
+- * At LOGINIT the ARM7 reads the card's FAT32 itself (MBR, boot sector, root directory, "linux" folder, the file's
+- * directory entry, the file's cluster chain) and keeps the file's sector ranges ("extents") in g_ext_*. A write is
+- * only carried out if every sector of it lies inside those extents; everything else is refused. The file never
+- * grows, so no directory entry and no FAT entry is ever modified.
++ * The ONLY places on the card this driver will touch: two preallocated files inside sd:/linux/
++ *   DSILOG.TXT  the boot log (written through /dev/dsilog)
++ *   ROOTFS.IMG  an ext2 filesystem image, the writable root of the system (/dev/dsiroot)
++ * At LOGINIT / ROOTINIT the ARM7 reads the card's FAT32 itself (MBR, boot sector, root directory, "linux" folder, the
++ * file's directory entry, its cluster chain) and keeps each file's sector ranges ("extents"). A request is only carried
++ * out if every sector of it lies inside those extents; everything else is refused. Once ROOTFS.IMG has been registered
++ * (g_confine) that applies to READS too, so nothing outside the two files can be read either. The files never grow, so no
++ * directory entry and no FAT entry is ever modified.
+  */
+-#define NEXT 32
++#define NEXT 32			/* log file */
++#define RNEXT 255		/* root image (all extents fit in the 2048 byte answer) */
+ static u32 g_ext_lba[NEXT];
+ static u32 g_ext_cnt[NEXT];
+ static u32 g_next;
+ static u32 g_log_sectors;
++static u32 g_rext_lba[RNEXT];
++static u32 g_rext_cnt[RNEXT];
++static u32 g_rnext;
++static u32 g_root_sectors;
++static int g_confine;
+ 
+ struct fatinfo {
+ 	u32 fat_lba;
+@@ -608,16 +617,22 @@ static int dir_find(const struct fatinfo *f, u32 dc, const char *name, u32 *cl,
+ #define LSTEP_FILE	4
+ #define LSTEP_CHAIN	5
+ 
+-static u32 log_init(struct nds_sd_block *b)
++/*
++ * Find the file sd:/linux/<name> and compute its sector extents (at most maxn; a file with more pieces is refused).
++ * The extents are returned in lba[]/cnt[] and the answer is placed in b->data[]: o[0] = number of extents, o[1] = file
++ * sectors, then (lba, count) pairs.
++ */
++static u32 file_extents(struct nds_sd_block *b, const char *name, u32 *lba, u32 *cnt, u32 maxn, u32 *n_out,
++			u32 *sectors_out)
+ {
+-	u8 *d = b->data;		/* 2048 byte scratch: sector 0..511 = data, 512.. = FAT sector */
++	u8 *d = b->data;		/* 2048 byte scratch: 0..511 = directory/boot sector, 512.. = FAT sector */
+ 	u8 *tmp = b->data + 512;
+ 	struct fatinfo f;
+-	u32 part, rsv, nfat, fatsz, cl, attr, size, c, nsec, nclu, i, total;
++	u32 part, rsv, nfat, fatsz, cl, attr, size, c, nsec, nclu, i, total, n;
+ 	u32 *o;
+ 
+-	g_next = 0;
+-	g_log_sectors = 0;
++	*n_out = 0;
++	*sectors_out = 0;
+ 	if (!g_inited)
+ 		return NDS_SD_ERR_NOINIT;
+ 
+@@ -646,69 +661,94 @@ static u32 log_init(struct nds_sd_block *b)
+ 		return NDS_SD_ERR_NOLOG;
+ 
+ 	b->info[2] = LSTEP_FILE;
+-	if (dir_find(&f, cl, "DSILOG  TXT", &cl, &attr, &size, d, tmp) || (attr & 0x18) || cl < 2 || size < 512)
++	if (dir_find(&f, cl, name, &cl, &attr, &size, d, tmp) || (attr & 0x18) || cl < 2 || size < 512)
+ 		return NDS_SD_ERR_NOLOG;
+ 
+ 	b->info[2] = LSTEP_CHAIN;
+ 	nsec = size / 512;
+ 	nclu = (nsec + f.spc - 1) / f.spc;
+ 	c = cl;
++	n = 0;
+ 	for (i = 0; i < nclu && c; i++) {
+-		u32 lba = clus_lba(&f, c);
++		u32 l = clus_lba(&f, c);
+ 
+-		if (g_next && g_ext_lba[g_next - 1] + g_ext_cnt[g_next - 1] == lba) {
+-			g_ext_cnt[g_next - 1] += f.spc;
++		if (n && lba[n - 1] + cnt[n - 1] == l) {
++			cnt[n - 1] += f.spc;
+ 		} else {
+-			if (g_next == NEXT)
+-				break;
+-			g_ext_lba[g_next] = lba;
+-			g_ext_cnt[g_next] = f.spc;
+-			g_next++;
++			if (n == maxn)
++				return NDS_SD_ERR_NOLOG;	/* too fragmented */
++			lba[n] = l;
++			cnt[n] = f.spc;
++			n++;
+ 		}
+ 		c = fat_next(&f, c, tmp);
+ 	}
+ 	total = 0;
+-	for (i = 0; i < g_next; i++)
+-		total += g_ext_cnt[i];
++	for (i = 0; i < n; i++)
++		total += cnt[i];
++	if (total < nsec)			/* chain ended early: the file is damaged */
++		return NDS_SD_ERR_NOLOG;
+ 	if (total > nsec) {			/* the last cluster is only partly used by the file */
+-		g_ext_cnt[g_next - 1] -= total - nsec;
++		cnt[n - 1] -= total - nsec;
+ 		total = nsec;
+ 	}
+-	if (g_next == 0 || total == 0) {
+-		g_next = 0;
++	if (n == 0 || total == 0)
+ 		return NDS_SD_ERR_NOLOG;
+-	}
+-	g_log_sectors = total;
+ 
++	*n_out = n;
++	*sectors_out = total;
+ 	o = (u32 *)b->data;
+-	o[0] = g_next;
+-	o[1] = g_log_sectors;
+-	for (i = 0; i < g_next; i++) {
+-		o[2 + 2 * i] = g_ext_lba[i];
+-		o[3 + 2 * i] = g_ext_cnt[i];
++	o[0] = n;
++	o[1] = total;
++	for (i = 0; i < n; i++) {
++		o[2 + 2 * i] = lba[i];
++		o[3 + 2 * i] = cnt[i];
+ 	}
+ 	b->info[2] = 0;
+ 	return NDS_SD_OK;
+ }
+ 
+-/* every sector of [sector, sector + count) must lie inside the log file's extents */
+-static int write_allowed(u32 sector, u32 count)
++static u32 log_init(struct nds_sd_block *b)
++{
++	g_next = 0;
++	g_log_sectors = 0;
++	return file_extents(b, "DSILOG  TXT", g_ext_lba, g_ext_cnt, NEXT, &g_next, &g_log_sectors);
++}
++
++static u32 root_init(struct nds_sd_block *b)
++{
++	u32 r;
++
++	g_rnext = 0;
++	g_root_sectors = 0;
++	g_confine = 0;
++	r = file_extents(b, "ROOTFS  IMG", g_rext_lba, g_rext_cnt, RNEXT, &g_rnext, &g_root_sectors);
++	if (r == NDS_SD_OK)
++		g_confine = 1;		/* from now on the card can only be reached inside the two files */
++	return r;
++}
++
++static int in_extents(const u32 *lba, const u32 *cnt, u32 n, u32 s)
++{
++	u32 i;
++
++	for (i = 0; i < n; i++)
++		if (s >= lba[i] && s - lba[i] < cnt[i])
++			return 1;
++	return 0;
++}
++
++/* every sector of [sector, sector + count) must lie inside the log file or the root image */
++static int region_ok(u32 sector, u32 count)
+ {
+-	u32 j, i;
++	u32 j;
+ 
+-	if (!g_next)
++	if (!g_next && !g_rnext)
+ 		return 0;
+ 	for (j = 0; j < count; j++) {
+ 		u32 s = sector + j;
+-		int found = 0;
+ 
+-		for (i = 0; i < g_next; i++) {
+-			if (s >= g_ext_lba[i] && s - g_ext_lba[i] < g_ext_cnt[i]) {
+-				found = 1;
+-				break;
+-			}
+-		}
+-		if (!found)
++		if (!in_extents(g_ext_lba, g_ext_cnt, g_next, s) && !in_extents(g_rext_lba, g_rext_cnt, g_rnext, s))
+ 			return 0;
+ 	}
+ 	return 1;
+@@ -736,6 +776,12 @@ static void nds_sd_request_inner(struct nds_sd_block *b)
+ 			b->result = NDS_SD_ERR_PARAM;
+ 			return;
+ 		}
++#ifdef CONFIG_NDS_DSISD_LOGFILE
++		if (b->cmd == NDS_SD_CMD_READ && g_confine && !region_ok(b->sector, b->count)) {
++			b->result = NDS_SD_ERR_DENIED;	/* outside the two files: not readable once the root image is in use */
++			return;
++		}
++#endif
+ 		sect = (g_inited == 1) ? b->sector * 512 : b->sector;
+ 		if (b->cmd == NDS_SD_CMD_READ) {
+ 			cmd = CMD_RESP_R1 | CMD_DATA_EN | CMD_DATA_R |
+@@ -744,7 +790,7 @@ static void nds_sd_request_inner(struct nds_sd_block *b)
+ #ifdef CONFIG_NDS_DSISD_LOGFILE
+ 			/* the only write this driver does: inside the preallocated log file, and only with the write
+ 			 * protect slider open */
+-			if (!(R32(SD_STATUS) & STATUS_NO_WRPROT) || !write_allowed(b->sector, b->count)) {
++			if (!(R32(SD_STATUS) & STATUS_NO_WRPROT) || !region_ok(b->sector, b->count)) {
+ 				b->result = NDS_SD_ERR_WRPROT;
+ 				return;
+ 			}
+@@ -797,6 +843,10 @@ static void nds_sd_request_inner(struct nds_sd_block *b)
+ 		return;
+ #endif
+ 
++	case NDS_SD_CMD_ROOTINIT:
++		b->result = root_init(b);
++		return;
++
+ 	case NDS_SD_CMD_LASTERR:
+ 		b->diag[0] = g_req_sector;
+ 		b->diag[1] = g_req_count | (g_req_cmd << 16);
+diff --git a/linux-2.6.x/drivers/block/dldi_c.c b/linux-2.6.x/drivers/block/dldi_c.c
+index 9ef225af8..c1b97fcb3 100644
+--- a/linux-2.6.x/drivers/block/dldi_c.c
++++ b/linux-2.6.x/drivers/block/dldi_c.c
+@@ -98,9 +98,11 @@ struct dldi_dev {
+ 	int running;			
+         struct request_queue *queue;    /* The device request queue */
+         struct gendisk *gd;             /* The gendisk structure */
++	int is_image;			/* 1: this is /dev/dsiroot (the ROOTFS.IMG file), sectors are mapped through the extents */
+ };
+ 
+ static struct dldi_dev *Devices = NULL;
++static struct dldi_dev *ImgDev = NULL;
+ 
+ #ifdef CONFIG_NDS_DSISD
+ /*
+@@ -320,6 +322,42 @@ static void dsisd_log_setup(void)
+ }
+ #endif /* CONFIG_NDS_DSISD_LOGFILE */
+ 
++#ifdef CONFIG_NDS_DSISD_LOGFILE
++/*
++ * /dev/dsiroot: the ext2 root image sd:/linux/ROOTFS.IMG as a block device. Sector n of the device is a sector of the
++ * file; the extents come from the ARM7 (NDS_SD_CMD_ROOTINIT), which also refuses every request outside the image and
++ * the log file. When the image is in use the whole card is NOT exposed as a device at all.
++ */
++#define ROOT_NEXT	255
++static u32 root_ext_lba[ROOT_NEXT];
++static u32 root_ext_cnt[ROOT_NEXT];
++static u32 root_next, root_sectors;
++
++static void dsisd_root_setup(void)
++{
++	int ret = sd_request(NDS_SD_CMD_ROOTINIT, 0, 0);
++
++	if (ret == NDS_SD_OK) {
++		const u32 *o = (const u32 *)sd_block.data;
++		u32 i;
++
++		root_next = o[0] > ROOT_NEXT ? ROOT_NEXT : o[0];
++		root_sectors = o[1];
++		for (i = 0; i < root_next; i++) {
++			root_ext_lba[i] = o[2 + 2 * i];
++			root_ext_cnt[i] = o[3 + 2 * i];
++		}
++		printk(KERN_INFO "dsisd: root image sd:/linux/ROOTFS.IMG: %u sectors (%u MiB) in %u extents; card now confined to it\n",
++		       root_sectors, root_sectors / 2048, root_next);
++	} else {
++		printk(KERN_INFO "dsisd: no root image (sd:/linux/ROOTFS.IMG): result %d step %u\n", ret, sd_block.info[2]);
++	}
++}
++
++/* transfer inside the image: split at extent boundaries and hand absolute card sectors to the ARM7 */
++static void dsisd_image_transfer(unsigned long sector, unsigned long nsect, char *buffer, int write);
++#endif
++
+ static int dsisd_start(void)
+ {
+ 	int ret;
+@@ -345,6 +383,7 @@ static int dsisd_start(void)
+ 	nsectors = sd_block.sectors;
+ #ifdef CONFIG_NDS_DSISD_LOGFILE
+ 	dsisd_log_setup();
++	dsisd_root_setup();
+ #endif
+ 	return 0;
+ }
+@@ -400,12 +439,52 @@ static void dsisd_transfer(unsigned long sector, unsigned long nsect,
+ /*
+  * Handle an I/O request.
+  */
++#ifdef CONFIG_NDS_DSISD_LOGFILE
++static void dsisd_image_transfer(unsigned long sector, unsigned long nsect, char *buffer, int write)
++{
++	u32 i = 0;
++	unsigned long off = sector;
++
++	/* find the extent that holds the first sector */
++	while (i < root_next && off >= root_ext_cnt[i]) {
++		off -= root_ext_cnt[i];
++		i++;
++	}
++	while (nsect > 0) {
++		unsigned long run;
++
++		if (i >= root_next) {
++			printk(KERN_ERR "dsiroot: sector %lu beyond the image\n", sector);
++			dldi_xfer_err = 1;
++			return;
++		}
++		run = root_ext_cnt[i] - off;
++		if (run > nsect)
++			run = nsect;
++		dsisd_transfer(root_ext_lba[i] + off, run, buffer, write);
++		if (dldi_xfer_err)
++			return;
++		buffer += run * SECTOR_SIZE;
++		nsect -= run;
++		sector += run;
++		off = 0;
++		i++;
++	}
++}
++#endif
++
+ static void dldi_transfer(struct dldi_dev *dev, unsigned long sector,
+ 		unsigned long nsect, char *buffer, int write)
+ {
+ 	int ret = 0;
+ 	unsigned long sectors;
+ #ifdef CONFIG_NDS_DSISD
++#ifdef CONFIG_NDS_DSISD_LOGFILE
++	if (dev->is_image) {
++		dsisd_image_transfer(sector, nsect, buffer, write);
++		return;
++	}
++#endif
+ 	dsisd_transfer(sector, nsect, buffer, write);
+ 	return;
+ #endif
+@@ -548,7 +627,7 @@ again:	while (1) {
+  */
+ static void dldi_request(request_queue_t *q)
+ {
+-	struct dldi_dev *dev = Devices;
++	struct dldi_dev *dev = q->queuedata;
+ 	
+ 	if (!dev->running) {
+ 		dev->running = 1;
+@@ -627,6 +706,12 @@ static void setup_device(struct dldi_dev *dev, int which)
+ 	 * Get some memory.
+ 	 */
+ 	memset (dev, 0, sizeof (struct dldi_dev));
++	dev->is_image = (which == 1);
++#ifdef CONFIG_NDS_DSISD_LOGFILE
++	if (dev->is_image)
++		dev->size = root_sectors * SECTOR_SIZE;
++	else
++#endif
+ 	dev->size = nsectors*SECTOR_SIZE;
+ 	spin_lock_init(&dev->lock);
+ 	INIT_WORK(&dev->dldi_work, dldi_do_request, dev);
+@@ -650,18 +735,22 @@ static void setup_device(struct dldi_dev *dev, int which)
+ 	/*
+ 	 * And the gendisk structure.
+ 	 */
+-	dev->gd = alloc_disk(dldi_MINORS);
++	dev->gd = alloc_disk(dev->is_image ? 1 : dldi_MINORS);
+ 	if (! dev->gd) {
+ 		printk (KERN_NOTICE "alloc_disk failure\n");
+ 		return;
+ 	}
+ 	dev->gd->major = dldi_major;
+-	dev->gd->first_minor = which*dldi_MINORS;
++	dev->gd->first_minor = dev->is_image ? 8 : which*dldi_MINORS;
+ 	dev->gd->fops = &dldi_ops;
+ 	dev->gd->queue = dev->queue;
+ 	dev->gd->private_data = dev;
+-	snprintf (dev->gd->disk_name, 32, "dldi");
++	snprintf (dev->gd->disk_name, 32, dev->is_image ? "dsiroot" : "dldi");
++#ifdef CONFIG_NDS_DSISD_LOGFILE
++	set_capacity(dev->gd, dev->is_image ? root_sectors : nsectors);
++#else
+ 	set_capacity(dev->gd, nsectors);
++#endif
+ 	add_disk(dev->gd);
+ 	return;
+ }
+@@ -697,6 +786,18 @@ static int __init dldi_init(void)
+ 	/*
+ 	 * Allocate the device array, and initialize each one.
+ 	 */
++#ifdef CONFIG_NDS_DSISD_LOGFILE
++	if (root_next) {
++		/* the ext2 root image is in use: expose ONLY it (/dev/dsiroot); the whole card is not a device */
++		ImgDev = kmalloc(sizeof (struct dldi_dev), GFP_KERNEL);
++		if (ImgDev == NULL) {
++			unregister_blkdev(dldi_major, "dldi");
++			return -ENOMEM;
++		}
++		setup_device(ImgDev, 1);
++		return 0;
++	}
++#endif
+ 	Devices = kmalloc(sizeof (struct dldi_dev), GFP_KERNEL);
+ 	if (Devices == NULL) {
+ 		unregister_blkdev(dldi_major, "dldi");
+@@ -712,6 +813,8 @@ static void dldi_exit(void)
+ 	int ret;
+ 	struct dldi_dev *dev = Devices;
+ 
++	if (!dev)
++		return;
+ 	cancel_delayed_work(&dev->dldi_work);
+ 
+ 	/* Shutdown the interface */
+diff --git a/linux-2.6.x/include/asm-arm/arch-nds/dsisd.h b/linux-2.6.x/include/asm-arm/arch-nds/dsisd.h
+index 6ad068cb8..729474f8d 100644
+--- a/linux-2.6.x/include/asm-arm/arch-nds/dsisd.h
++++ b/linux-2.6.x/include/asm-arm/arch-nds/dsisd.h
+@@ -19,6 +19,7 @@
+ #define NDS_SD_CMD_INIT		0
+ #define NDS_SD_CMD_READ		1
+ #define NDS_SD_CMD_WRITE	2
++#define NDS_SD_CMD_ROOTINIT	6	/* not SD I/O: locate sd:/linux/ROOTFS.IMG (ext2 root image); from then on the card is only reachable inside it and DSILOG.TXT */
+ #define NDS_SD_CMD_LOGINIT	5	/* not SD I/O: locate sd:/linux/DSILOG.TXT, answer with its sector extents in data[] */
+ #define NDS_SD_CMD_LASTERR	4	/* not SD: report what the last request was doing (diag[]) */
+ #define NDS_SD_CMD_TOUCHDIAG	3	/* not SD: fetch the DSi touch reader's counters into touch[] */
+@@ -31,6 +32,7 @@
+ #define NDS_SD_ERR_RW		4	/* command failed, info[3] has TMIO status */
+ #define NDS_SD_ERR_NOINIT	5
+ #define NDS_SD_ERR_WRPROT	6	/* write refused (read-only build/slider, or outside the log file) */
++#define NDS_SD_ERR_DENIED	8	/* read refused: outside ROOTFS.IMG and DSILOG.TXT (card confined) */
+ #define NDS_SD_ERR_NOLOG	7	/* LOGINIT: log file not found/usable, info[2] = step (see sdmmc.c) */
+ 
+ struct nds_sd_block {
+diff --git a/vendors/Nintendo/DSI/Makefile b/vendors/Nintendo/DSI/Makefile
+index f8d64b13f..2ba315a37 100644
+--- a/vendors/Nintendo/DSI/Makefile
++++ b/vendors/Nintendo/DSI/Makefile
+@@ -30,6 +30,7 @@ DEVICES := \
+ 	\
+ 	dldi,b,240,0 \
+ 	dsilog,c,241,0 \
++	dsiroot,b,240,8 \
+ 	dldi1,b,240,1  dldi2,b,240,2      dldi3,b,240,3    dldi4,b,240,4 \
+ 	\
+ 	ptyp0,c,2,0    ptyp1,c,2,1        ptyp2,c,2,2      ptyp3,c,2,3 \
+@@ -104,6 +105,7 @@ romfs:
+ 	$(ROMFSINST) /boot/inittab
+ 	$(ROMFSINST) -p +x /boot/selftest
+ 	$(ROMFSINST) /boot/rc.common
++	$(ROMFSINST) /boot/rc.fat
+ 	$(ROMFSINST) -p +x /boot/savelog
+ 	$(ROMFSINST) /$(FATFS)/linux/etc/issue
+ 	# copy some Nintendo specific files to romfs
+diff --git a/vendors/Nintendo/DSI/config.linux-2.6.x b/vendors/Nintendo/DSI/config.linux-2.6.x
+index 59d9cbd4a..a5fdad893 100644
+--- a/vendors/Nintendo/DSI/config.linux-2.6.x
++++ b/vendors/Nintendo/DSI/config.linux-2.6.x
+@@ -678,7 +678,7 @@ CONFIG_USB_ARCH_HAS_HCD=y
+ #
+ # File systems
+ #
+-# CONFIG_EXT2_FS is not set
++CONFIG_EXT2_FS=y
+ # CONFIG_EXT3_FS is not set
+ # CONFIG_JBD is not set
+ # CONFIG_REISERFS_FS is not set
+diff --git a/vendors/Nintendo/DSI/rc b/vendors/Nintendo/DSI/rc
+index 99c4f55bc..1ac0b3d8d 100644
+--- a/vendors/Nintendo/DSI/rc
++++ b/vendors/Nintendo/DSI/rc
+@@ -1,82 +1,29 @@
+ #!/bin/sh
+-
++# DSLinuxDSi boot script.
++#  1. /tmp is RAM.
++#  2. Preferred root: an ext2 image file sd:/linux/ROOTFS.IMG, seen as /dev/dsiroot, mounted read-write at /media/linux. The ARM7
++#     lets the card be reached ONLY inside that file and sd:/linux/DSILOG.TXT (reads and writes), so nothing outside linux/ can
++#     be read or changed, yet the system is a real writable ext2 distro (ownership, permissions, symlinks).
++#  3. Fallback (no image): /boot/rc.fat, the read-only, confined FAT folder with RAM copies of /etc /var /home.
+ mount -t proc none /proc
+-# ---- Confine the SD card to its linux/ folder -------------------------------------------------------------
+-# The whole card is mounted READ-ONLY at /mnt only for a moment. Only its linux/ folder is then bind-mounted at
+-# /media/linux and /mnt is unmounted again, so nothing outside linux/ is reachable by path. If any step fails the
+-# card is unmounted instead of being left visible.
+-CARD=no
+-if mount -t vfat -o ro,noatime /dev/dldi1 /mnt
+-then
+-	CARD=yes
+-else
+-	# some cards have no partition table: try the whole device
+-	if mount -t vfat -o ro,noatime /dev/dldi /mnt
+-	then
+-		CARD=yes
+-	else
+-		echo "Sorry, failed to mount DLDI device."
+-	fi
+-fi
+-if [ "$CARD" = "yes" ]
++mount -t ramfs none /tmp
++LOG=/tmp/ramcopy.log
++echo "RAM copy / root log" > $LOG
++ROOT=none
++if grep -q dsiroot /proc/partitions
+ then
+-	if mount -o bind /mnt/linux /media/linux
++	if mount -t ext2 -o rw,noatime /dev/dsiroot /media/linux
+ 	then
+-		umount /mnt || umount -l /mnt
++		ROOT=ext2
++		echo "root: ext2 image sd:/linux/ROOTFS.IMG mounted read-write (persistent)" >> $LOG
+ 	else
+-		echo "Card has no usable linux/ folder (or bind mount failed): card NOT mounted."
+-		umount /mnt || umount -l /mnt
++		echo "root: ROOTFS.IMG found but the ext2 mount FAILED (dmesg shows why); falling back" >> $LOG
+ 	fi
+ fi
+-# The card is mounted read-only (see above) but DSLinux writes to /etc, /var and /home while it runs. Give those three
+-# folders RAM copies: copy them from the card, then bind-mount the copy over the card's folder. Changes are lost at power-off.
+-# The card itself is never written. (Skipped per folder if the copy fails, so a failed copy never hides the card's files.)
+-mount -t ramfs none /tmp
+-LOG=/tmp/ramcopy.log
+-echo "RAM copy log" > $LOG
+-for d in etc var home
+-do
+-	if [ -d /media/linux/$d ]
+-	then
+-		# copy with tar through a pipe (cp -a of a folder fails on this system: "not a directory"); -m: do not restore the
+-		# file dates (the console's clock is years behind the PC's, which made tar print a warning per file)
+-		echo "tar $d" >> $LOG
+-		if ls /media/linux/$d | grep -q .
+-		then
+-			/usr/bin/tar -cf - -C /media/linux $d | /usr/bin/tar -xmf - -C /tmp >> $LOG 2>&1
+-		else
+-			/usr/bin/mkdir /tmp/$d >> $LOG 2>&1
+-		fi
+-		# never hide the card's files behind an empty copy
+-		if [ -d /tmp/$d ]
+-		then
+-			if ls /media/linux/$d | grep -q .
+-			then
+-				if ls /tmp/$d | grep -q .
+-				then
+-					mount -o bind /tmp/$d /media/linux/$d
+-					echo "bound $d" >> $LOG
+-				else
+-					echo "RAM copy of /$d is empty: not used." >> $LOG
+-				fi
+-			else
+-				mount -o bind /tmp/$d /media/linux/$d
+-				echo "bound $d (empty)" >> $LOG
+-			fi
+-		else
+-			echo "no RAM copy of /$d" >> $LOG
+-		fi
+-	fi
+-done
+-# Use the DSI build's own rc.common (kept in the built-in filesystem) over the RAM copy of /etc. The card's copy is not touched.
+-if [ -f /boot/rc.common ]
++if [ "$ROOT" = "none" ]
+ then
+-	if ls /tmp/etc | grep -q .
+-	then
+-		/usr/bin/cp /boot/rc.common /etc/rc.common
+-		# an (almost) empty rc.conf in RAM silences the big "rc.conf does not exist" banner; rc.defaults still applies
+-		[ -e /etc/rc.conf ] || echo '# DSLinuxDSi: RAM copy. Defaults come from /etc/rc.defaults; add overrides here.' > /etc/rc.conf
+-	fi
++	. /boot/rc.fat
++	echo "root: FAT fallback (read-only card, RAM copies)" >> $LOG
+ fi
+ mount -t ramfs none /var/run
+ mount -t sysfs none /sys
+@@ -98,12 +45,11 @@ mknod /var/run/ttypc c 3 12
+ mknod /var/run/ttypd c 3 13
+ mknod /var/run/ttype c 3 14
+ mknod /var/run/ttypf c 3 15
+-# boot self-test (see /boot/selftest). It must come BEFORE rc.common: when the card has no linux/ folder, sourcing
+-# the missing rc.common aborts this script.
++# boot self-test (see /boot/selftest)
+ [ -x /boot/selftest ] && /boot/selftest
+-# Run rc.common as a child shell, keep its output in /tmp/rc.common.log (re-read it with: cat /tmp/rc.common.log)
++# Run rc.common (the DSI build's own copy in the built-in filesystem, so no re-copy to the card is ever needed) as a child shell, keep its output in /tmp/rc.common.log (re-read it with: cat /tmp/rc.common.log)
+ # and show it. (rc.common ends with 'exit 0', which now only ends the child.)
+-/bin/sh /etc/rc.common > /tmp/rc.common.log 2>&1
++/bin/sh /boot/rc.common > /tmp/rc.common.log 2>&1
+ /usr/bin/cat /tmp/rc.common.log
+ # save the boot log into the one writable file on the card (sd:/linux/DSILOG.TXT), if it exists
+ [ -x /boot/savelog ] && /boot/savelog
+diff --git a/vendors/Nintendo/DSI/rc.fat b/vendors/Nintendo/DSI/rc.fat
+new file mode 100644
+index 000000000..185d0baf7
+--- /dev/null
++++ b/vendors/Nintendo/DSI/rc.fat
+@@ -0,0 +1,71 @@
++# /boot/rc.fat: FALLBACK used when there is no sd:/linux/ROOTFS.IMG. Sourced by /boot/rc. The card is mounted read-only and
++# confined to its linux/ folder, and /etc /var /home get RAM copies so the system can write (changes are lost at power-off).
++# ---- Confine the SD card to its linux/ folder -------------------------------------------------------------
++# The whole card is mounted READ-ONLY at /mnt only for a moment. Only its linux/ folder is then bind-mounted at
++# /media/linux and /mnt is unmounted again, so nothing outside linux/ is reachable by path. If any step fails the
++# card is unmounted instead of being left visible.
++CARD=no
++if mount -t vfat -o ro,noatime /dev/dldi1 /mnt
++then
++	CARD=yes
++else
++	# some cards have no partition table: try the whole device
++	if mount -t vfat -o ro,noatime /dev/dldi /mnt
++	then
++		CARD=yes
++	else
++		echo "Sorry, failed to mount DLDI device."
++	fi
++fi
++if [ "$CARD" = "yes" ]
++then
++	if mount -o bind /mnt/linux /media/linux
++	then
++		umount /mnt || umount -l /mnt
++	else
++		echo "Card has no usable linux/ folder (or bind mount failed): card NOT mounted."
++		umount /mnt || umount -l /mnt
++	fi
++fi
++# The card is mounted read-only (see above) but DSLinux writes to /etc, /var and /home while it runs. Give those three
++# folders RAM copies: copy them from the card, then bind-mount the copy over the card's folder. Changes are lost at power-off.
++# The card itself is never written. (Skipped per folder if the copy fails, so a failed copy never hides the card's files.)
++for d in etc var home
++do
++	if [ -d /media/linux/$d ]
++	then
++		# copy with tar through a pipe (cp -a of a folder fails on this system: "not a directory"); -m: do not restore the
++		# file dates (the console's clock is years behind the PC's, which made tar print a warning per file)
++		echo "tar $d" >> $LOG
++		if ls /media/linux/$d | grep -q .
++		then
++			/usr/bin/tar -cf - -C /media/linux $d | /usr/bin/tar -xmf - -C /tmp >> $LOG 2>&1
++		else
++			/usr/bin/mkdir /tmp/$d >> $LOG 2>&1
++		fi
++		# never hide the card's files behind an empty copy
++		if [ -d /tmp/$d ]
++		then
++			if ls /media/linux/$d | grep -q .
++			then
++				if ls /tmp/$d | grep -q .
++				then
++					mount -o bind /tmp/$d /media/linux/$d
++					echo "bound $d" >> $LOG
++				else
++					echo "RAM copy of /$d is empty: not used." >> $LOG
++				fi
++			else
++				mount -o bind /tmp/$d /media/linux/$d
++				echo "bound $d (empty)" >> $LOG
++			fi
++		else
++			echo "no RAM copy of /$d" >> $LOG
++		fi
++	fi
++done
++# an (almost) empty rc.conf in RAM silences the big "rc.conf does not exist" banner; rc.defaults still applies
++if ls /tmp/etc | grep -q .
++then
++	[ -e /etc/rc.conf ] || echo '# DSLinuxDSi: RAM copy. Defaults come from /etc/rc.defaults; add overrides here.' > /etc/rc.conf
++fi
+diff --git a/vendors/Nintendo/DSI/selftest b/vendors/Nintendo/DSI/selftest
+index 14b85bd45..be44bd839 100644
+--- a/vendors/Nintendo/DSI/selftest
++++ b/vendors/Nintendo/DSI/selftest
+@@ -31,21 +31,26 @@ else
+ 	fi
+ fi
+ dmesg | grep Calibrating
+-if ls /mnt | grep -q .
++if grep -q dsiroot /proc/partitions
++then
++	echo "CONF: PASS - root is the ext2 image sd:/linux/ROOTFS.IMG; the ARM7 refuses all other card access"
++elif ls /mnt | grep -q .
+ then
+ 	echo "CONF: FAIL - whole card visible at /mnt"
+ else
+ 	if ls /media/linux | grep -q .
+ 	then
+-		echo "CONF: PASS - only /linux is reachable"
++		echo "CONF: PASS - only /linux is reachable (read-only)"
+ 	else
+ 		echo "CONF: card/linux not mounted or empty"
+ 	fi
+ fi
+-echo "RAM copies in /tmp:"
+-ls /tmp
+-ls /etc/rc.common
+-[ -f /tmp/ramcopy.log ] && /usr/bin/cat /tmp/ramcopy.log
++if grep -q 'ext2' /proc/mounts
++then
++	echo "ROOT: ext2 read-write (persistent)"
++else
++	echo "ROOT: read-only card + RAM copies (changes lost at power-off)"
++fi
+ dmesg | grep 'dsisd: .*log'
+ dmesg | grep 'dsisd: init'
+ dmesg | grep 'dsisd: diag'
+-- 
+2.56.0
+
