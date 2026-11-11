@@ -1,0 +1,130 @@
+From 76e4c10751ae3236d36af80437cdd09d84e85479 Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 05:19:16 -0600
+Subject: [PATCH] Nano-X on the DS: re-install the dirty-area wrappers after
+ the server resets the screen draw functions (portrait set-up); a screen that
+ was never flipped stayed black; log lines for flip and pointer state
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ user/microwin/src/drivers/scr_fb.c | 66 +++++++++++++++++++++++-------
+ 1 file changed, 52 insertions(+), 14 deletions(-)
+
+diff --git a/user/microwin/src/drivers/scr_fb.c b/user/microwin/src/drivers/scr_fb.c
+index e25dd382e..2ff9c7271 100644
+--- a/user/microwin/src/drivers/scr_fb.c
++++ b/user/microwin/src/drivers/scr_fb.c
+@@ -232,15 +232,41 @@ static void nds_copy_rect(unsigned char *dst, unsigned char *src, int x1, int y1
+ 	}
+ }
+ 
++/* put the wrappers in front of whatever the screen's drawing functions currently are; returns 1 if any had to be wrapped */
++static int nds_wrap_install(PSD psd)
++{
++	int n = 0;
++
++	if (psd->DrawPixel != w_DrawPixel) { o_DrawPixel = psd->DrawPixel; psd->DrawPixel = w_DrawPixel; n = 1; }
++	if (psd->DrawHorzLine != w_DrawHorzLine) { o_DrawHorzLine = psd->DrawHorzLine; psd->DrawHorzLine = w_DrawHorzLine; n = 1; }
++	if (psd->DrawVertLine != w_DrawVertLine) { o_DrawVertLine = psd->DrawVertLine; psd->DrawVertLine = w_DrawVertLine; n = 1; }
++	if (psd->FillRect != w_FillRect) { o_FillRect = psd->FillRect; psd->FillRect = w_FillRect; n = 1; }
++	if (psd->Blit && psd->Blit != w_Blit) { o_Blit = psd->Blit; psd->Blit = w_Blit; n = 1; }
++	if (psd->DrawArea && psd->DrawArea != w_DrawArea) { o_DrawArea = psd->DrawArea; psd->DrawArea = w_DrawArea; n = 1; }
++	if (psd->StretchBlit && psd->StretchBlit != w_StretchBlit) {
++		o_StretchBlit = psd->StretchBlit; psd->StretchBlit = w_StretchBlit; n = 1;
++	}
++	if (psd->StretchBlitEx && psd->StretchBlitEx != w_StretchBlitEx) {
++		o_StretchBlitEx = psd->StretchBlitEx; psd->StretchBlitEx = w_StretchBlitEx; n = 1;
++	}
++	return n;
++}
++
+ static void nds_dbuf_init(PSD psd, int linebytes, int bpp, int yres, int yvirt)
+ {
+ 	int y = 0;
+ 
+ 	nds_dbuf = 0;
+-	if (getenv("NANOX_NODBUF") || bpp != 16 || yvirt < 512 || psd->portrait)
++	if (getenv("NANOX_NODBUF") || bpp != 16 || yvirt < 512 || psd->portrait) {
++		EPRINTF("nano-X: page flipping off (NODBUF %d, bpp %d, virtual height %d)\n",
++			getenv("NANOX_NODBUF") != NULL, bpp, yvirt);
+ 		return;
+-	if (ioctl(fb, NDSFB_FLIP, &y) < 0)	/* shows page 0 and proves the driver can flip */
++	}
++	if (ioctl(fb, NDSFB_FLIP, &y) < 0) {	/* shows page 0 and proves the driver can flip */
++		EPRINTF("nano-X: page flipping off (the kernel has no NDSFB_FLIP)\n");
+ 		return;
++	}
++	EPRINTF("nano-X: page flipping on\n");
+ 	nds_linebytes = linebytes;
+ 	nds_rows = yres;
+ 	nds_page[0] = psd->addr;
+@@ -255,15 +281,7 @@ static void nds_dbuf_init(PSD psd, int linebytes, int bpp, int yres, int yvirt)
+ 	sync_pending = 0;
+ 
+ 	/* from here on every pixel written to the screen is noted */
+-	o_DrawPixel = psd->DrawPixel;		psd->DrawPixel = w_DrawPixel;
+-	o_ReadPixel = psd->ReadPixel;
+-	o_DrawHorzLine = psd->DrawHorzLine;	psd->DrawHorzLine = w_DrawHorzLine;
+-	o_DrawVertLine = psd->DrawVertLine;	psd->DrawVertLine = w_DrawVertLine;
+-	o_FillRect = psd->FillRect;		psd->FillRect = w_FillRect;
+-	o_Blit = psd->Blit;			if (o_Blit) psd->Blit = w_Blit;
+-	o_DrawArea = psd->DrawArea;		if (o_DrawArea) psd->DrawArea = w_DrawArea;
+-	o_StretchBlit = psd->StretchBlit;	if (o_StretchBlit) psd->StretchBlit = w_StretchBlit;
+-	o_StretchBlitEx = psd->StretchBlitEx;	if (o_StretchBlitEx) psd->StretchBlitEx = w_StretchBlitEx;
++	nds_wrap_install(psd);
+ }
+ 
+ /* show what was drawn since the last flip; the other page is brought up to date later, by fb_nds_sync() */
+@@ -271,7 +289,16 @@ void fb_nds_flip(PSD psd)
+ {
+ 	int drawn = nds_front ^ 1, y;
+ 
+-	if (!nds_dbuf || sync_pending || dirty_x1 > dirty_x2)
++	if (!nds_dbuf || sync_pending)
++		return;
++	if (nds_wrap_install(psd)) {	/* the functions were replaced since the last look: drawing went unnoticed */
++		static int told;
++
++		if (!told++)
++			EPRINTF("nano-X: screen draw functions were replaced; wrapped again, whole screen shown\n");
++		dirty_all();
++	}
++	if (dirty_x1 > dirty_x2)
+ 		return;
+ 	y = drawn ? 256 : 0;
+ 	if (ioctl(fb, NDSFB_FLIP_ASYNC, &y) < 0)
+@@ -354,11 +381,16 @@ static void nds_hwcursor_init(void)
+ 	struct ndsfb_cursor probe;
+ 
+ 	nds_hwcur = 0;
+-	if (getenv("NANOX_SWCURSOR"))
++	if (getenv("NANOX_SWCURSOR")) {
++		EPRINTF("nano-X: hardware pointer off (NANOX_SWCURSOR)\n");
+ 		return;
++	}
+ 	memset(&probe, 0, sizeof(probe));
+-	if (ioctl(fb, NDSFB_CURSOR, &probe) < 0)	/* hidden sprite: also checks the driver and the screen */
++	if (ioctl(fb, NDSFB_CURSOR, &probe) < 0) {	/* hidden sprite: also checks the driver and the screen */
++		EPRINTF("nano-X: hardware pointer off (the kernel refused)\n");
+ 		return;
++	}
++	EPRINTF("nano-X: hardware pointer on\n");
+ 	nds_hwcur = 1;
+ 	GdSetHardwareCursor(nds_hw_shape, nds_hw_move);
+ }
+@@ -649,6 +681,12 @@ fb_setportrait(PSD psd, int portraitmode)
+ 	if (portraitmode == MWPORTRAIT_DOWN)
+ 		portraitmode = 3;	/* change bitpos to index*/
+ 	set_subdriver(psd, pdrivers[portraitmode], FALSE);
++#if NDSDRIVER
++	if (nds_dbuf) {
++		nds_wrap_install(psd);
++		dirty_all();
++	}
++#endif
+ }
+ 
+ /* setup directcolor palette - required for ATI cards*/
+-- 
+2.56.0
+
