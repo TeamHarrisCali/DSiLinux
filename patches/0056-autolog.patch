@@ -1,0 +1,182 @@
+From 9a01275e37878736ec3979824f570a4de22d1d7e Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 07:49:48 -0600
+Subject: [PATCH] Testing aid: /boot/autolog saves the log to
+ sd:/linux/DSILOG.TXT every 10 s when it changed (started by rc), savelog adds
+ mic counters, volume, meminfo and the memo/photo listings, shutdown saves
+ once more; dsmemo and dscam log what they do
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ user/microwin/src/demos/nanox/dscam.c  |  7 +++-
+ user/microwin/src/demos/nanox/dsmemo.c |  3 ++
+ vendors/Nintendo/DSI/Makefile          |  1 +
+ vendors/Nintendo/DSI/autolog           |  9 +++++
+ vendors/Nintendo/DSI/rc                |  2 +
+ vendors/Nintendo/DSI/savelog           | 54 +++++++++++++++++++-------
+ vendors/Nintendo/DSI/shutdown          |  1 +
+ 7 files changed, 61 insertions(+), 16 deletions(-)
+ create mode 100644 vendors/Nintendo/DSI/autolog
+
+diff --git a/user/microwin/src/demos/nanox/dscam.c b/user/microwin/src/demos/nanox/dscam.c
+index 94d145608..2a7837167 100644
+--- a/user/microwin/src/demos/nanox/dscam.c
++++ b/user/microwin/src/demos/nanox/dscam.c
+@@ -86,7 +86,12 @@ int main(int argc, char **argv)
+ 	gx_flush();
+ 	gxw_text(&w, 0, "camera: starting...");
+ 
+-	if (cam_cmd(0, 0, &c) < 0 || c.value != 0x2280) {
++	{
++		int r0 = cam_cmd(0, 0, &c);
++
++		fprintf(stderr, "dscam: init ret %d chip version %04x error mask %x scfg_ext %x\n", r0, c.value & 0xffff, c.err & 0xff, c.err >> 8);
++	}
++	if (c.value != 0x2280) {
+ 		sprintf(txt, "init failed v%04x e%x", c.value & 0xffff, c.err & 0xffff);
+ 		gxw_text(&w, 0, txt);
+ 		sprintf(txt, "scfg %x", c.err >> 8);
+diff --git a/user/microwin/src/demos/nanox/dsmemo.c b/user/microwin/src/demos/nanox/dsmemo.c
+index 3edfd4260..70e0dd135 100644
+--- a/user/microwin/src/demos/nanox/dsmemo.c
++++ b/user/microwin/src/demos/nanox/dsmemo.c
+@@ -320,6 +320,7 @@ static void stop_all(void)
+ 	if (state == REC && file >= 0) {
+ 		unsigned char h[44];
+ 
++		fprintf(stderr, "dsmemo: recording stopped, %ld bytes of audio\n", rec_bytes);
+ 		wav_header(h, rec_bytes);
+ 		lseek(file, 0, SEEK_SET);
+ 		write(file, h, 44);
+@@ -364,6 +365,7 @@ static void start_record(void)
+ 		strcpy(msg, "cannot open /dev/dsp");
+ 		return;
+ 	}
++	fprintf(stderr, "dsmemo: recording to %s (dsp fd %d)\n", path, dsp);
+ 	wav_header(h, 0);
+ 	write(file, h, 44);
+ 	rec_bytes = 0;
+@@ -473,6 +475,7 @@ static void tick(void)
+ 		}
+ 		if (rec_bytes == 0 && elapsed_us() > 2000000L && !msg[0]) {
+ 			strcpy(msg, "REC  (no microphone data yet)");
++			fprintf(stderr, "dsmemo: no microphone data after 2 s (last read errno %d)\n", errno);
+ 			last_secs = -1;
+ 		} else if (rec_bytes > 0 && msg[0]) {
+ 			msg[0] = 0;
+diff --git a/vendors/Nintendo/DSI/Makefile b/vendors/Nintendo/DSI/Makefile
+index 0dd192181..46ef26ad3 100644
+--- a/vendors/Nintendo/DSI/Makefile
++++ b/vendors/Nintendo/DSI/Makefile
+@@ -107,6 +107,7 @@ romfs:
+ 	$(ROMFSINST) /boot/rc.common
+ 	$(ROMFSINST) /boot/rc.fat
+ 	$(ROMFSINST) -p +x /boot/savelog
++	$(ROMFSINST) -p +x /boot/autolog
+ 	$(ROMFSINST) -p +x /boot/desktop
+ 	$(ROMFSINST) -p +x /boot/desktop-apps
+ 	$(ROMFSINST) -p +x /boot/shutdown
+diff --git a/vendors/Nintendo/DSI/autolog b/vendors/Nintendo/DSI/autolog
+new file mode 100644
+index 000000000..2fcec16ab
+--- /dev/null
++++ b/vendors/Nintendo/DSI/autolog
+@@ -0,0 +1,9 @@
++#!/bin/sh
++# Testing aid: save the log to sd:/linux/DSILOG.TXT every 10 seconds (only when something changed), so the card always
++# holds what happened up to a few seconds before a hang or a power-off. Started by /boot/rc. To stop it: remove the
++# line that starts it from /boot/rc (or kill this script).
++while :
++do
++	sleep 10
++	/boot/savelog quiet
++done
+diff --git a/vendors/Nintendo/DSI/rc b/vendors/Nintendo/DSI/rc
+index 1ac0b3d8d..566dec447 100644
+--- a/vendors/Nintendo/DSI/rc
++++ b/vendors/Nintendo/DSI/rc
+@@ -53,3 +53,5 @@ mknod /var/run/ttypf c 3 15
+ /usr/bin/cat /tmp/rc.common.log
+ # save the boot log into the one writable file on the card (sd:/linux/DSILOG.TXT), if it exists
+ [ -x /boot/savelog ] && /boot/savelog
++# while testing: keep saving the log every 10 s (see /boot/autolog)
++[ -x /boot/autolog ] && /boot/autolog > /dev/null 2>&1 &
+diff --git a/vendors/Nintendo/DSI/savelog b/vendors/Nintendo/DSI/savelog
+index 216e1b2ea..4b190bad6 100644
+--- a/vendors/Nintendo/DSI/savelog
++++ b/vendors/Nintendo/DSI/savelog
+@@ -1,21 +1,45 @@
+ #!/bin/sh
+-# Save the boot log into sd:/linux/DSILOG.TXT through /dev/dsilog. That preallocated file is the ONLY thing DSLinux can
+-# write on the SD card (the ARM7 refuses every other write). Read it on a PC. Run /boot/savelog again any time.
+-[ -c /dev/dsilog ] || { echo "savelog: no /dev/dsilog"; exit 0; }
++# Save the log into sd:/linux/DSILOG.TXT through /dev/dsilog. That preallocated file is the ONLY thing DSLinux can
++# write on the SD card (the ARM7 refuses every other write). Read it on a PC.
++#   /boot/savelog          save now (the Start menu's Save log, and once at boot)
++#   /boot/savelog quiet    save only if something changed, print nothing (used by /boot/autolog)
++Q=0
++[ "$1" = quiet ] && Q=1
++[ -c /dev/dsilog ] || { [ $Q = 1 ] || echo "savelog: no /dev/dsilog"; exit 0; }
++B=/tmp/bootlog.body
+ L=/tmp/bootlog.txt
+-echo "=== DSLinuxDSi log ===" > $L
+-echo "--- dmesg ---" >> $L
+-dmesg >> $L
+-echo "--- rc.common.log ---" >> $L
+-[ -f /tmp/rc.common.log ] && /usr/bin/cat /tmp/rc.common.log >> $L
+-echo "--- ramcopy.log ---" >> $L
+-[ -f /tmp/ramcopy.log ] && /usr/bin/cat /tmp/ramcopy.log >> $L
+-echo "--- desktop.log ---" >> $L
+-[ -f /tmp/desktop.log ] && /usr/bin/cat /tmp/desktop.log >> $L
+-echo "--- end ---" >> $L
++{
++echo "--- dmesg ---"
++dmesg
++echo "--- rc.common.log ---"
++[ -f /tmp/rc.common.log ] && /usr/bin/cat /tmp/rc.common.log
++echo "--- ramcopy.log ---"
++[ -f /tmp/ramcopy.log ] && /usr/bin/cat /tmp/ramcopy.log
++echo "--- desktop.log ---"
++[ -f /tmp/desktop.log ] && /usr/bin/cat /tmp/desktop.log
++echo "--- /proc/dsimic (microphone counters) ---"
++/usr/bin/cat /proc/dsimic 2>&1
++echo "--- /proc/dsivolume ---"
++/usr/bin/cat /proc/dsivolume 2>&1
++echo "--- /proc/meminfo ---"
++/usr/bin/cat /proc/meminfo 2>&1
++echo "--- /home/memos ---"
++ls -l /home/memos 2>&1
++echo "--- /home/photos ---"
++ls -l /home/photos 2>&1
++echo "--- end ---"
++} > $B 2>&1
++if [ $Q = 1 ] && [ "`/usr/bin/cat $B`" = "`/usr/bin/cat $B.prev 2>/dev/null`" ]; then
++	exit 0
++fi
++{
++echo "=== DSLinuxDSi log, saved at uptime `/usr/bin/cat /proc/uptime 2>/dev/null` ==="
++/usr/bin/cat $B
++} > $L
+ if /usr/bin/cat $L > /dev/dsilog
+ then
+-	echo "savelog: written to sd:/linux/DSILOG.TXT"
++	/usr/bin/cat $B > $B.prev
++	[ $Q = 1 ] || echo "savelog: written to sd:/linux/DSILOG.TXT"
+ else
+-	echo "savelog: could not write sd:/linux/DSILOG.TXT (does the file exist on the card?)"
++	[ $Q = 1 ] || echo "savelog: could not write sd:/linux/DSILOG.TXT (does the file exist on the card?)"
+ fi
+diff --git a/vendors/Nintendo/DSI/shutdown b/vendors/Nintendo/DSI/shutdown
+index 4fce4defb..fb233f462 100644
+--- a/vendors/Nintendo/DSI/shutdown
++++ b/vendors/Nintendo/DSI/shutdown
+@@ -1,5 +1,6 @@
+ #!/bin/sh
+ # Power the DS off (the Start menu's Shut down): write everything to the card, stop all programs, power off.
+ # /boot/desktop stop only ends the desktop.
++[ -x /boot/savelog ] && /boot/savelog quiet
+ sync
+ poweroff
+-- 
+2.56.0
+
