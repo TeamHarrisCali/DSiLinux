@@ -1,0 +1,200 @@
+From 8d79c27987e8ad4a29c6555336be79adb3a78ec9 Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 17:01:56 -0600
+Subject: [PATCH] dsgb: faster core reads and writes (ROM, work RAM and VRAM
+ without the callback and switch), the server is asked only every 4th frame
+ and the window position at most twice a second, the game runs at a lower
+ priority than the desktop, log shows where the time per frame goes
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ user/microwin/src/demos/nanox/dsgb.c      | 74 ++++++++++++++---------
+ user/microwin/src/demos/nanox/dsgb_core.h |  3 +-
+ user/microwin/src/demos/nanox/peanut_gb.h | 24 ++++++++
+ 3 files changed, 71 insertions(+), 30 deletions(-)
+
+diff --git a/user/microwin/src/demos/nanox/dsgb.c b/user/microwin/src/demos/nanox/dsgb.c
+index a2e709dbf..37e8c147c 100644
+--- a/user/microwin/src/demos/nanox/dsgb.c
++++ b/user/microwin/src/demos/nanox/dsgb.c
+@@ -214,8 +214,8 @@ static void play(const char *name)
+ 	const char *err;
+ 	GR_WINDOW_ID gw;
+ 	GR_EVENT ev;
+-	int keys, kfd, pal = 0, prev = 0, quit = 0, frames = 0, shown = 0, slow = 0, fast, skip = 0, rx = 0, ry = 0, vis = 0, dirty = 1;
+-	long period = 16743, t_sec, t0, emu_us = 0;
++	int keys, kfd, pal = 0, prev = 0, quit = 0, frames = 0, shown = 0, fast, skip = 0, rx = 0, ry = 0, vis = 0, dirty = 1;
++	long t_sec, t0, t_rect = 0, emu_us = 0, wait_us = 0, blit_us = 0, other_us = 0, avg_us = 0;
+ 
+ 	sprintf(path, ROMDIR "/%s", name);
+ 	err = gbrun_open(path);
+@@ -240,8 +240,11 @@ static void play(const char *name)
+ 	if (kfd < 0)
+ 		fprintf(stderr, "dsgb: cannot open /proc/dskeys (%d): the buttons go to the desktop\n", errno);
+ 	strcpy(st, "L+R quit  X palette  Y fast");
++	nice(6);				/* the desktop (window moves, the pointer) comes before the game */
+ 	t_sec = usec();
+ 	while (!quit) {
++		long t1, t2;
++
+ 		keys = rawkeys(kfd);
+ 		if ((keys & 0x300) == 0x300)
+ 			quit = 1;
+@@ -251,51 +254,64 @@ static void play(const char *name)
+ 		}
+ 		prev = keys;
+ 		fast = (keys & 0x800) != 0;
+-		for (;;) {
+-			GrCheckNextEvent(&ev);
+-			if (ev.type == GR_EVENT_TYPE_NONE)
+-				break;
+-			if (ev.type == GR_EVENT_TYPE_CLOSE_REQ)
+-				quit = 1;
+-			if (ev.type == GR_EVENT_TYPE_EXPOSURE) {
+-				dirty = 1;
+-				status(gw, st);
++		t0 = usec();
++		if ((frames & 3) == 0) {			/* the server is asked now and then, not every frame */
++			for (;;) {
++				GrCheckNextEvent(&ev);
++				if (ev.type == GR_EVENT_TYPE_NONE)
++					break;
++				if (ev.type == GR_EVENT_TYPE_CLOSE_REQ)
++					quit = 1;
++				if (ev.type == GR_EVENT_TYPE_EXPOSURE) {
++					dirty = 1;
++					status(gw, st);
++				}
++				if (ev.type == GR_EVENT_TYPE_CHLD_UPDATE)
++					dirty = 1;
++			}
++			/* two round trips to the server: not more often than twice a second (dragging a window sends many events) */
++			if (dirty && t0 - t_rect > 500000L) {
++				vis = window_rect(gw, &rx, &ry);
++				dirty = 0;
++				t_rect = t0;
+ 			}
+-			if (ev.type == GR_EVENT_TYPE_CHLD_UPDATE)
+-				dirty = 1;
+-		}
+-		if (dirty) {
+-			vis = window_rect(gw, &rx, &ry);
+-			dirty = 0;
+ 		}
+-		t0 = usec();
++		t1 = usec();
++		other_us += t1 - t0;
++		/* the game: show every picture when there is time; when a frame takes more than ~12 ms, every second one */
+ 		if (fast)
+ 			skip = (frames & 3) != 0;
++		else if (avg_us > 12000)
++			skip = (frames & 1) != 0;
++		else
++			skip = 0;
+ 		if (gbrun_frame(keys, skip) < 0) {
+ 			sprintf(msg, "emulation error %d", G.error);
+ 			break;
+ 		}
+-		emu_us = usec() - t0;
++		t2 = usec();
++		emu_us += t2 - t1;
++		avg_us = (avg_us * 7 + (t2 - t1)) / 8;
+ 		if (!fast)
+ 			ioctl(fbfd, NDSFB_VSYNC, 0);	/* one frame per screen refresh (59.8 Hz, the Game Boy's 59.7) */
++		t0 = usec();
++		wait_us += t0 - t2;
+ 		if (!skip && vis) {
+ 			fb_blit(rx, ry);
+ 			shown++;
+ 		}
++		blit_us += usec() - t0;
+ 		frames++;
+-		/* too slow to also draw every picture: skip the next one (the game itself still runs at full speed) */
+-		if (!fast)
+-			skip = emu_us > period - 5000;
+-		if (emu_us > period)
+-			slow++;
+ 		t0 = usec();
+-		if (t0 - t_sec >= 2000000L) {			/* a status line every two seconds */
+-			sprintf(st, "%d fps shown, %d run, %d slow", (int)(shown * 1000000.0 / (t0 - t_sec) + 0.5),
+-				(int)(frames * 1000000.0 / (t0 - t_sec) + 0.5), slow);
+-			fprintf(stderr, "dsgb: %s, last frame %ld us\n", st, emu_us);
++		if (t0 - t_sec >= 2000000L) {			/* a status line every two seconds, with where the time went (ms per frame) */
++			sprintf(st, "%d fps shown, %d run", (int)(shown * 1000000.0 / (t0 - t_sec) + 0.5),
++				(int)(frames * 1000000.0 / (t0 - t_sec) + 0.5));
++			fprintf(stderr, "dsgb: %s; per frame: emulate %ld, vblank wait %ld, draw %ld, other %ld (us, 10 ms steps)\n", st,
++				emu_us / frames, wait_us / frames, blit_us / frames, other_us / frames);
+ 			status(gw, st);
+ 			t_sec = t0;
+-			frames = shown = slow = 0;
++			frames = shown = 0;
++			emu_us = wait_us = blit_us = other_us = 0;
+ 		}
+ 	}
+ 	if (kfd >= 0)
+diff --git a/user/microwin/src/demos/nanox/dsgb_core.h b/user/microwin/src/demos/nanox/dsgb_core.h
+index b770fe1c2..774263411 100644
+--- a/user/microwin/src/demos/nanox/dsgb_core.h
++++ b/user/microwin/src/demos/nanox/dsgb_core.h
+@@ -12,6 +12,7 @@
+ #include <setjmp.h>
+ 
+ #define PEANUT_GB_IS_LITTLE_ENDIAN 1	/* the DS is little endian (this old compiler does not say so itself) */
++#define PEANUT_GB_DIRECT_ROM 1		/* see __gb_read in peanut_gb.h */
+ #define ENABLE_SOUND 0
+ #define PEANUT_GB_12_COLOUR 0		/* four shades are enough, and cheaper per pixel */
+ #define PEANUT_GB_HIGH_LCD_ACCURACY 0	/* the fast renderer (no mid-line effects) */
+@@ -131,7 +132,7 @@ static const char *gbrun_open(const char *path)
+ 	fclose(f);
+ 	if ((long)n != size)
+ 		return "cannot read the ROM";
+-	e = gb_init(&G.gb, gbrun_rom_read, gbrun_ram_read, gbrun_ram_write, gbrun_error, NULL);
++	e = gb_init(&G.gb, gbrun_rom_read, gbrun_ram_read, gbrun_ram_write, gbrun_error, G.rom);
+ 	if (e == GB_INIT_CARTRIDGE_UNSUPPORTED)
+ 		return "this cartridge type is not supported";
+ 	if (e != GB_INIT_NO_ERROR)
+diff --git a/user/microwin/src/demos/nanox/peanut_gb.h b/user/microwin/src/demos/nanox/peanut_gb.h
+index a4ab18239..d56c8212d 100644
+--- a/user/microwin/src/demos/nanox/peanut_gb.h
++++ b/user/microwin/src/demos/nanox/peanut_gb.h
+@@ -782,6 +782,17 @@ struct gb_s
+  */
+ uint8_t __gb_read(struct gb_s *gb, uint16_t addr)
+ {
++#ifdef PEANUT_GB_DIRECT_ROM
++	/* DSLinuxDSi change: gb->direct.priv points at the whole ROM, so the common reads (ROM, work RAM) skip the callback and the switch */
++	const uint8_t *rom = (const uint8_t *)gb->direct.priv;
++
++	if(addr >= 0x0100 && addr < 0x4000)
++		return rom[addr];
++	if(addr >= 0xC000 && addr < 0xE000)
++		return gb->wram[addr - WRAM_0_ADDR];
++	if(addr >= 0x4000 && addr < 0x8000 && !(gb->mbc == 1 && gb->cart_mode_select))
++		return rom[addr + (gb->selected_rom_bank - 1) * ROM_BANK_SIZE];
++#endif
+ 	switch(PEANUT_GB_GET_MSN16(addr))
+ 	{
+ 	case 0x0:
+@@ -892,6 +903,19 @@ uint8_t __gb_read(struct gb_s *gb, uint16_t addr)
+  */
+ void __gb_write(struct gb_s *gb, uint_fast16_t addr, uint8_t val)
+ {
++#ifdef PEANUT_GB_DIRECT_ROM
++	/* DSLinuxDSi change: the common writes first, without the switch */
++	if(addr >= 0xC000 && addr < 0xE000)
++	{
++		gb->wram[addr - WRAM_0_ADDR] = val;
++		return;
++	}
++	if(addr >= 0x8000 && addr < 0xA000)
++	{
++		gb->vram[addr - VRAM_ADDR] = val;
++		return;
++	}
++#endif
+ 	switch(PEANUT_GB_GET_MSN16(addr))
+ 	{
+ 	case 0x0:
+-- 
+2.56.0
+
