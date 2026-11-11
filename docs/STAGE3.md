@@ -98,6 +98,15 @@ Fix: the DSI product builds without `CONFIG_NDS_WIFI`, and the ARM7 skips Wi-Fi 
 Files: `out/dsi-mode/dslinux-dsimode-b-uc3.nds` and `-b-uc2.nds` (the "b" build). Verified: it builds, the Wi-Fi banner string is gone from the image. Not verified on the console.
 Wi-Fi in DSi mode would need a driver for the Atheros chip (out of scope).
 
+## DSi-mode ROM boots; touchscreen dead on the uc3 build (user report)
+The "b" uc3 ROM booted on the console (the self-test result is still to be reported). The touchscreen did not work.
+Likely cause (not yet confirmed): DSi header byte 0x1BF ("app flags") had bit 0 set (ndstool's default). BlocksDS's own `cdcIsAvailable()` is
+`isDSiMode() && (appflags & 1)`: with that bit set the touch/sound chip runs in its DSi register mode, and DSLinux's ARM7 only speaks the DS-style SPI touch
+protocol, which gets no answer. Clearing the bit should keep the chip in DS-compatible mode.
+- "c" ROMs (`out/dsi-mode/dslinux-dsimode-c-uc3.nds`, `-c-uc2.nds`): same kernel as "b", header byte 0x1BF = 0 (`APPFLAGS=0 TAG=c scripts/make-dsimode.sh`). Header bytes verified, behaviour not.
+- If the loader ignores the flag, the fallback is a DSi-mode touch reader in the ARM7 (TSC2117 "codec" registers, see BlocksDS `nds/arm7/codec.h`); not started.
+- Side effect to expect: sound uses the same chip, so DSi-mode sound is untested either way.
+
 ## 3c. Faster ARM9 clock, 3d. Wi-Fi/cameras/DSP
 Not started. 3c is small but needs the SD result first; 3d unchanged from the feasibility finding.
 
