@@ -206,6 +206,14 @@ ROMs: `out/dsi-mode/dslinux-dsimode-j-uc3.nds` and `-uc2`.
   answer to an old request is ignored. The request header grew to 128 bytes.
 Built; not run.
 
+## "k" build on the console (user's photo): card confined, startup still broken
+- `CONF: PASS - only /linux is reachable`; `ls /media` shows only `linux`; `ls /media/linux` shows `etc home lib usr var`. **The confinement works on the console.**
+- RAM `PASS` (MemTotal 14080 kB), SD `PASS`.
+- But `/etc/rc.common: cannot open` (the j build ran it) and the `mknod: /var/run/ttyp*: Unknown error 2` lines are back: `/var/run` missing. Most likely the RAM copies of `/etc` and `/var` came out empty although
+  `cp` reported success, and an empty copy bind-mounted over the folder hid the card's files. Not confirmed (the lines that would say so scrolled off).
+"l" build (`out/dsi-mode/dslinux-dsimode-l-uc3.nds`, `-uc2`): copies the folder itself (`cp -a /media/linux/$d /tmp/$d`, no pre-created target), and only bind-mounts the copy if it is non-empty when the card's folder is non-empty;
+otherwise prints `RAM copy of /x is empty: not used.` and leaves the card's folder visible. The self-test now also prints `ls /tmp`, `ls /etc/rc.common` and `ls /var/run` so the result of the copies is visible. Built; not run.
+
 ## 3c. Faster ARM9 clock, 3d. Wi-Fi/cameras/DSP
 Not started. 3c is small but needs the SD result first; 3d unchanged from the feasibility finding.
 

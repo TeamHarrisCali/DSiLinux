@@ -1,0 +1,59 @@
+From 22b640078ec5896271e3cb8826ce2b6ee9374fcf Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <noreply@example.invalid>
+Date: Tue, 10 Nov 2026 21:17:46 -0600
+Subject: [PATCH] DSI rc: copy folders themselves, verify non-empty RAM copies
+ before bind-mounting; self-test shows the copies
+
+---
+ vendors/Nintendo/DSI/rc       | 18 +++++++++++++++---
+ vendors/Nintendo/DSI/selftest |  4 ++++
+ 2 files changed, 19 insertions(+), 3 deletions(-)
+
+diff --git a/vendors/Nintendo/DSI/rc b/vendors/Nintendo/DSI/rc
+index 7a4311938..34da8aaaf 100644
+--- a/vendors/Nintendo/DSI/rc
++++ b/vendors/Nintendo/DSI/rc
+@@ -36,10 +36,22 @@ for d in etc var home
+ do
+ 	if [ -d /media/linux/$d ]
+ 	then
+-		/usr/bin/mkdir /tmp/$d
+-		if /usr/bin/cp -a /media/linux/$d/. /tmp/$d
++		# copy the folder itself (not its contents) to a name that does not exist yet
++		/usr/bin/cp -a /media/linux/$d /tmp/$d
++		if [ -d /tmp/$d ]
+ 		then
+-			mount -o bind /tmp/$d /media/linux/$d
++			# never hide the card's files behind an empty copy: a non-empty card folder needs a non-empty copy
++			if ls /media/linux/$d | grep -q .
++			then
++				if ls /tmp/$d | grep -q .
++				then
++					mount -o bind /tmp/$d /media/linux/$d
++				else
++					echo "RAM copy of /$d is empty: not used."
++				fi
++			else
++				mount -o bind /tmp/$d /media/linux/$d
++			fi
+ 		else
+ 			echo "Could not make a RAM copy of /$d."
+ 		fi
+diff --git a/vendors/Nintendo/DSI/selftest b/vendors/Nintendo/DSI/selftest
+index 3de238bc8..b5814616d 100644
+--- a/vendors/Nintendo/DSI/selftest
++++ b/vendors/Nintendo/DSI/selftest
+@@ -30,6 +30,10 @@ else
+ 		echo "CONF: card/linux not mounted or empty"
+ 	fi
+ fi
++echo "RAM copies in /tmp:"
++ls /tmp
++ls /etc/rc.common
++ls /var/run
+ dmesg | grep 'dsisd: init'
+ dmesg | grep 'dsisd: diag'
+ echo "======================================"
+-- 
+2.56.0
+
