@@ -1,0 +1,206 @@
+From 3071ce8e8dc040e1055252033ce9c0a2023a9186 Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 03:14:46 -0600
+Subject: [PATCH] DSi poweroff: ARM7 NDS_SD_CMD_POWEROFF reads the power chip
+ and reports it if the console stays on
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ linux-2.6.x/arch/arm/mach-nds/arch.c         |  7 ++
+ linux-2.6.x/arch/arm/mach-nds/arm7/main.c    | 74 +++++++++++++++++---
+ linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c   |  7 ++
+ linux-2.6.x/drivers/block/dldi_c.c           | 19 +++++
+ linux-2.6.x/include/asm-arm/arch-nds/dsisd.h |  1 +
+ 5 files changed, 97 insertions(+), 11 deletions(-)
+
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arch.c b/linux-2.6.x/arch/arm/mach-nds/arch.c
+index 75a8fea28..fa71967db 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/arch.c
++++ b/linux-2.6.x/arch/arm/mach-nds/arch.c
+@@ -53,10 +53,17 @@ extern struct sys_timer nds_timer;
+ 
+ extern void __init nds_init_irq(void);
+ 
++#ifdef CONFIG_NDS_DSISD
++extern void dsisd_poweroff(void);
++#endif
++
+ static void poweroff(void)
+ {
+ 	/* nothing else writes the disk cache out before the power goes */
+ 	sys_sync();
++#ifdef CONFIG_NDS_DSISD
++	dsisd_poweroff();
++#endif
+ 	nds_fifo_send(FIFO_POWER_CMD(FIFO_POWER_CMD_SYSTEM_POWER, 0));
+ }
+ 
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/main.c b/linux-2.6.x/arch/arm/mach-nds/arm7/main.c
+index 224a1bfa3..bdbe536f3 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/arm7/main.c
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/main.c
+@@ -53,22 +53,25 @@ static int i2c_ack(void)
+ 	return (REG_I2CCNT >> 4) & 1;
+ }
+ 
+-static void i2c_pm_write(u8 reg, u8 data)
++static int i2c_select(u8 v, u8 cnt)
++{
++	i2c_wait();
++	i2c_delay();
++	REG_I2CDATA = v;
++	REG_I2CCNT = cnt;
++	return i2c_ack();
++}
++
++/* returns 1 when the chip acknowledged every byte */
++static int i2c_pm_write(u8 reg, u8 data)
+ {
+ 	int tries;
+ 	for (tries = 0; tries < 8; tries++) {
+-		i2c_wait();
+-		i2c_delay();
+-		REG_I2CDATA = 0x4A;
+-		REG_I2CCNT = 0xC2;
+-		if (!i2c_ack()) {
++		if (!i2c_select(0x4A, 0xC2)) {
+ 			REG_I2CCNT = 0xC5;
+ 			continue;
+ 		}
+-		i2c_delay();
+-		REG_I2CDATA = reg;
+-		REG_I2CCNT = 0xC0;
+-		if (!i2c_ack()) {
++		if (!i2c_select(reg, 0xC0)) {
+ 			REG_I2CCNT = 0xC5;
+ 			continue;
+ 		}
+@@ -78,8 +81,57 @@ static void i2c_pm_write(u8 reg, u8 data)
+ 		i2c_delay();
+ 		REG_I2CCNT = 0xC5;
+ 		if (i2c_ack())
+-			return;
++			return 1;
++	}
++	return 0;
++}
++
++/* register value, or 0x1ff when the chip never answered */
++static int i2c_pm_read(u8 reg)
++{
++	int tries;
++	for (tries = 0; tries < 8; tries++) {
++		if (!i2c_select(0x4A, 0xC2)) {
++			REG_I2CCNT = 0xC5;
++			continue;
++		}
++		if (!i2c_select(reg, 0xC0)) {
++			REG_I2CCNT = 0xC5;
++			continue;
++		}
++		i2c_delay();
++		if (!i2c_select(0x4B, 0xC2)) {
++			REG_I2CCNT = 0xC5;
++			continue;
++		}
++		i2c_delay();
++		REG_I2CCNT = 0xE0;
++		i2c_delay();
++		REG_I2CCNT = 0xC5;
++		i2c_wait();
++		return REG_I2CDATA;
+ 	}
++	return 0x1ff;
++}
++
++/*
++ * NDS_SD_CMD_POWEROFF: ask the DSi power chip to shut the console off. Only returns if that did not
++ * work; then diag[] says what the chip answered (register values 0x1ff = no answer).
++ */
++void dsi_poweroff_diag(unsigned int *diag)
++{
++	int k;
++
++	diag[0] = *(volatile unsigned int *)0x04004008;		/* SCFG_EXT */
++	diag[1] = i2c_pm_read(0x00);	/* chip version, 0x1ff if I2C does not work at all */
++	diag[2] = i2c_pm_read(0x11);	/* power control before */
++	diag[3] = i2c_pm_read(0x10);	/* power interrupt flags */
++	diag[4] = i2c_pm_read(0x20);	/* battery */
++	diag[5] = i2c_pm_write(0x11, 0x40);	/* 1 = acknowledged */
++	for (k = 0; k < 20; k++)	/* give the chip time to cut the power */
++		i2c_delay();
++	diag[6] = REG_I2CCNT;
++	diag[7] = i2c_pm_read(0x11);	/* power control after */
+ }
+ 
+ int isDSPhat(void)
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c b/linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c
+index c159db087..d2a4abcf2 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c
+@@ -755,6 +755,8 @@ static int region_ok(u32 sector, u32 count)
+ }
+ #endif /* CONFIG_NDS_DSISD_LOGFILE */
+ 
++extern void dsi_poweroff_diag(unsigned int *diag);
++
+ static void nds_sd_request_inner(struct nds_sd_block *b)
+ {
+ 	u32 res;
+@@ -859,6 +861,11 @@ static void nds_sd_request_inner(struct nds_sd_block *b)
+ 		b->result = NDS_SD_OK;
+ 		return;
+ 
++	case NDS_SD_CMD_POWEROFF:
++		dsi_poweroff_diag(b->diag);
++		b->result = NDS_SD_OK;
++		return;
++
+ 	case NDS_SD_CMD_TOUCHDIAG:
+ 		dsitouch_diag(b->touch);
+ 		b->result = NDS_SD_OK;
+diff --git a/linux-2.6.x/drivers/block/dldi_c.c b/linux-2.6.x/drivers/block/dldi_c.c
+index c1b97fcb3..f1cf0ae1d 100644
+--- a/linux-2.6.x/drivers/block/dldi_c.c
++++ b/linux-2.6.x/drivers/block/dldi_c.c
+@@ -168,6 +168,25 @@ static int sd_request(unsigned int cmd, unsigned int sector, unsigned int count)
+ 	return ret;
+ }
+ 
++#ifdef CONFIG_NDS_DSI
++/*
++ * Power off through the DSi power chip (ARM7 does it over I2C). If the console is still on afterwards the ARM7
++ * answers with what the chip said, which is printed so a failure can be diagnosed from a photo.
++ */
++void dsisd_poweroff(void)
++{
++	long save = sd_timeout;
++
++	sd_timeout = 3 * HZ;
++	if (sd_request(NDS_SD_CMD_POWEROFF, 0, 0) == NDS_SD_OK)
++		printk(KERN_ERR "dsi poweroff: still on. scfg %08x ver %02x pwrcnt %02x pwrif %02x batt %02x "
++		       "wr_ack %u i2ccnt %02x pwrcnt-after %02x\n",
++		       sd_block.diag[0], sd_block.diag[1], sd_block.diag[2], sd_block.diag[3], sd_block.diag[4],
++		       sd_block.diag[5], sd_block.diag[6], sd_block.diag[7]);
++	sd_timeout = save;
++}
++#endif
++
+ /* Print the ARM7's DSi touch counters every 2 s while they change (no userland tool needed). */
+ static struct work_struct tdiag_work;
+ static u32 tdiag_last[3];
+diff --git a/linux-2.6.x/include/asm-arm/arch-nds/dsisd.h b/linux-2.6.x/include/asm-arm/arch-nds/dsisd.h
+index 729474f8d..3d2b8de75 100644
+--- a/linux-2.6.x/include/asm-arm/arch-nds/dsisd.h
++++ b/linux-2.6.x/include/asm-arm/arch-nds/dsisd.h
+@@ -19,6 +19,7 @@
+ #define NDS_SD_CMD_INIT		0
+ #define NDS_SD_CMD_READ		1
+ #define NDS_SD_CMD_WRITE	2
++#define NDS_SD_CMD_POWEROFF	7	/* not SD: DSi power off via the I2C power chip; answers (diag[]) only if the console stayed on */
+ #define NDS_SD_CMD_ROOTINIT	6	/* not SD I/O: locate sd:/linux/ROOTFS.IMG (ext2 root image); from then on the card is only reachable inside it and DSILOG.TXT */
+ #define NDS_SD_CMD_LOGINIT	5	/* not SD I/O: locate sd:/linux/DSILOG.TXT, answer with its sector extents in data[] */
+ #define NDS_SD_CMD_LASTERR	4	/* not SD: report what the last request was doing (diag[]) */
+-- 
+2.56.0
+

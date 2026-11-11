@@ -308,6 +308,10 @@ Fix (w): in DSi mode the ARM7 writes I2C device 0x4A register 0x11 = 0x40, the b
 Also `poweroff()` on the ARM9 now calls `sys_sync()` first, because nothing in this system's shutdown path flushed the disk cache. Not changed: the ext2 root is not remounted read-only at power off, so `e2fsck` on a PC will report it as not cleanly unmounted (`-fp` fixes that silently).
 Status: compiled and the I2C register address is in the ARM7 image; **not run on the console**. Where it fails, the console stays on and the kernel prints "Power down" before it hangs.
 
+Result of w on the console: the shutdown sequence ran ("Sending SIGTERM/SIGKILL", "Power Down.") but the DSi stayed on and the prompt returned, so the ARM7's I2C write to the power chip did not shut it down (or never ran).
+Note: libnds' own `systemShutDown` uses the plain DS SPI power write; the I2C 0x11 = 0x40 value comes from my recollection of homebrew code, not from libnds, so it may be wrong.
+x build (patch 0026): a new ARM7 request, `NDS_SD_CMD_POWEROFF`, reads power-chip registers 0x00, 0x11, 0x10, 0x20, writes 0x11 = 0x40, waits, reads 0x11 again, and the ARM9 prints one `dsi poweroff: still on. scfg ... ver ... pwrcnt ... wr_ack ...` line if the console is still on. That line tells whether I2C works at all (ver 1ff = no) and whether the chip acknowledged the write.
+
 ## 3c. Faster ARM9 clock: nothing to do (measured on the console)
 `CONFIG_NDS_DSI_FASTCPU` writes `SCFG_CLK` (0x04004004) bit 0 early in boot. On the console the t-fast ROM printed `NDS: ARM9 SCFG_CLK 0001 -> 0001: 134 MHz requested and accepted`: the register already held `0001` before the write, so the loader had
 already put the ARM9 at 134 MHz and the option changes nothing. All DSi-mode boots show `66.76 BogoMIPS (lpj=333824)`: with the ARM946E's delay loop taking about 4 cycles per iteration (sub plus a taken branch), 33.4 M iterations per second means roughly 134 MHz.
