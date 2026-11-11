@@ -1,0 +1,99 @@
+From ceb9a319d353de991759bd86cf772345ae235df6 Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 03:55:39 -0600
+Subject: [PATCH] DSI desktop: Nano-X runs in the foreground so the console
+ shell does not steal the keys; apps started by /boot/desktop-apps; more
+ checks in desktop.log
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ vendors/Nintendo/DSI/Makefile     |  1 +
+ vendors/Nintendo/DSI/desktop      | 29 +++++++++++------------------
+ vendors/Nintendo/DSI/desktop-apps | 14 ++++++++++++++
+ 3 files changed, 26 insertions(+), 18 deletions(-)
+ create mode 100644 vendors/Nintendo/DSI/desktop-apps
+
+diff --git a/vendors/Nintendo/DSI/Makefile b/vendors/Nintendo/DSI/Makefile
+index d0bc70be0..378ec7865 100644
+--- a/vendors/Nintendo/DSI/Makefile
++++ b/vendors/Nintendo/DSI/Makefile
+@@ -108,6 +108,7 @@ romfs:
+ 	$(ROMFSINST) /boot/rc.fat
+ 	$(ROMFSINST) -p +x /boot/savelog
+ 	$(ROMFSINST) -p +x /boot/desktop
++	$(ROMFSINST) -p +x /boot/desktop-apps
+ 	$(ROMFSINST) /$(FATFS)/linux/etc/issue
+ 	# copy some Nintendo specific files to romfs
+ 	$(ROMFSINST) $(NDS_COMMON)/rc.common /$(FATFS)/linux/etc/rc.common
+diff --git a/vendors/Nintendo/DSI/desktop b/vendors/Nintendo/DSI/desktop
+index 5aa0031ff..196b8ddac 100644
+--- a/vendors/Nintendo/DSI/desktop
++++ b/vendors/Nintendo/DSI/desktop
+@@ -2,16 +2,14 @@
+ # DSLinuxDSi desktop: the Nano-X window system on the TOP screen (/dev/fb0). The bottom (touch) screen is the input
+ # pad: the upper part is a trackpad (drag = move the pointer, tap = left click; R button = left click, L = right
+ # click), the lower part is the touch keyboard.
+-#   /boot/desktop        server + window manager + one terminal
+-#   /boot/desktop stop   stop it and give the top screen back to the text console
++#   /boot/desktop        start it (this console is busy until the desktop ends: Nano-X owns the keyboard)
++#   /boot/desktop stop   (run it inside the terminal window) stop the desktop and get the text console back
+ # Everything it prints goes to /tmp/desktop.log (also saved by /boot/savelog).
+ LOG=/tmp/desktop.log
+ 
+ if [ "$1" = "stop" ]; then
++	echo "desktop: stop requested" >> $LOG
+ 	for p in nxterm nanowm nano-X; do kill `pidof $p` 2>/dev/null; done
+-	sleep 1
+-	fbset -fb /dev/fb0 -depth 8 -n >> $LOG 2>&1
+-	echo "desktop: stopped" >> $LOG
+ 	exit 0
+ fi
+ 
+@@ -26,16 +24,11 @@ fbset -fb /dev/fb0 >> $LOG 2>&1
+ ifconfig lo up >> $LOG 2>&1
+ grep Mem /proc/meminfo >> $LOG 2>&1
+ 
+-# -p keep running when the last client exits; -e the Esc key does not quit the server
+-/boot/nano-X -p -e >> $LOG 2>&1 &
+-sleep 3
+-if [ -z "`pidof nano-X`" ]; then
+-	echo "desktop: nano-X did not start, see $LOG"
+-	exit 1
+-fi
+-nanowm >> $LOG 2>&1 &
+-sleep 1
+-/boot/nxterm >> $LOG 2>&1 &
+-sleep 2
+-echo "desktop: running: `pidof nano-X nanowm nxterm`" >> $LOG
+-echo "desktop: started on the top screen (log: $LOG)"
++# the window manager and the terminal start a few seconds after the server
++/boot/desktop-apps &
++
++# The server runs in the foreground: it reads the keyboard from this console, and the shell waiting here must not
++# compete for the keys. -p keep running when the last client exits; -e the Esc key does not quit the server.
++/boot/nano-X -p -e >> $LOG 2>&1
++echo "desktop: nano-X ended" >> $LOG
++fbset -fb /dev/fb0 -depth 8 -n >> $LOG 2>&1
+diff --git a/vendors/Nintendo/DSI/desktop-apps b/vendors/Nintendo/DSI/desktop-apps
+new file mode 100644
+index 000000000..fa625e6c4
+--- /dev/null
++++ b/vendors/Nintendo/DSI/desktop-apps
+@@ -0,0 +1,14 @@
++#!/bin/sh
++# Started in the background by /boot/desktop: window manager and one terminal, once the Nano-X server is up.
++LOG=/tmp/desktop.log
++sleep 4
++if [ -z "`pidof nano-X`" ]; then
++	echo "desktop: nano-X is not running" >> $LOG
++	exit 1
++fi
++nanowm >> $LOG 2>&1 &
++sleep 1
++/boot/nxterm >> $LOG 2>&1 &
++sleep 3
++echo "desktop: running: `pidof nano-X nanowm nxterm`" >> $LOG
++ls -l /dev/ttyp0 /var/run/ttyp0 /dev/ptyp0 /bin/sh /dev/input/mice /dev/tty >> $LOG 2>&1
+-- 
+2.56.0
+
