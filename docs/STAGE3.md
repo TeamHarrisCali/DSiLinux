@@ -159,6 +159,15 @@ Builds clean; not run anywhere.
 "h" ROMs (`out/dsi-mode/dslinux-dsimode-h-uc3.nds`, `-uc2`): polling is now read-only (bits stay latched) and the status is acknowledged only before each command. Built; not run.
 If it still fails the diag line (`seen`) will show what the controller reports.
 
+## SD card WORKS on the console: "h" build (user's photo, DSi mode, uc3)
+Self-test: `RAM : PASS - 16 MB real` (MemTotal 14084 kB), `SD : PASS - card found`, `dsisd: init result 0, SCFG_EXT 93fffb07, TMIO rev 0009, info 00000002, sectors 7744512`
+(2 = SDHC; 7,744,512 sectors x 512 B = about 3.7 GiB), diag line all zero (no failing command). The card initialised through my ARM7 driver on real hardware.
+What fixed it (from the g to the h build): polling the TMIO status read-only (acknowledge only before each command) instead of acknowledging on every poll. The earlier SCFG bit-0 change did not matter for CMD0
+but was kept (it is what libnds does).
+Not yet verified: reading actual sectors/mounting. The photo cut off the mount lines, and the card in this test had no `linux/` folder, so `/etc/rc.common` and `/var/run` are missing
+(`mount none /var/run failed`, `rc.common: cannot open`); that is expected and not an SD error. Next test: copy the `linux` folder to the card root and boot again.
+Writes are still compiled out (`CONFIG_NDS_DSISD_WRITE` off).
+
 ## 3c. Faster ARM9 clock, 3d. Wi-Fi/cameras/DSP
 Not started. 3c is small but needs the SD result first; 3d unchanged from the feasibility finding.
 
