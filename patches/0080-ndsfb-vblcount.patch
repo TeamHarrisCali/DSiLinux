@@ -1,0 +1,37 @@
+From 57e882ea5d8e39e7e2af2619d4ea034f2123ab71 Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 17:48:22 -0600
+Subject: [PATCH] ndsfb: NDSFB_VBLCOUNT ioctl (vertical blank counter, a clock
+ without 10 ms steps)
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ linux-2.6.x/drivers/video/ndsfb.c | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/linux-2.6.x/drivers/video/ndsfb.c b/linux-2.6.x/drivers/video/ndsfb.c
+index 78afe53d6..c686df119 100644
+--- a/linux-2.6.x/drivers/video/ndsfb.c
++++ b/linux-2.6.x/drivers/video/ndsfb.c
+@@ -249,6 +249,7 @@ static int ndsfb_blank(int blank_mode, struct fb_info *info);
+ #define NDSFB_GX_SETUP	0x4e05
+ #define NDSFB_GX_SUBMIT	0x4e06
+ #define NDSFB_VSYNC	0x4e07	/* wait for the next vertical blank */
++#define NDSFB_VBLCOUNT	0x4e0c	/* returns the number of vertical blanks since boot (modulo 2^31): a clock with no 10 ms steps */
+ #define NDSFB_GX_TEXLOAD_VBL	0x4e0b	/* like NDSFB_GX_TEXLOAD (max 32 KB) but the copy into texture memory is done at the start of the next vertical blank; the call returns after it */
+ #define NDSFB_CAM_CMD	0x4e09	/* camera set-up: struct ndsfb_cam */
+ #define NDSFB_CAM_FRAME	0x4e0a	/* capture one 256x192 RGB555 preview frame into a user buffer of 98304 bytes */
+@@ -1038,6 +1039,10 @@ static int ndsfb_ioctl(struct inode *inode, struct file *file,
+ 				wait_event_timeout(ndsfb_flip_wq, ndsfb_vblank_count != start, HZ / 10);
+ 				return 0;
+ 			}
++		case NDSFB_VBLCOUNT:
++			if (ndsfb_irq_setup())
++				return -EBUSY;
++			return (int)(ndsfb_vblank_count & 0x7fffffff);
+ 		case NDSFB_CURSOR:
+ 			if (info->par != 0)
+ 				return -EINVAL;
+-- 
+2.56.0
+
