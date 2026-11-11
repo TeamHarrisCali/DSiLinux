@@ -1,0 +1,108 @@
+From e48acfe7d877a7b7223f5702085479fb89af497d Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 04:50:15 -0600
+Subject: [PATCH] Nano-X on the DS: TCP_NODELAY on both ends (answered requests
+ took 40 ms: Nagle plus delayed ACK on the loopback socket), outline window
+ drags, quick button face colour fixed
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ linux-2.6.x/drivers/input/touchscreen/nds_ts.c |  4 ++--
+ user/microwin/src/demos/nanowm/actions.c       |  2 +-
+ user/microwin/src/nanox/client.c               |  9 +++++++++
+ user/microwin/src/nanox/srvnet.c               | 10 ++++++++++
+ 4 files changed, 22 insertions(+), 3 deletions(-)
+
+diff --git a/linux-2.6.x/drivers/input/touchscreen/nds_ts.c b/linux-2.6.x/drivers/input/touchscreen/nds_ts.c
+index 348ad0b46..49d144953 100644
+--- a/linux-2.6.x/drivers/input/touchscreen/nds_ts.c
++++ b/linux-2.6.x/drivers/input/touchscreen/nds_ts.c
+@@ -306,7 +306,7 @@ static void cell_frame(u8 cell[16][8], int capl, int capr)
+ 
+ 	for (r = 0; r < 16; r++)
+ 		for (c = 0; c < 8; c++)
+-			cell[r][c] = 0;
++			cell[r][c] = 4;		/* face (index 0 is transparent) */
+ 	for (c = 0; c < 8; c++) {
+ 		cell[0][c] = 2;
+ 		cell[15][c] = 3;
+@@ -328,7 +328,7 @@ static void draw_strip(void)
+ 	if (!fd || fd->width > 8 || fd->height > 6)
+ 		return;
+ 
+-	PALETTE_SUB[32 + 0] = 0x6318;	/* face: light grey */
++	PALETTE_SUB[32 + 4] = 0x6318;	/* face: light grey (index 0 would show the backdrop) */
+ 	PALETTE_SUB[32 + 1] = 0x0000;	/* text */
+ 	PALETTE_SUB[32 + 2] = 0x7fff;	/* light edge */
+ 	PALETTE_SUB[32 + 3] = 0x39ce;	/* dark edge */
+diff --git a/user/microwin/src/demos/nanowm/actions.c b/user/microwin/src/demos/nanowm/actions.c
+index ce8a4145b..bd866d8a0 100644
+--- a/user/microwin/src/demos/nanowm/actions.c
++++ b/user/microwin/src/demos/nanowm/actions.c
+@@ -15,7 +15,7 @@
+ #include "nanowm.h"
+ 
+ /* uncomment this line to perform outline move operations*/
+-/*#define OUTLINE_MOVE*/
++#define OUTLINE_MOVE	/* drag a rectangle, move the window once at the end: no flicker, no repaints */
+ 
+ void redraw_ncarea(win *window)
+ {
+diff --git a/user/microwin/src/nanox/client.c b/user/microwin/src/nanox/client.c
+index 51a818b40..f80d95ec1 100644
+--- a/user/microwin/src/nanox/client.c
++++ b/user/microwin/src/nanox/client.c
+@@ -50,6 +50,7 @@
+ #define getpid()	((int)cyg_thread_self())
+ #elif NDSDRIVER
+ #include <netinet/in.h>
++#include <netinet/tcp.h>
+ #include <arpa/inet.h>
+ #include <sys/select.h>
+ #include <netdb.h>
+@@ -396,6 +397,14 @@ GrOpen(void)
+ 		return -1;
+ 	}
+ 
++#if NDSDRIVER
++	{
++		/* small writes (a reply is a type byte then the data) must not wait for the delayed ACK: 40 ms each */
++		int one = 1;
++
++		setsockopt(nxSocket, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
++	}
++#endif
+ 	setbuf(stdout, NULL);
+ 	setbuf(stderr, NULL);
+ 
+diff --git a/user/microwin/src/nanox/srvnet.c b/user/microwin/src/nanox/srvnet.c
+index dd10a2d4d..0bfe3bd6a 100644
+--- a/user/microwin/src/nanox/srvnet.c
++++ b/user/microwin/src/nanox/srvnet.c
+@@ -22,6 +22,8 @@
+ #include <errno.h>
+ #include <string.h>
+ #include <sys/socket.h>
++#include <netinet/in.h>
++#include <netinet/tcp.h>
+ #if HAVE_SHAREDMEM_SUPPORT
+ #include <sys/types.h>
+ #include <sys/ipc.h>
+@@ -1891,6 +1893,14 @@ GsAcceptClient(void)
+ 		EPRINTF("nano-X: Error accept failed (%d)\n", errno);
+ 		return;
+ 	}
++#if NDSDRIVER
++	{
++		/* see client.c: no Nagle delay, replies are written in two small pieces */
++		int one = 1;
++
++		setsockopt(i, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
++	}
++#endif
+ 	GsAcceptClientFd(i);
+ }
+ 
+-- 
+2.56.0
+
