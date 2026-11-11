@@ -240,6 +240,14 @@ in the background. That branch is the prime suspect (not confirmed). Also, `rc.c
 Differences from the original: progress markers (`rc: hostname/hosts`, `rc: extra terminals`, `rc: done`), the extra terminals and gpm are off unless `extra_terminals="YES"` in `/etc/rc.conf`, and the self-test runs once more just before `exit 0`. Built; not run.
 If it still stops, the last `rc:` marker on screen says which step.
 
+## "o" build on the console (user's photo): markers show where it stops
+Printed: `rc: hostname/hosts`, `rc: extra terminals`, `Extra terminals and gpm: off`; then nothing, no `rc: done`. So the extra terminals/gpm branch was not the (only) problem.
+The only external command in the remaining part of `rc.common` is `fwver` (default `show_firmware_version="YES"`), which reads the DS firmware version through `/dev/firmware`, i.e. through the kernel's firmware MTD driver and the ARM7.
+That driver waited for the ARM7 with `wait_event_interruptible` and no timeout. It worked in DS mode (printed "Unknown firmware.") but this is its first run in DSi mode. Hypothesis: the ARM7's firmware read does not answer in DSi mode. Not confirmed.
+Another hypothesis, not excluded: the `fwver` binary itself lives on a card region where reads fail (an earlier I/O error was at sector 4,702,080).
+"p" build (`out/dsi-mode/dslinux-dsimode-p-uc3.nds`, `-uc2`): `fwver` only runs if `show_firmware_version_dsi="YES"` in `/etc/rc.conf`; marker `rc: firmware version`; the firmware MTD read now times out after 5 s (`-EIO`) instead of blocking forever. Built; not run.
+If it still stops after `rc: firmware version`, wait 1-2 minutes and look for `dsisd:` / I/O error lines; the ARM9 read timeout is 30 s.
+
 ## 3c. Faster ARM9 clock, 3d. Wi-Fi/cameras/DSP
 Not started. 3c is small but needs the SD result first; 3d unchanged from the feasibility finding.
 
