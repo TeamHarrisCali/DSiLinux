@@ -5,7 +5,7 @@ its internal SD slot and its touchscreen, launched from TWiLight Menu++ through 
 
 This repository holds the notes, build scripts and patches. The source tree is a separate clone of
 [ipwndev/DSLinux](https://github.com/ipwndev/DSLinux) (GPL-2.0, a mirror of the official SVN) that you create in `work/dslinux`;
-the changes are in `patches/` (22 small patches, in order) and explained in `docs/`.
+the changes are in `patches/` (23 small patches, in order) and explained in `docs/`.
 
 ## What works, and how it was tested
 
@@ -35,7 +35,7 @@ the changes are in `patches/` (22 small patches, in order) and explained in `doc
 - **`fwver` (DS firmware version at boot):** skipped by default; its firmware read could wait forever in DSi mode.
 - **General SD writing:** deliberately not provided (see below).
 - **DS and DS-Lite builds:** the original DSLinux builds are unchanged here; only the Stage 1 build was run (in melonDS).
-- The `s` change (tar-only RAM copies, no time-stamp warnings) ran on the console: the log is clean and all self-test lines pass (photo: `tar etc`, `bound etc`, `Savelog: written`). It is not known whether that run was the `s` or the `t-fast` file.
+- The `u` ROM (clock lines in the self-test) has not been run yet; the `s` ROM before it ran on the console with a clean log and all checks passing.
 
 ## Writing to the card (the only way it can happen)
 
@@ -56,14 +56,14 @@ The NAND is never selected (the driver only uses SD port 0).
 
 All ROMs are built into `out/dsi-mode/` (git-ignored; rebuild with the scripts below). See `out/dsi-mode/README.txt`.
 
-- `dslinux-dsimode-s-uc3.nds`: the current build (DSi-only header). `-uc2` is the same with a "DS or DSi" header; use it only if uc3 will not launch.
-- `old/r-log-file-works/`: the last build that was confirmed on the console (boots to a prompt, writes the log). `s` differs only by quieter log output (`tar -m`); a photo of a run with that change shows a clean log and all checks passing.
+- `dslinux-dsimode-u-uc3.nds`: the current build (DSi-only header). Its self-test also has a `CLK :` line (ARM9 134 MHz or 67 MHz, read from the clock register) and the BogoMIPS line. `-uc2` is the same with a "DS or DSi" header; use it only if uc3 will not launch.
+- `old/r-log-file-works/`: the last build that was confirmed on the console (boots to a prompt, writes the log). `s` (tar-only RAM copies, `old/s-tar-m-no-clock-line/`) was run on the console too: clean log, all checks passing. `u` adds only the clock lines.
 
 ## Installing on the SD card
 
 Nothing here touches the NAND or Unlaunch. Back up your card first if it matters to you; the build only reads it, except for the log file.
 
-1. Copy `dslinux-dsimode-s-uc3.nds` to any folder on the card (for example `sd:/dslinux/`).
+1. Copy `dslinux-dsimode-u-uc3.nds` to any folder on the card (for example `sd:/dslinux/`).
 2. Copy the whole folder `out/dsi-card/sd-root/linux` to the **root** of the card, so you get `sd:/linux/etc`, `sd:/linux/usr`, `sd:/linux/var`, `sd:/linux/home` and `sd:/linux/lib` (about 109 MB). It must be a folder named `linux` directly at the root.
 3. For logging: `sd:/linux/DSILOG.TXT` (1 MiB) as above, and the card's write-protect slider open.
 4. Start the `.nds` from TWiLight Menu++. If it offers a "Run in" setting, choose DSi mode.
@@ -78,7 +78,7 @@ docker build -t dslinux-wheezy scripts/          # Debian Wheezy i386 with the b
 git clone --depth 1 https://github.com/ipwndev/DSLinux work/dslinux   # then apply patches/ in order (git am)
 scripts/prepare-tree.sh                           # recreates empty directories the git mirror drops, fixes autotools timestamps
 scripts/build-dsi.sh                              # Nintendo/DSI product (selects it, builds, packs ROMs)
-APPFLAGS=1 TAG=s scripts/make-dsimode.sh          # re-pack with a DSi header (needs BlocksDS's ndstool)
+APPFLAGS=1 TAG=u scripts/make-dsimode.sh          # re-pack with a DSi header (needs BlocksDS's ndstool)
 ```
 
 `docs/` has the whole story: `FEASIBILITY.md` (what was known at the start), `STAGE1.md`, `STAGE2.md`, `STAGE3.md` (every step, including the wrong turns and retractions).

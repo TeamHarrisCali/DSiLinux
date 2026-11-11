@@ -1,0 +1,73 @@
+From deb10d36494c1418cb1852b0b90775f7e6487a73 Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <noreply@example.invalid>
+Date: Tue, 10 Nov 2026 22:22:24 -0600
+Subject: [PATCH] DSI: read-only ARM9 clock line in the kernel log; self-test
+ prints CLK and BogoMIPS lines
+
+---
+ linux-2.6.x/arch/arm/mach-nds/arch.c |  9 +++++++--
+ vendors/Nintendo/DSI/selftest        | 12 ++++++++++++
+ 2 files changed, 19 insertions(+), 2 deletions(-)
+
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arch.c b/linux-2.6.x/arch/arm/mach-nds/arch.c
+index 0dacfdf17..2bb0bd592 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/arch.c
++++ b/linux-2.6.x/arch/arm/mach-nds/arch.c
+@@ -66,10 +66,8 @@ static void poweroff(void)
+  * Both addresses are above the kernel image and unused this early.
+  */
+ static int nds_ram_is_mirrored = -1;
+-#ifdef CONFIG_NDS_DSI_FASTCPU
+ #define SCFG_CLK9	0x04004004
+ static int nds_clk_before = -1, nds_clk_after = -1;
+-#endif
+ 
+ static void nds_probe_ram(void)
+ {
+@@ -87,6 +85,10 @@ static void nds_probe_ram(void)
+ 	dmac_flush_range((unsigned long)p0, (unsigned long)p0 + 4);
+ 	dmac_flush_range((unsigned long)p1, (unsigned long)p1 + 4);
+ 
++	/* read-only: what the loader left in the ARM9's SCFG_CLK (bit 0 = 134 MHz). Only when real DSi mode is proven. */
++	if (!nds_ram_is_mirrored)
++		nds_clk_before = nds_clk_after = readw(SCFG_CLK9);
++
+ #ifdef CONFIG_NDS_DSI_FASTCPU
+ 	/*
+ 	 * ARM9 clock 67 -> 134 MHz (SCFG_CLK bit 0). Only when real DSi mode is proven by the RAM test above, and before
+@@ -112,6 +114,9 @@ static void nds_machine_init(void)
+ 	else
+ 		printk(KERN_INFO "NDS: ARM9 SCFG_CLK %04x -> %04x: %s\n", nds_clk_before, nds_clk_after,
+ 		       (nds_clk_after & 1) ? "134 MHz requested and accepted" : "134 MHz NOT accepted (stays 67 MHz)");
++#else
++	if (nds_clk_after >= 0)
++		printk(KERN_INFO "NDS: ARM9 clock %s (SCFG_CLK %04x)\n", (nds_clk_after & 1) ? "134 MHz" : "67 MHz", nds_clk_after);
+ #endif
+ #endif
+ 	POWER_CR = POWER_2D | POWER_2D_SUB | POWER_LCD | POWER_SWAP_LCDS ;
+diff --git a/vendors/Nintendo/DSI/selftest b/vendors/Nintendo/DSI/selftest
+index 5bf14e90f..14b85bd45 100644
+--- a/vendors/Nintendo/DSI/selftest
++++ b/vendors/Nintendo/DSI/selftest
+@@ -19,6 +19,18 @@ then
+ else
+ 	echo "SD  : FAIL - see below"
+ fi
++if dmesg | grep -q 'ARM9 clock 134 MHz'
++then
++	echo "CLK : PASS - ARM9 at 134 MHz (the fastest)"
++else
++	if dmesg | grep -q 'ARM9 clock 67 MHz'
++	then
++		echo "CLK : ARM9 at 67 MHz (not the fastest)"
++	else
++		echo "CLK : ? (no clock line in the log)"
++	fi
++fi
++dmesg | grep Calibrating
+ if ls /mnt | grep -q .
+ then
+ 	echo "CONF: FAIL - whole card visible at /mnt"
+-- 
+2.56.0
+

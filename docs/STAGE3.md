@@ -280,6 +280,12 @@ A boot of one of the tar-only builds: log lines `tar etc`, `bound etc`, `tar var
 `rc: done`. `dmesg | grep Cal` printed `Calibrating delay loop... 66.76 BogoMIPS (lpj=333824)`. That is the expected value for the normal `s` ROM; for `t-fast` it would mean the 134 MHz request was not accepted (or not made).
 The user later confirmed that the second photo (the one with the `SCFG_CLK` line) was the `t-fast` ROM.
 
+## Clock check in the self-test ("u" build)
+The `s` ROM's saved log (kernel `#25`) shows `Calibrating delay loop... 66.76 BogoMIPS (lpj=333824)`, identical to `t-fast` and to the `r` ROM, so the ARM9 speed is the same in all of them.
+The `u` build (`out/dsi-mode/dslinux-dsimode-u-uc3.nds`, `-uc2`) reads `SCFG_CLK` (read-only, only when DSi mode is proven), logs `NDS: ARM9 clock 134 MHz (SCFG_CLK xxxx)` or `67 MHz`, and the end-of-boot self-test prints
+`CLK : PASS - ARM9 at 134 MHz (the fastest)` (or `ARM9 at 67 MHz (not the fastest)` / `? (no clock line)`) plus the `Calibrating delay loop` line. Built; not run. (A first attempt at this build still had the fast option on, left over in the kernel config; it was caught by checking
+the image for the write message and rebuilt with the option off.)
+
 ## 3c. Faster ARM9 clock: nothing to do (measured on the console)
 `CONFIG_NDS_DSI_FASTCPU` writes `SCFG_CLK` (0x04004004) bit 0 early in boot. On the console the t-fast ROM printed `NDS: ARM9 SCFG_CLK 0001 -> 0001: 134 MHz requested and accepted`: the register already held `0001` before the write, so the loader had
 already put the ARM9 at 134 MHz and the option changes nothing. All DSi-mode boots show `66.76 BogoMIPS (lpj=333824)`: with the ARM946E's delay loop taking about 4 cycles per iteration (sub plus a taken branch), 33.4 M iterations per second means roughly 134 MHz.
