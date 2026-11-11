@@ -1,0 +1,462 @@
+From 8ad4757fa9e1921fa142f0af75522dbec9d85936 Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 04:32:31 -0600
+Subject: [PATCH] DSI desktop: fewer Nano-X requests (one graphics context per
+ colour, bevels as four stacked fills), finer dsbench
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ user/microwin/src/demos/nanox/dsbench.c | 139 +++++++++++++++++-------
+ user/microwin/src/demos/nanox/dsdesk.c  |   7 +-
+ user/microwin/src/demos/nanox/dsfiles.c |   6 +-
+ user/microwin/src/demos/nanox/dsnotes.c |   5 +-
+ user/microwin/src/demos/nanox/w95.h     | 114 ++++++++++++++-----
+ 5 files changed, 196 insertions(+), 75 deletions(-)
+
+diff --git a/user/microwin/src/demos/nanox/dsbench.c b/user/microwin/src/demos/nanox/dsbench.c
+index 0889caecf..974424b2b 100644
+--- a/user/microwin/src/demos/nanox/dsbench.c
++++ b/user/microwin/src/demos/nanox/dsbench.c
+@@ -1,6 +1,7 @@
+ /*
+- * dsbench - how fast is drawing on this console? Prints milliseconds for a few drawing jobs on the desktop
+- * (and into /tmp/bench.log). Run it from the terminal window: /boot/dsbench
++ * dsbench - how fast is drawing on this console? Times a few jobs on the desktop (each ends with a request that
++ * has an answer, so the server really finished) and prints milliseconds in its window and in /tmp/bench.log.
++ * Run it from the terminal window: /boot/dsbench
+  */
+ #include <stdio.h>
+ #include <stdlib.h>
+@@ -8,6 +9,9 @@
+ #include "nano-X.h"
+ #include "w95.h"
+ 
++static GR_WINDOW_ID w;
++static GR_GC_ID gc;
++
+ static long now_ms(void)
+ {
+ 	struct timeval tv;
+@@ -17,21 +21,53 @@ static long now_ms(void)
+ }
+ 
+ /* a request with an answer: the server has finished everything sent before it */
+-static void sync_server(GR_WINDOW_ID w)
++static void sync_server(void)
+ {
+ 	GR_WINDOW_INFO info;
+ 
+ 	GrGetWindowInfo(w, &info);
+ }
+ 
++/* the old way: eight lines, each preceded by a set-colour request */
++static void slow_box(int x, int y, int wd, int h, int sunken)
++{
++	GR_COLOR tl = sunken ? W95_SHADOW : W95_LIGHT, br = sunken ? W95_LIGHT : W95_DARK;
++	int r = x + wd - 1, b = y + h - 1;
++
++	GrSetGCForeground(gc, W95_FACE);
++	GrFillRect(w, gc, x, y, wd, h);
++	GrSetGCForeground(gc, tl);
++	GrLine(w, gc, x, y, r - 1, y);
++	GrLine(w, gc, x, y, x, b - 1);
++	GrSetGCForeground(gc, br);
++	GrLine(w, gc, x, b, r, b);
++	GrLine(w, gc, r, y, r, b);
++	GrSetGCForeground(gc, tl);
++	GrLine(w, gc, x + 1, y + 1, r - 2, y + 1);
++	GrLine(w, gc, x + 1, y + 1, x + 1, b - 2);
++	GrSetGCForeground(gc, br);
++	GrLine(w, gc, x + 1, b - 1, r - 1, b - 1);
++	GrLine(w, gc, r - 1, y + 1, r - 1, b - 1);
++}
++
++#define NTESTS 8
++static const char *names[NTESTS] = {
++	"20 fills of 10000 px",
++	"200 set-colour requests",
++	"200 single pixels",
++	"200 fills of 4x4 px",
++	"100 requests with answer",
++	"100 text lines (25 chars)",
++	"100 old style boxes 60x20",
++	"100 new style boxes 60x20",
++};
++
+ int main(void)
+ {
+-	GR_WINDOW_ID w;
+-	GR_GC_ID gc;
+ 	GR_FONT_ID font;
+ 	GR_EVENT ev;
+-	long t, r[6];
+-	int i;
++	long t, r[NTESTS];
++	int i, k;
+ 	FILE *f;
+ 	char line[80];
+ 
+@@ -40,48 +76,75 @@ int main(void)
+ 	gc = GrNewGC();
+ 	font = GrCreateFont("Tiny", 0, NULL);
+ 	GrSetGCFont(gc, font);
++	w95_init(font);
+ 	w = GrNewWindowEx(GR_WM_PROPS_APPFRAME | GR_WM_PROPS_CAPTION | GR_WM_PROPS_CLOSEBOX, "Bench",
+-			  GR_ROOT_WINDOW_ID, 20, 12, 200, 100, W95_FACE);
++			  GR_ROOT_WINDOW_ID, 6, 6, 232, 120, W95_FACE);
+ 	GrSelectEvents(w, GR_EVENT_MASK_EXPOSURE | GR_EVENT_MASK_CLOSE_REQ);
+ 	GrMapWindow(w);
+ 	do
+ 		GrGetNextEvent(&ev);
+ 	while (ev.type != GR_EVENT_TYPE_EXPOSURE);
+ 
+-	sync_server(w);
+-	t = now_ms();
+-	for (i = 0; i < 20; i++)
+-		w95_fill(w, gc, i & 1 ? W95_LIGHT : W95_NAVY, 0, 0, 100, 100);	/* 10000 pixels each */
+-	sync_server(w);
+-	r[0] = now_ms() - t;
++	w95_gc(W95_NAVY);	/* make the per-colour contexts before timing */
++	w95_gc(W95_LIGHT);
++	w95_gc(W95_DARK);
++	w95_gc(W95_FACE);
++	w95_gc(W95_SHADOW);
+ 
+-	t = now_ms();
+-	for (i = 0; i < 100; i++)
+-		w95_text(w, gc, W95_DARK, 2, 2 + (i % 10) * 8, "The quick brown fox jumps");
+-	sync_server(w);
+-	r[1] = now_ms() - t;
+-
+-	t = now_ms();
+-	for (i = 0; i < 100; i++)
+-		w95_box(w, gc, 10, 10, 60, 20, i & 1, 1);
+-	sync_server(w);
+-	r[2] = now_ms() - t;
++	for (k = 0; k < NTESTS; k++) {
++		sync_server();
++		t = now_ms();
++		switch (k) {
++		case 0:
++			for (i = 0; i < 20; i++)
++				w95_fill(w, gc, i & 1 ? W95_LIGHT : W95_NAVY, 0, 0, 100, 100);
++			break;
++		case 1:
++			for (i = 0; i < 200; i++)
++				GrSetGCForeground(gc, i & 1 ? W95_LIGHT : W95_NAVY);
++			break;
++		case 2:
++			GrSetGCForeground(gc, W95_DARK);
++			for (i = 0; i < 200; i++)
++				GrPoint(w, gc, 20 + (i % 100), 20);
++			break;
++		case 3:
++			GrSetGCForeground(gc, W95_DARK);
++			for (i = 0; i < 200; i++)
++				GrFillRect(w, gc, 20 + (i % 50) * 3, 30, 4, 4);
++			break;
++		case 4:
++			for (i = 0; i < 100; i++)
++				sync_server();
++			break;
++		case 5:
++			for (i = 0; i < 100; i++)
++				w95_text(w, gc, W95_DARK, 2, 2 + (i % 10) * 10, "The quick brown fox jumps");
++			break;
++		case 6:
++			for (i = 0; i < 100; i++)
++				slow_box(10, 10, 60, 20, i & 1);
++			break;
++		case 7:
++			for (i = 0; i < 100; i++)
++				w95_box(w, gc, 10, 10, 60, 20, i & 1, W95_FACEFILL);
++			break;
++		}
++		sync_server();
++		r[k] = now_ms() - t;
++	}
+ 
+-	sprintf(line, "20 fills of 10000 px: %ld ms", r[0]);
+ 	f = fopen("/tmp/bench.log", "w");
+-	if (f) {
+-		fprintf(f, "%s\n", line);
+-		fprintf(f, "100 text lines of 25 chars: %ld ms\n", r[1]);
+-		fprintf(f, "100 bevel boxes 60x20: %ld ms\n", r[2]);
+-		fclose(f);
++	w95_fill(w, gc, W95_FACE, 0, 0, 232, 120);
++	for (k = 0; k < NTESTS; k++) {
++		sprintf(line, "%s: %ld ms", names[k], r[k]);
++		w95_text(w, gc, W95_DARK, 4, 3 + k * 11, line);
++		if (f)
++			fprintf(f, "%s\n", line);
+ 	}
+-	w95_fill(w, gc, W95_FACE, 0, 0, 200, 100);
+-	w95_text(w, gc, W95_DARK, 4, 4, line);
+-	sprintf(line, "100 text lines: %ld ms", r[1]);
+-	w95_text(w, gc, W95_DARK, 4, 16, line);
+-	sprintf(line, "100 bevel boxes: %ld ms", r[2]);
+-	w95_text(w, gc, W95_DARK, 4, 28, line);
+-	w95_text(w, gc, W95_DARK, 4, 44, "(saved in /tmp/bench.log)");
++	w95_text(w, gc, W95_SHADOW, 4, 3 + NTESTS * 11 + 4, "(saved in /tmp/bench.log)");
++	if (f)
++		fclose(f);
+ 
+ 	for (;;) {
+ 		GrGetNextEvent(&ev);
+diff --git a/user/microwin/src/demos/nanox/dsdesk.c b/user/microwin/src/demos/nanox/dsdesk.c
+index 77fa11695..c79b48bc6 100644
+--- a/user/microwin/src/demos/nanox/dsdesk.c
++++ b/user/microwin/src/demos/nanox/dsdesk.c
+@@ -67,7 +67,7 @@ static void draw_bar(void)
+ 	w95_hline(bar, gc, W95_LIGHT, 0, si.cols - 1, 0);
+ 
+ 	/* Start button: flag and bold text */
+-	w95_box(bar, gc, 2, 3, startw, barh - 5, start_down, 1);
++	w95_box(bar, gc, 2, 3, startw, barh - 5, start_down, W95_FACEFILL);
+ 	w95_flag(bar, gc, 6 + start_down, 3 + (barh - 5 - 7) / 2 + start_down);
+ 	w95_text(bar, gc, W95_DARK, 17 + start_down, 3 + (barh - 5 - th) / 2 + start_down, "Start");
+ 	w95_text(bar, gc, W95_DARK, 18 + start_down, 3 + (barh - 5 - th) / 2 + start_down, "Start");
+@@ -79,7 +79,7 @@ static void draw_bar(void)
+ 		strcpy(clk, "--:--");
+ 	cw = w95_textw(gc, clk) + 12;
+ 	x = si.cols - cw - 3;
+-	w95_box(bar, gc, x, 3, cw, barh - 5, 1, 0);
++	w95_box(bar, gc, x, 3, cw, barh - 5, 1, W95_FACEFILL);
+ 	w95_text(bar, gc, W95_DARK, x + 6, 3 + (barh - 5 - th) / 2, clk);
+ }
+ 
+@@ -107,7 +107,7 @@ static void draw_menu(void)
+ {
+ 	unsigned i;
+ 
+-	w95_box(menu, gc, 0, 0, menuw, menuh, 0, 1);
++	w95_box(menu, gc, 0, 0, menuw, menuh, 0, W95_FACEFILL);
+ 	for (i = 0; i < NITEMS; i++)
+ 		draw_item(i);
+ }
+@@ -165,6 +165,7 @@ int main(int argc, char **argv)
+ 	gc = GrNewGC();
+ 	font = GrCreateFont("Tiny", 0, NULL);
+ 	GrSetGCFont(gc, font);
++	w95_init(font);
+ 	th = w95_texth(gc);
+ 	barh = th + 8;
+ 	startw = w95_textw(gc, "Start") + 24;
+diff --git a/user/microwin/src/demos/nanox/dsfiles.c b/user/microwin/src/demos/nanox/dsfiles.c
+index 377bb9e87..e4752cf88 100644
+--- a/user/microwin/src/demos/nanox/dsfiles.c
++++ b/user/microwin/src/demos/nanox/dsfiles.c
+@@ -88,14 +88,13 @@ static void draw(void)
+ 
+ 	/* header: Up button, path field, scroll buttons */
+ 	w95_button(win, gc, 3, 3, 24, headh - 6, "Up", 0);
+-	w95_box(win, gc, 30, 3, WIN_W - 30 - 40, headh - 6, 1, 0);
++	w95_box(win, gc, 30, 3, WIN_W - 30 - 40, headh - 6, 1, W95_FACEFILL);
+ 	w95_text(win, gc, W95_DARK, 34, 3 + (headh - 6 - fh) / 2, cwd);
+ 	w95_button(win, gc, WIN_W - 37, 3, 17, headh - 6, "^", 0);
+ 	w95_button(win, gc, WIN_W - 19, 3, 17, headh - 6, "v", 0);
+ 
+ 	/* list */
+-	w95_fill(win, gc, W95_LIGHT, 3, headh, WIN_W - 6, WIN_H - headh - 3);
+-	w95_box(win, gc, 2, headh - 1, WIN_W - 4, WIN_H - headh + 1, 1, 0);
++	w95_box(win, gc, 2, headh - 1, WIN_W - 4, WIN_H - headh + 1, 1, W95_WHITEFILL);
+ 	for (i = 0; i < rows && top + i < nent; i++) {
+ 		struct ent *e = &ents[top + i];
+ 		char name[NAMELEN + 2];
+@@ -163,6 +162,7 @@ int main(int argc, char **argv)
+ 	gc = GrNewGC();
+ 	font = GrCreateFont("Tiny", 0, NULL);
+ 	GrSetGCFont(gc, font);
++	w95_init(font);
+ 	GrGetFontInfo(font, &fi);
+ 	fw = fi.maxwidth;
+ 	fh = fi.height;
+diff --git a/user/microwin/src/demos/nanox/dsnotes.c b/user/microwin/src/demos/nanox/dsnotes.c
+index 12f83cff6..5903e2b79 100644
+--- a/user/microwin/src/demos/nanox/dsnotes.c
++++ b/user/microwin/src/demos/nanox/dsnotes.c
+@@ -114,7 +114,7 @@ static void draw_buttons(void)
+ 	w95_button(win, gc, 34, y + 3, 32, barh - 6, "Save", 0);
+ 	w95_button(win, gc, 69, y + 3, 32, barh - 6, "Load", 0);
+ 	snprintf(name, sizeof(name), "%s%s", p ? p + 1 : path, modified ? " *" : "");
+-	w95_box(win, gc, 106, y + 3, WIN_W - 109, barh - 6, 1, 0);
++	w95_box(win, gc, 106, y + 3, WIN_W - 109, barh - 6, 1, W95_FACEFILL);
+ 	w95_text(win, gc, W95_DARK, 110, y + 3 + (barh - 6 - fh) / 2, name);
+ 	if (status[0])
+ 		w95_text(win, gc, W95_SHADOW, 110 + w95_textw(gc, name) + 8, y + 3 + (barh - 6 - fh) / 2, status);
+@@ -131,7 +131,7 @@ static void redraw_all(void)
+ 		topline = row;
+ 	if (row >= topline + rows)
+ 		topline = row - rows + 1;
+-	w95_box(win, gc, 0, 0, WIN_W, areah, 1, 0);
++	w95_box(win, gc, 0, 0, WIN_W, areah, 1, W95_WHITEFILL);
+ 	for (r = topline; r < topline + rows; r++)
+ 		draw_row(r);
+ 	draw_caret(1);
+@@ -220,6 +220,7 @@ int main(int argc, char **argv)
+ 	gc = GrNewGC();
+ 	font = GrCreateFont(FONT, 0, NULL);
+ 	GrSetGCFont(gc, font);
++	w95_init(font);
+ 	GrGetFontInfo(font, &fi);
+ 	fw = fi.maxwidth;
+ 	fh = fi.height;
+diff --git a/user/microwin/src/demos/nanox/w95.h b/user/microwin/src/demos/nanox/w95.h
+index f61a3e96c..c6044bc48 100644
+--- a/user/microwin/src/demos/nanox/w95.h
++++ b/user/microwin/src/demos/nanox/w95.h
+@@ -1,6 +1,10 @@
+ /*
+- * w95.h - a Windows 95 look for the DSLinuxDSi desktop programs (dsdesk, dsnotes, dsfiles).
++ * w95.h - a Windows 95 look for the DSLinuxDSi desktop programs (dsdesk, dsnotes, dsfiles, dsbench).
+  * 3D bevels in the classic grey, navy highlights, teal desktop.
++ *
++ * Speed matters more than elegance here: on the DS every Nano-X request costs about a millisecond, whatever
++ * it draws. So there is one graphics context per colour (no set-colour requests between drawing calls) and a
++ * bevelled box is four stacked rectangle fills instead of eight lines.
+  */
+ #ifndef W95_H
+ #define W95_H
+@@ -14,51 +18,103 @@
+ #define W95_NAVY	GR_RGB(0, 0, 128)
+ #define W95_TEAL	GR_RGB(0, 128, 128)
+ 
++/* w95_box interior */
++#define W95_KEEP	0	/* leave the inside alone (draws eight lines, slow) */
++#define W95_FACEFILL	1	/* grey inside */
++#define W95_WHITEFILL	2	/* white inside (text fields) */
++
++static GR_FONT_ID w95_font;
++
++#define W95_MAXGC	10
++static GR_COLOR w95_gc_color[W95_MAXGC];
++static GR_GC_ID w95_gc_id[W95_MAXGC];
++static int w95_gc_n;
++
++/* the graphics context that draws in colour c (made once, with the interface font) */
++static GR_GC_ID w95_gc(GR_COLOR c)
++{
++	int i;
++
++	for (i = 0; i < w95_gc_n; i++)
++		if (w95_gc_color[i] == c)
++			return w95_gc_id[i];
++	if (w95_gc_n >= W95_MAXGC)
++		i = W95_MAXGC - 1;	/* out of slots: reuse the last one, recolour it */
++	else
++		i = w95_gc_n++;
++	if (!w95_gc_id[i])
++		w95_gc_id[i] = GrNewGC();
++	w95_gc_color[i] = c;
++	GrSetGCForeground(w95_gc_id[i], c);
++	GrSetGCUseBackground(w95_gc_id[i], GR_FALSE);
++	if (w95_font)
++		GrSetGCFont(w95_gc_id[i], w95_font);
++	return w95_gc_id[i];
++}
++
++/* the programs call this once after creating their font */
++static void w95_init(GR_FONT_ID font)
++{
++	w95_font = font;
++}
++
++/* the g parameters below are kept for the callers; drawing uses the per-colour contexts */
+ static void w95_fill(GR_WINDOW_ID w, GR_GC_ID g, GR_COLOR c, int x, int y, int wd, int h)
+ {
+-	GrSetGCForeground(g, c);
+-	GrFillRect(w, g, x, y, wd, h);
++	GrFillRect(w, w95_gc(c), x, y, wd, h);
+ }
+ 
+ static void w95_hline(GR_WINDOW_ID w, GR_GC_ID g, GR_COLOR c, int x1, int x2, int y)
+ {
+-	GrSetGCForeground(g, c);
+-	GrLine(w, g, x1, y, x2, y);
++	GrLine(w, w95_gc(c), x1, y, x2, y);
+ }
+ 
+ static void w95_vline(GR_WINDOW_ID w, GR_GC_ID g, GR_COLOR c, int x, int y1, int y2)
+ {
+-	GrSetGCForeground(g, c);
+-	GrLine(w, g, x, y1, x, y2);
++	GrLine(w, w95_gc(c), x, y1, x, y2);
+ }
+ 
+-/* a raised (sunken = 0) or sunken (sunken = 1) box with a two pixel bevel, filled with the grey face */
+-static void w95_box(GR_WINDOW_ID w, GR_GC_ID g, int x, int y, int wd, int h, int sunken, int fill)
++/* a raised (sunken = 0) or sunken (sunken = 1) box with a two pixel bevel */
++static void w95_box(GR_WINDOW_ID w, GR_GC_ID g, int x, int y, int wd, int h, int sunken, int interior)
+ {
+-	GR_COLOR tl_out = sunken ? W95_SHADOW : W95_LIGHT;
+-	GR_COLOR br_out = sunken ? W95_LIGHT : W95_DARK;
+-	GR_COLOR tl_in = sunken ? W95_DARK : W95_FACE;
+-	GR_COLOR br_in = sunken ? W95_FACE : W95_SHADOW;
+-	int r = x + wd - 1, b = y + h - 1;
+-
+-	if (fill)
+-		w95_fill(w, g, W95_FACE, x, y, wd, h);
+-	w95_hline(w, g, tl_out, x, r - 1, y);
+-	w95_vline(w, g, tl_out, x, y, b - 1);
+-	w95_hline(w, g, br_out, x, r, b);
+-	w95_vline(w, g, br_out, r, y, b);
+-	w95_hline(w, g, tl_in, x + 1, r - 2, y + 1);
+-	w95_vline(w, g, tl_in, x + 1, y + 1, b - 2);
+-	w95_hline(w, g, br_in, x + 1, r - 1, b - 1);
+-	w95_vline(w, g, br_in, r - 1, y + 1, b - 1);
++	if (interior == W95_KEEP) {
++		/* eight lines around whatever is inside */
++		GR_COLOR tl_out = sunken ? W95_SHADOW : W95_LIGHT;
++		GR_COLOR br_out = sunken ? W95_LIGHT : W95_DARK;
++		GR_COLOR tl_in = sunken ? W95_DARK : W95_FACE;
++		GR_COLOR br_in = sunken ? W95_FACE : W95_SHADOW;
++		int r = x + wd - 1, b = y + h - 1;
++
++		w95_hline(w, g, tl_out, x, r - 1, y);
++		w95_vline(w, g, tl_out, x, y, b - 1);
++		w95_hline(w, g, br_out, x, r, b);
++		w95_vline(w, g, br_out, r, y, b);
++		w95_hline(w, g, tl_in, x + 1, r - 2, y + 1);
++		w95_vline(w, g, tl_in, x + 1, y + 1, b - 2);
++		w95_hline(w, g, br_in, x + 1, r - 1, b - 1);
++		w95_vline(w, g, br_in, r - 1, y + 1, b - 1);
++		return;
++	}
++	if (!sunken) {
++		/* dark everywhere, light over all but the bottom row/right column, shadow inside that, face inside that */
++		w95_fill(w, g, W95_DARK, x, y, wd, h);
++		w95_fill(w, g, W95_LIGHT, x, y, wd - 1, h - 1);
++		w95_fill(w, g, W95_SHADOW, x + 1, y + 1, wd - 2, h - 2);
++		w95_fill(w, g, W95_FACE, x + 1, y + 1, wd - 3, h - 3);
++	} else {
++		/* light everywhere, shadow over all but the bottom/right edge, dark inside it, then the inside colour */
++		w95_fill(w, g, W95_LIGHT, x, y, wd, h);
++		w95_fill(w, g, W95_SHADOW, x, y, wd - 1, h - 1);
++		w95_fill(w, g, W95_FACE, x + 1, y + 1, wd - 2, h - 2);
++		w95_fill(w, g, W95_DARK, x + 1, y + 1, wd - 3, h - 3);
++		w95_fill(w, g, interior == W95_WHITEFILL ? W95_LIGHT : W95_FACE, x + 2, y + 2, wd - 4, h - 4);
++	}
+ }
+ 
+ /* text without a background box; (x, y) is the top left of the text */
+ static void w95_text(GR_WINDOW_ID w, GR_GC_ID g, GR_COLOR c, int x, int y, const char *s)
+ {
+-	GrSetGCForeground(g, c);
+-	GrSetGCUseBackground(g, GR_FALSE);
+-	GrText(w, g, x, y, (void *)s, -1, GR_TFASCII | GR_TFTOP);
++	GrText(w, w95_gc(c), x, y, (void *)s, -1, GR_TFASCII | GR_TFTOP);
+ }
+ 
+ static int w95_textw(GR_GC_ID g, const char *s)
+@@ -82,7 +138,7 @@ static void w95_button(GR_WINDOW_ID w, GR_GC_ID g, int x, int y, int wd, int h,
+ {
+ 	int tw = w95_textw(g, label), th = w95_texth(g);
+ 
+-	w95_box(w, g, x, y, wd, h, down, 1);
++	w95_box(w, g, x, y, wd, h, down, W95_FACEFILL);
+ 	w95_text(w, g, W95_DARK, x + (wd - tw) / 2 + (down ? 1 : 0), y + (h - th) / 2 + (down ? 1 : 0), label);
+ }
+ 
+-- 
+2.56.0
+
