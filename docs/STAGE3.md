@@ -483,6 +483,12 @@ Next steps for speed, in order of expected gain: a fast picture renderer of my o
 
 Verified: the core on a PC with my test ROM (four shades, d-pad scrolling, exact scroll distance); the program and the kernel change compile; the ROM is 4.11 MB (limit 4.19 MB, about 80 KB left). **Not yet run on the console**: the whole app, `/proc/dskeys`, drawing speed, with a real game.
 
+## 3b-doom. DOOM (w97h)
+
+`doom/` holds the port (see `doom/README.md`): doomgeneric (GPL v2) with my platform layer `doomgeneric_ds.c`, built as a separate program `dsdoom` (440 KB flat binary, 256 KB stack) that lives in `/home/doom` inside `ROOTFS.IMG` together with the shareware `doom1.wad` (md5 checked against the id Software v1.9 shareware value) and `default.cfg`; the ROM only gets the menu entry (Start > Games > DOOM). The 320x200 index picture is scaled to 256x192 through lookup tables and written into both screen pages (about 49,000 pixels a frame), the buttons come raw from `/proc/dskeys`, the clock is the vertical blank counter. Low detail and 9 screen blocks are set in `default.cfg`; the zone is 5 MB. No sound. Start + Select leaves at once, and the desktop picture saved at the start is put back.
+
+**Not yet run on the console**: everything above. Unknowns: whether 5 MB of contiguous memory is available next to the desktop (the log would say "Unable to allocate"), the frame rate on the 134 MHz ARM9 (expect single digits to low teens; if too slow the next steps are a smaller window, `screenblocks` 7, and fixing the renderer hot spots), and whether the scaling and button mapping feel right.
+
 ## 3c. Faster ARM9 clock: nothing to do (measured on the console)
 `CONFIG_NDS_DSI_FASTCPU` writes `SCFG_CLK` (0x04004004) bit 0 early in boot. On the console the t-fast ROM printed `NDS: ARM9 SCFG_CLK 0001 -> 0001: 134 MHz requested and accepted`: the register already held `0001` before the write, so the loader had
 already put the ARM9 at 134 MHz and the option changes nothing. All DSi-mode boots show `66.76 BogoMIPS (lpj=333824)`: with the ARM946E's delay loop taking about 4 cycles per iteration (sub plus a taken branch), 33.4 M iterations per second means roughly 134 MHz.

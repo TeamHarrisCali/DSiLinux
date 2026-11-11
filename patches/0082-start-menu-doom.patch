@@ -1,0 +1,26 @@
+From f58265a659631f90022fac6affb94dfb413c6122 Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 17:53:49 -0600
+Subject: [PATCH] dsdesk: Start > Games > DOOM (/home/doom/dsdoom, kept in the
+ root image, not in the ROM)
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ user/microwin/src/demos/nanox/dsdesk.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/user/microwin/src/demos/nanox/dsdesk.c b/user/microwin/src/demos/nanox/dsdesk.c
+index b312e4976..1f4ee5f6b 100644
+--- a/user/microwin/src/demos/nanox/dsdesk.c
++++ b/user/microwin/src/demos/nanox/dsdesk.c
+@@ -46,6 +46,7 @@ static const struct item games[] = {
+ 	{ "Tron", "/boot/dsarcade", "tron" },
+ 	{ "3D Maze", "/boot/dsarcade", "maze" },
+ 	{ "Game Boy", "/boot/dsgb" },
++	{ "DOOM", "/home/doom/dsdoom" },
+ 	{ "Minesweeper", "/boot/landmine" },
+ 	{ "Tetris", "/boot/ntetris" },
+ };
+-- 
+2.56.0
+
