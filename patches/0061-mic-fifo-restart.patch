@@ -1,0 +1,315 @@
+From 62f3f8eaa9ab580b252396e259e426306b750d20 Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 08:13:26 -0600
+Subject: [PATCH] Mic: restart the FIFO when it has overrun or stalled (a
+ recording froze on one sample after ~8 s, MICCNT overrun flag set), count
+ restarts; dsmemo keeps the recording in memory (up to ~2 min) and writes the
+ file on Stop, so no SD writes happen mid recording
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ .../arch/arm/mach-nds/arm7/microphone.c       |  27 +++++
+ linux-2.6.x/arch/arm/mach-nds/volume.c        |   6 +-
+ linux-2.6.x/drivers/block/dldi_c.c            |   1 +
+ user/microwin/src/demos/nanox/dsmemo.c        | 108 ++++++++++++------
+ 4 files changed, 107 insertions(+), 35 deletions(-)
+
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/microphone.c b/linux-2.6.x/arch/arm/mach-nds/arm7/microphone.c
+index 67bad9010..71d25b2a8 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/arm7/microphone.c
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/microphone.c
+@@ -18,6 +18,7 @@
+ #define REG_MICDATA		(*(volatile u32 *)0x04004604)
+ #define MICCNT_FORMAT_NORMAL	2
+ #define MICCNT_EMPTY		(1 << 8)
++#define MICCNT_OVERRUN		(1 << 11)
+ #define MICCNT_CLEAR_FIFO	(1 << 12)
+ #define MICCNT_ENABLE		(1 << 15)
+ 
+@@ -34,6 +35,8 @@ static s16 dsi_last;
+ 
+ /* diagnostics, fetched by the ARM9 (mic_diag, /proc/dsimic) */
+ static s16 dbg_smin = 0x7fff, dbg_smax = -0x8000;
++static u32 dbg_restart;
++static int empty_run;
+ static u32 dbg_on, dbg_start, dbg_stop, dbg_irq, dbg_full, dbg_empty, dbg_have, dbg_wraps;
+ 
+ 
+@@ -66,10 +69,31 @@ static void dsi_mic_amp(int on)
+ 	}
+ }
+ 
++/* Switch the FIFO off and on again, emptied. The FIFO stops for good once it has overrun (the log of w96c showed MICCNT with the
++ * overrun flag set and 8 seconds of one constant sample): the ARM7 was busy in an SD request and missed the timer ticks. */
++static void dsi_fifo_restart(void)
++{
++	REG_MICCNT &= ~MICCNT_ENABLE;
++	REG_MICCNT = MICCNT_CLEAR_FIFO | MICCNT_FORMAT_NORMAL;
++	REG_MICCNT |= MICCNT_ENABLE;
++	dbg_restart++;
++	empty_run = 0;
++}
++
+ /* the newest sample in the FIFO (signed 16 bit), else the previous one */
+ static s16 dsi_sample(void)
+ {
+ 	int n = 64;
++	u16 cnt = REG_MICCNT;
++
++	if (cnt & MICCNT_OVERRUN) {
++		dsi_fifo_restart();
++	} else if (cnt & MICCNT_EMPTY) {
++		if (++empty_run > 600)		/* no sample for hundreds of ticks: it has stalled */
++			dsi_fifo_restart();
++	} else {
++		empty_run = 0;
++	}
+ 
+ 	if (REG_MICCNT & MICCNT_EMPTY)
+ 		dbg_empty++;
+@@ -193,6 +217,8 @@ void mic_start()
+ 		dsi_last = 0;
+ 		dbg_smin = 0x7fff;
+ 		dbg_smax = -0x8000;
++		dbg_restart = 0;
++		empty_run = 0;
+ 	}
+ 	REG_TM3CNT_L = MIC_FREQ(mic_rate);
+ 	REG_TM3CNT_H = NDS_TCR_ENB | NDS_TCR_CLK | NDS_TCR_IRQ;
+@@ -263,6 +289,7 @@ void mic_diag(u32 *touch, u32 *diag, u32 *info)
+ {
+ 	info[0] = (u32)(s32)dbg_smin;
+ 	info[1] = (u32)(s32)dbg_smax;
++	info[2] = dbg_restart;
+ 	touch[0] = dbg_on;
+ 	touch[1] = dbg_start;
+ 	touch[2] = dbg_stop;
+diff --git a/linux-2.6.x/arch/arm/mach-nds/volume.c b/linux-2.6.x/arch/arm/mach-nds/volume.c
+index 7c8ccd658..e686f4734 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/volume.c
++++ b/linux-2.6.x/arch/arm/mach-nds/volume.c
+@@ -38,7 +38,7 @@ extern int dsisd_micdiag(unsigned int *out);
+ /* /proc/dsimic: the microphone's counters from the ARM7 (for finding out where the data stops) */
+ static int mic_read_proc(char *page, char **start, off_t off, int count, int *eof, void *data)
+ {
+-	unsigned int d[18];
++	unsigned int d[19];
+ 	int len;
+ 
+ 	if (dsisd_micdiag(d) != 0)
+@@ -46,9 +46,9 @@ static int mic_read_proc(char *page, char **start, off_t off, int count, int *eo
+ 	else
+ 		len = sprintf(page, "mic_on=%u start=%u stop=%u irq=%u fifo_full=%u fifo_empty=%u period_msgs=%u wraps=%u\n"
+ 			      "buf=%08x size=%u period=%u rate=%u fmt=%u last=%08x miccnt/tm3=%08x ie=%08x\n"
+-			      "samples: lowest %d highest %d\n",
++			      "samples: lowest %d highest %d, fifo restarts %u\n",
+ 			      d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7], d[8], d[9], d[10], d[11], d[12], d[13], d[14], d[15],
+-			      (int)d[16], (int)d[17]);
++			      (int)d[16], (int)d[17], d[18]);
+ 	*eof = 1;
+ 	if (off >= len)
+ 		return 0;
+diff --git a/linux-2.6.x/drivers/block/dldi_c.c b/linux-2.6.x/drivers/block/dldi_c.c
+index 14e97d538..b7364b276 100644
+--- a/linux-2.6.x/drivers/block/dldi_c.c
++++ b/linux-2.6.x/drivers/block/dldi_c.c
+@@ -225,6 +225,7 @@ int dsisd_micdiag(unsigned int *out)
+ 		}
+ 		out[16] = sd_block.info[0];
+ 		out[17] = sd_block.info[1];
++		out[18] = sd_block.info[2];
+ 	}
+ 	up(&sd_mutex);
+ 	return ret;
+diff --git a/user/microwin/src/demos/nanox/dsmemo.c b/user/microwin/src/demos/nanox/dsmemo.c
+index 2e9346c73..312dd0a9b 100644
+--- a/user/microwin/src/demos/nanox/dsmemo.c
++++ b/user/microwin/src/demos/nanox/dsmemo.c
+@@ -82,6 +82,10 @@ static int tick_peak;
+ /* recording / playback state */
+ static int dsp = -1, file = -1;
+ static long rec_bytes;
++static unsigned char *rec_buf;		/* the recording is kept in memory and written when it stops: no SD writes mid recording */
++static long rec_cap;
++static char rec_path[64];
++#define MAXREC	(4L * 1024 * 1024)	/* about 2 minutes */
+ static unsigned char *pcm;		/* loaded memo */
+ static long pcm_len, pcm_written, pcm_fed;
+ static int pcm_rate, pcm_ch;
+@@ -339,17 +343,56 @@ static int dsp_open(int mode, int rate, int channels)
+ 	return fd;
+ }
+ 
++/* write the recorded memo to its file; 0 = ok */
++static int save_recording(void)
++{
++	unsigned char h[44];
++	long done = 0;
++	int f = open(rec_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
++
++	if (f < 0)
++		return -1;
++	wav_header(h, rec_bytes);
++	if (write(f, h, 44) != 44) {
++		close(f);
++		return -2;
++	}
++	while (done < rec_bytes) {
++		long n = rec_bytes - done > 4096 ? 4096 : rec_bytes - done;
++
++		if (write(f, rec_buf + done, n) != n) {
++			close(f);
++			return -3;
++		}
++		done += n;
++	}
++	close(f);
++	return 0;
++}
++
+ static void stop_all(void)
+ {
+-	if (state == REC && file >= 0) {
+-		unsigned char h[44];
+-
+-		fprintf(stderr, "dsmemo: recording stopped, %ld bytes of audio\n", rec_bytes);
+-		wav_header(h, rec_bytes);
+-		lseek(file, 0, SEEK_SET);
+-		write(file, h, 44);
+-		close(file);
+-		file = -1;
++	if (state == REC && rec_buf) {
++		int r;
++
++		fprintf(stderr, "dsmemo: recording stopped, %ld bytes of audio, saving to %s\n", rec_bytes, rec_path);
++		if (dsp >= 0) {			/* stop the microphone before the slow write */
++			close(dsp);
++			dsp = -1;
++		}
++		strcpy(msg, "saving...");
++		draw_status();
++		r = save_recording();
++		if (r) {
++			fprintf(stderr, "dsmemo: saving failed (%d)\n", r);
++			strcpy(msg, "cannot save the memo");
++		} else {
++			fprintf(stderr, "dsmemo: saved\n");
++			msg[0] = 0;
++		}
++		free(rec_buf);
++		rec_buf = NULL;
++		rec_cap = 0;
+ 	}
+ 	if (dsp >= 0) {
+ 		close(dsp);
+@@ -365,33 +408,29 @@ static void stop_all(void)
+ 
+ static void start_record(void)
+ {
+-	char path[64];
+-	unsigned char h[44];
+-	int n, i;
++	int n;
+ 
+ 	stop_all();
+ 	mkdir(MEMO_DIR, 0755);
+ 	for (n = 1; n < 1000; n++) {
+-		sprintf(path, MEMO_DIR "/memo%03d.wav", n);
+-		if (access(path, F_OK) != 0)
++		sprintf(rec_path, MEMO_DIR "/memo%03d.wav", n);
++		if (access(rec_path, F_OK) != 0)
+ 			break;
+ 	}
+-	file = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+-	if (file < 0) {
+-		sprintf(msg, "cannot write %s", MEMO_DIR);
++	rec_cap = 256 * 1024;
++	rec_buf = malloc(rec_cap);
++	if (!rec_buf) {
++		strcpy(msg, "out of memory");
+ 		return;
+ 	}
+ 	dsp = dsp_open(O_RDONLY, RATE, 1);
+ 	if (dsp < 0) {
+-		close(file);
+-		file = -1;
+-		unlink(path);
++		free(rec_buf);
++		rec_buf = NULL;
+ 		strcpy(msg, "cannot open /dev/dsp");
+ 		return;
+ 	}
+-	fprintf(stderr, "dsmemo: recording to %s (dsp fd %d)\n", path, dsp);
+-	wav_header(h, 0);
+-	write(file, h, 44);
++	fprintf(stderr, "dsmemo: recording to %s (dsp fd %d), kept in memory until Stop\n", rec_path, dsp);
+ 	rec_bytes = 0;
+ 	msg[0] = 0;
+ 	memset(hist_min, 0, sizeof(hist_min));
+@@ -401,10 +440,6 @@ static void start_record(void)
+ 	state = REC;
+ 	gettimeofday(&t_start, NULL);
+ 	last_secs = -1;
+-	scan_memos();
+-	for (i = 0; i < nmemos; i++)
+-		if (!strcmp(names[i], strrchr(path, '/') + 1))
+-			sel = i;
+ 	draw_scope_all();
+ }
+ 
+@@ -490,7 +525,7 @@ static void tick(void)
+ {
+ 	if (state == REC) {
+ 		short buf[512];
+-		int n, loops = 0;
++		int n, loops = 0, limit = 0;
+ 
+ 		static int nlog;
+ 
+@@ -502,7 +537,17 @@ static void tick(void)
+ 			}
+ 			if (n <= 0)
+ 				break;
+-			write(file, buf, n);
++			if (rec_bytes + n > rec_cap) {		/* grow the memory buffer */
++				unsigned char *nb = rec_cap + 256 * 1024 <= MAXREC ? realloc(rec_buf, rec_cap + 256 * 1024) : NULL;
++
++				if (!nb) {
++					limit = 1;
++					break;
++				}
++				rec_buf = nb;
++				rec_cap += 256 * 1024;
++			}
++			memcpy(rec_buf + rec_bytes, buf, n);
+ 			rec_bytes += n;
+ 			feed(buf, 1, n / 2);
+ 		}
+@@ -514,14 +559,14 @@ static void tick(void)
+ 			msg[0] = 0;
+ 			last_secs = -1;
+ 		}
+-		if (rec_bytes > 20L * 1024 * 1024) {	/* 10 minutes: enough */
++		if (limit) {				/* the memory buffer is full (about 2 minutes) */
+ 			int i;
+ 
+ 			stop_all();
+ 			scan_memos();
+ 			for (i = 0; i < nmemos; i++)
+ 				sel = i;
+-			strcpy(msg, "stopped: size limit");
++			strcpy(msg, "stopped: time limit");
+ 			draw_buttons();
+ 			draw_status();
+ 			return;
+@@ -576,7 +621,6 @@ static void do_stop(void)
+ 		for (i = 0; i < nmemos; i++)
+ 			sel = i;		/* names sort by number: the last one is the new memo */
+ 	}
+-	msg[0] = 0;
+ 	draw_buttons();
+ 	draw_status();
+ }
+-- 
+2.56.0
+

@@ -5,7 +5,7 @@ its internal SD slot and its touchscreen, launched from TWiLight Menu++ through 
 
 This repository holds the notes, build scripts and patches. The source tree is a separate clone of
 [ipwndev/DSLinux](https://github.com/ipwndev/DSLinux) (GPL-2.0, a mirror of the official SVN) that you create in `work/dslinux`;
-the changes are in `patches/` (60 small patches, in order) and explained in `docs/`.
+the changes are in `patches/` (61 small patches, in order) and explained in `docs/`.
 
 ## What works, and how it was tested
 
@@ -29,6 +29,7 @@ the changes are in `patches/` (60 small patches, in order) and explained in `doc
 | Sound: `/boot/dsplay` (scale test, or a PCM WAV file), Start menu "Sound test"; volume popup with percent on the desktop (`/proc/dsivolume`) | `w95u` (user report): the scale test is heard and the volume popup with percent works; at 100% it is quiet (my test tone is only about 25% of full scale, and the codec has headroom above 0 dB, not yet tuned) | The DS sound channels play through the kernel's NDS ALSA driver (`/dev/dsp`); in DSi mode the ARM7 now also switches on the power chip amplifier and the I2S output. Volume: the ARM7 reads the DSi volume level from the power chip over I2C and applies it to the codec. Which of these actually works on the console is exactly what this build tests |
 | Microphone recording and voice memos (`dsmemo`: record, play, live waveform scope and level meter), cascading Start menu groups, taskbar volume tray | `w95v`: compiled, **not yet run** | DSi mic = codec ADC plus the MICCNT FIFO (BlocksDS libnds method), sampled by the ARM7 timer interrupt; memos are WAV files in `/home/memos` |
 | Camera test (`dscam`: live preview and BMP photos in `/home/photos`) and photo viewer (`dsgallery`) | `w95w` (user photos): the camera works (live preview about 9 fps, photos saved, gallery shows them); the microphone does not yet record (no data reached the ARM9), `w95x` adds diagnostics (`/proc/dsimic`) | The riskiest feature so far: the ARM7 sets up the Aptina sensors over I2C (bounded waits, BlocksDS libnds sequence), the ARM9 pulls 256x192 RGB555 frames through the camera interface and NDMA, and the frames are shown as a texture on the 3D layer. The overlay text shows the numbers if set-up fails |
+| Voice memo recording works (w96c, user test and card log): 16.5 s memo saved, samples -15623..14840 (no clipping), played back in the app | `w96c`: recording confirmed from the card log; the second half of it froze (FIFO overrun), fixed in `w96d` | The mic samples effectively at about 8 kHz (every sample repeated twice at the 16 kHz file rate): telephone quality, enough for memos |
 | Boot self-test (RAM, SD, confinement) printed at the end of boot | console | `/boot/selftest` |
 | ARM9 at 134 MHz | console (nothing to change) | The `u` build reads the clock register (read-only) and the self-test shows `CLK : PASS - ARM9 at 134 MHz (the fastest)`; the loader sets it. The optional `CONFIG_NDS_DSI_FASTCPU` writes the same bit and changes nothing |
 
