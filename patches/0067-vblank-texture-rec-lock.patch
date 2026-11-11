@@ -1,0 +1,206 @@
+From 2b1648fb6449d4b54281a6bc4a448c3af654cf58 Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 13:57:59 -0600
+Subject: [PATCH] Camera preview: the texture is copied into VRAM by the
+ vertical blank interrupt (NDSFB_GX_TEXLOAD_VBL), not by the program at a
+ random time in the frame (black lines); voice memos: the test-time log saver
+ is paused while recording (SD writes make the ARM7 miss mic samples: a lost
+ word at 7 s in the user's counting test)
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ linux-2.6.x/drivers/video/ndsfb.c      | 50 ++++++++++++++++++++++++++
+ user/microwin/src/demos/nanox/dscam.c  |  3 +-
+ user/microwin/src/demos/nanox/dsgx.h   | 19 ++++++++++
+ user/microwin/src/demos/nanox/dsmemo.c |  8 +++++
+ vendors/Nintendo/DSI/savelog           |  5 +++
+ 5 files changed, 83 insertions(+), 2 deletions(-)
+
+diff --git a/linux-2.6.x/drivers/video/ndsfb.c b/linux-2.6.x/drivers/video/ndsfb.c
+index 9a9acb21c..539585938 100644
+--- a/linux-2.6.x/drivers/video/ndsfb.c
++++ b/linux-2.6.x/drivers/video/ndsfb.c
+@@ -249,6 +249,7 @@ static int ndsfb_blank(int blank_mode, struct fb_info *info);
+ #define NDSFB_GX_SETUP	0x4e05
+ #define NDSFB_GX_SUBMIT	0x4e06
+ #define NDSFB_VSYNC	0x4e07	/* wait for the next vertical blank */
++#define NDSFB_GX_TEXLOAD_VBL	0x4e0b	/* like NDSFB_GX_TEXLOAD (max 32 KB) but the copy into texture memory is done at the start of the next vertical blank; the call returns after it */
+ #define NDSFB_CAM_CMD	0x4e09	/* camera set-up: struct ndsfb_cam */
+ #define NDSFB_CAM_FRAME	0x4e0a	/* capture one 256x192 RGB555 preview frame into a user buffer of 98304 bytes */
+ #define NDSFB_GX_TEXLOAD	0x4e08	/* copy texture data into the 3D engine's texture memory */
+@@ -260,9 +261,30 @@ static int ndsfb_flip_token;	/* dev_id of the shared interrupt */
+ 
+ static volatile unsigned int ndsfb_vblank_count;
+ 
++/* Texture upload at vertical blank: while the CPU has VRAM bank D (to write the texture), the 3D engine cannot read its textures,
++ * and a picture that is being drawn then loses scanlines (black lines across it). The vertical blank gap is about 4 ms; a program
++ * cannot hit it reliably, so it hands the data over and this interrupt does the copy at the very start of the gap. */
++#define TEX_STAGE_BYTES	32768
++static u32 tex_stage[TEX_STAGE_BYTES / 4];
++static volatile unsigned int tex_pend_bytes, tex_pend_off;
++
++static void ndsfb_tex_commit(void)
++{
++	unsigned int i, n = tex_pend_bytes / 4;
++	volatile u32 *dst = (volatile u32 *)((unsigned long)0x06860000 + tex_pend_off);
++
++	writeb(VRAM_ENABLE | 0, VRAM_D_CR);		/* bank D at the CPU */
++	for (i = 0; i < n; i++)
++		dst[i] = tex_stage[i];
++	writeb(VRAM_ENABLE | 3 | VRAM_OFFSET(0), VRAM_D_CR);	/* texture slot 0 again */
++	tex_pend_bytes = 0;
++}
++
+ static irqreturn_t ndsfb_vblank_irq(int irq, void *dev_id, struct pt_regs *regs)
+ {
+ 	ndsfb_vblank_count++;
++	if (tex_pend_bytes)
++		ndsfb_tex_commit();
+ 	if (ndsfb_flip_pending) {
+ 		BG2_CY = ndsfb_flip_y << 8;
+ 		BG3_CY = (ndsfb_flip_y - 256) << 8;
+@@ -604,6 +626,30 @@ out:
+ 	return ret;
+ }
+ 
++static int ndsfb_gx_texload_vbl(struct ndsfb_gx_tex __user *arg)
++{
++	struct ndsfb_gx_tex t;
++
++	if (!ndsfb_gx_on)
++		return -EINVAL;
++	if (copy_from_user(&t, arg, sizeof(t)))
++		return -EFAULT;
++	if (!t.bytes || (t.bytes & 3) || (t.offset & 7) || t.bytes > TEX_STAGE_BYTES || t.offset > GX_TEX_BYTES ||
++	    t.bytes > GX_TEX_BYTES - t.offset)
++		return -EINVAL;
++	if (ndsfb_irq_setup())
++		return -EBUSY;
++	wait_event_timeout(ndsfb_flip_wq, !tex_pend_bytes, HZ / 10);
++	if (tex_pend_bytes)
++		return -ETIMEDOUT;
++	if (copy_from_user(tex_stage, (void __user *)t.data, t.bytes))
++		return -EFAULT;
++	tex_pend_off = t.offset;
++	tex_pend_bytes = t.bytes;			/* the interrupt does the copy */
++	wait_event_timeout(ndsfb_flip_wq, !tex_pend_bytes, HZ / 10);
++	return tex_pend_bytes ? -ETIMEDOUT : 0;
++}
++
+ static int gx_reg_ok(unsigned int off)
+ {
+ 	return (off >= 0x400 && off < 0x600) || off == 0x060 || off == 0x350 || off == 0x354;
+@@ -987,6 +1033,10 @@ static int ndsfb_ioctl(struct inode *inode, struct file *file,
+ 				return -EINVAL;
+ 			ndsfb_gx_setup(arg != 0);
+ 			return 0;
++		case NDSFB_GX_TEXLOAD_VBL:
++			if (info->par != 0)
++				return -EINVAL;
++			return ndsfb_gx_texload_vbl((struct ndsfb_gx_tex __user *)argp);
+ 		case NDSFB_CAM_CMD:
+ 			if (info->par != 0)
+ 				return -EINVAL;
+diff --git a/user/microwin/src/demos/nanox/dscam.c b/user/microwin/src/demos/nanox/dscam.c
+index d5e5d3dc0..336920f94 100644
+--- a/user/microwin/src/demos/nanox/dscam.c
++++ b/user/microwin/src/demos/nanox/dscam.c
+@@ -200,8 +200,7 @@ int main(int argc, char **argv)
+ 				frames++;
+ 				got_frame = 1;
+ 				downscale();
+-				gx_vsync();			/* load right after a screen refresh starts */
+-				gx_texture_load(0, small, sizeof(small));
++				gx_texture_load_vbl(0, small, sizeof(small));	/* the kernel loads it at the start of a screen refresh gap */
+ 				draw_picture(flipx, flipy);
+ 			} else if (++fails == 5) {
+ 				sprintf(txt, "no frames (%d)", errno);
+diff --git a/user/microwin/src/demos/nanox/dsgx.h b/user/microwin/src/demos/nanox/dsgx.h
+index bca6d4b20..740c700c0 100644
+--- a/user/microwin/src/demos/nanox/dsgx.h
++++ b/user/microwin/src/demos/nanox/dsgx.h
+@@ -46,6 +46,7 @@
+ #define GX_IOC_SUBMIT	0x4e06
+ #define GX_IOC_VSYNC	0x4e07
+ #define GX_IOC_TEXLOAD	0x4e08
++#define GX_IOC_TEXLOAD_VBL	0x4e0b
+ 
+ /* engine registers, offsets from 0x04000000 */
+ #define GXR_CONTROL	0x060
+@@ -283,6 +284,24 @@ static int gx_texture_load(unsigned int offset, const void *pixels, unsigned int
+ 	return 0;
+ }
+ 
++/* like gx_texture_load(), but the copy is done by the kernel at the start of the next vertical blank, when the 3D engine is not
++ * drawing (no black lines across a live picture). At most 32 KB; bytes and offset multiples of 4 and 8. The call returns after the
++ * copy, i.e. at the start of a vertical blank. */
++static int gx_texture_load_vbl(unsigned int offset, const void *pixels, unsigned int bytes)
++{
++	struct gx_texload t;
++
++	gx_flush();
++	t.data = (unsigned long)pixels;
++	t.bytes = bytes;
++	t.offset = offset;
++	if (ioctl(gx_fb, GX_IOC_TEXLOAD_VBL, &t) < 0) {
++		perror("dsgx: texture load at vblank");
++		return -1;
++	}
++	return 0;
++}
++
+ static int gx_tex_log2(int n)		/* 8 -> 0, 16 -> 1 ... 1024 -> 7 */
+ {
+ 	int l = 0;
+diff --git a/user/microwin/src/demos/nanox/dsmemo.c b/user/microwin/src/demos/nanox/dsmemo.c
+index 217565393..aace0715b 100644
+--- a/user/microwin/src/demos/nanox/dsmemo.c
++++ b/user/microwin/src/demos/nanox/dsmemo.c
+@@ -24,6 +24,7 @@
+ #include "w95.h"
+ 
+ #define MEMO_DIR	"/home/memos"
++#define REC_LOCK	"/tmp/rec.lock"
+ /* the DSi microphone records at one rate (bus clock / 2048); the driver says so, and the file header carries what it said */
+ static int rec_rate = 16364;
+ #define RATE		rec_rate
+@@ -435,6 +436,7 @@ static void stop_all(void)
+ 			close(dsp);
+ 			dsp = -1;
+ 		}
++		unlink(REC_LOCK);
+ 		strcpy(msg, "saving...");
+ 		draw_status();
+ 		r = save_recording();
+@@ -487,6 +489,12 @@ static void start_record(void)
+ 	}
+ 	if (dsp_rate >= 8000 && dsp_rate <= 48000)
+ 		rec_rate = dsp_rate;		/* what the driver delivers */
++	{
++		int lk = open(REC_LOCK, O_WRONLY | O_CREAT, 0644);	/* tells the test-time log saver to leave the SD card alone */
++
++		if (lk >= 0)
++			close(lk);
++	}
+ 	fprintf(stderr, "dsmemo: recording to %s (dsp fd %d) at %d Hz, kept in memory until Stop\n", rec_path, dsp, rec_rate);
+ 	rec_bytes = 0;
+ 	msg[0] = 0;
+diff --git a/vendors/Nintendo/DSI/savelog b/vendors/Nintendo/DSI/savelog
+index 0b0264f1f..806ed8908 100644
+--- a/vendors/Nintendo/DSI/savelog
++++ b/vendors/Nintendo/DSI/savelog
+@@ -11,6 +11,11 @@ then
+ 	[ $Q = 1 ] || echo "savelog: no /dev/dsilog"
+ 	exit 0
+ fi
++# while a recording runs the card must not be written (the ARM7 would miss microphone samples): skip this round
++if [ $Q = 1 ] && [ -f /tmp/rec.lock ]
++then
++	exit 0
++fi
+ B=/tmp/bootlog.body
+ L=/tmp/bootlog.txt
+ # (everything savelog quiet runs must print nothing: console text is drawn over the desktop)
+-- 
+2.56.0
+
