@@ -1,0 +1,334 @@
+From 5a7ce84d46bf34ce84bcb095303c13821e977859 Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 05:26:16 -0600
+Subject: [PATCH] DS desktop: nanowm now ships in the ROM (the old copy in
+ ROOTFS.IMG ran, so the outline drag never reached the console); one XOR GC
+ per drag; dirty areas as a short rectangle list; dsbench drag-step tests
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ user/microwin/src/demos/nanowm/actions.c | 26 ++++---
+ user/microwin/src/demos/nanox/dsbench.c  | 30 +++++++-
+ user/microwin/src/drivers/scr_fb.c       | 87 +++++++++++++++++++-----
+ vendors/Nintendo/DSI/Makefile            |  1 +
+ vendors/Nintendo/DSI/desktop             |  2 +-
+ vendors/Nintendo/DSI/desktop-apps        |  2 +-
+ 6 files changed, 117 insertions(+), 31 deletions(-)
+
+diff --git a/user/microwin/src/demos/nanowm/actions.c b/user/microwin/src/demos/nanowm/actions.c
+index bd866d8a0..2657f94f9 100644
+--- a/user/microwin/src/demos/nanowm/actions.c
++++ b/user/microwin/src/demos/nanowm/actions.c
+@@ -15,6 +15,18 @@
+ #include "nanowm.h"
+ 
+ /* uncomment this line to perform outline move operations*/
++/* one XOR graphics context for all outline drags: creating one waits for an answer from the server (milliseconds),
++ * which split every drag step in two and made each step slow */
++static GR_GC_ID outline_gc;
++static GR_GC_ID get_outline_gc(void)
++{
++	if (!outline_gc) {
++		outline_gc = GrNewGC();
++		GrSetGCMode(outline_gc, GR_MODE_XOR|GR_MODE_EXCLUDECHILDREN);
++	}
++	return outline_gc;
++}
++
+ #define OUTLINE_MOVE	/* drag a rectangle, move the window once at the end: no flicker, no repaints */
+ 
+ void redraw_ncarea(win *window)
+@@ -184,10 +196,8 @@ void container_buttondown(win *window, GR_EVENT_BUTTON *event)
+ 	pos->width = info.width;
+ 	pos->height = info.height;
+ 
+-	gc = GrNewGC();
+-	GrSetGCMode(gc, GR_MODE_XOR|GR_MODE_EXCLUDECHILDREN);
++	gc = get_outline_gc();
+ 	GrRect(GR_ROOT_WINDOW_ID,gc,info.x, info.y, info.width, info.height);
+-	GrDestroyGC(gc);
+ #endif	
+ 	window->active = GR_TRUE;
+ }
+@@ -200,8 +210,7 @@ void container_buttonup(win *window, GR_EVENT_BUTTON *event)
+ 	  struct pos_size * pos = (struct pos_size *)window->data;
+ #ifdef OUTLINE_MOVE
+ 	  GR_GC_ID gc;	  
+-	  gc = GrNewGC();
+-	  GrSetGCMode(gc, GR_MODE_XOR|GR_MODE_EXCLUDECHILDREN);
++	  gc = get_outline_gc();
+ 	  GrRect(GR_ROOT_WINDOW_ID,gc,pos->xorig, pos->yorig, pos->width, pos->height);
+ 
+ 	  GrMoveWindow(window->wid, pos->xorig, pos->yorig);
+@@ -271,16 +280,15 @@ void container_mousemoved(win *window, GR_EVENT_MOUSE *event)
+ 	pos = (struct pos_size *) window->data;
+ 
+ #ifdef OUTLINE_MOVE
+-	gc = GrNewGC();
+-	GrSetGCMode(gc, GR_MODE_XOR|GR_MODE_EXCLUDECHILDREN);
++	if (event->rootx - pos->xoff == pos->xorig && event->rooty - pos->yoff == pos->yorig)
++		return;		/* did not move */
++	gc = get_outline_gc();
+ 	GrRect(GR_ROOT_WINDOW_ID,gc,pos->xorig, pos->yorig, pos->width, pos->height);
+ 	GrRect(GR_ROOT_WINDOW_ID,gc,event->rootx - pos->xoff, event->rooty - pos->yoff,
+ 	       pos->width, pos->height);
+ 
+ 	pos->xorig = event->rootx - pos->xoff;
+ 	pos->yorig = event->rooty - pos->yoff;
+-	
+-	GrDestroyGC(gc);
+ #else	
+ 	GrMoveWindow(window->wid, event->rootx - pos->xoff,
+ 		event->rooty - pos->yoff);
+diff --git a/user/microwin/src/demos/nanox/dsbench.c b/user/microwin/src/demos/nanox/dsbench.c
+index b1139d4a6..a7e8d80a6 100644
+--- a/user/microwin/src/demos/nanox/dsbench.c
++++ b/user/microwin/src/demos/nanox/dsbench.c
+@@ -84,7 +84,7 @@ static long ipc_pingpong(void)
+ 	return i == 100 ? t : -3;
+ }
+ 
+-#define NTESTS 9
++#define NTESTS 11
+ static const char *names[NTESTS] = {
+ 	"20 fills of 10000 px",
+ 	"200 set-colour requests",
+@@ -95,6 +95,8 @@ static const char *names[NTESTS] = {
+ 	"100 old style boxes 60x20",
+ 	"100 new style boxes 60x20",
+ 	"100 process ping-pongs",
++	"100 drag steps, new GC each",
++	"100 drag steps, one GC",
+ };
+ 
+ int main(int argc, char **argv)
+@@ -120,7 +122,7 @@ int main(int argc, char **argv)
+ 	GrSetGCFont(gc, font);
+ 	w95_init(font);
+ 	w = GrNewWindowEx(GR_WM_PROPS_APPFRAME | GR_WM_PROPS_CAPTION | GR_WM_PROPS_CLOSEBOX, "Bench",
+-			  GR_ROOT_WINDOW_ID, 6, 4, 232, 134, W95_FACE);
++			  GR_ROOT_WINDOW_ID, 6, 2, 232, 150, W95_FACE);
+ 	GrSelectEvents(w, GR_EVENT_MASK_EXPOSURE | GR_EVENT_MASK_CLOSE_REQ);
+ 	GrMapWindow(w);
+ 	do
+@@ -173,6 +175,28 @@ int main(int argc, char **argv)
+ 			break;
+ 		case 8:
+ 			break;
++		case 9:		/* what nanowm used to do per pointer step */
++			for (i = 0; i < 100; i++) {
++				GR_GC_ID x = GrNewGC();
++
++				GrSetGCMode(x, GR_MODE_XOR);
++				GrRect(w, x, 20 + (i % 40), 20, 100, 60);
++				GrRect(w, x, 21 + (i % 40), 20, 100, 60);
++				GrDestroyGC(x);
++			}
++			break;
++		case 10:	/* and what it does now */
++			{
++				GR_GC_ID x = GrNewGC();
++
++				GrSetGCMode(x, GR_MODE_XOR);
++				for (i = 0; i < 100; i++) {
++					GrRect(w, x, 20 + (i % 40), 20, 100, 60);
++					GrRect(w, x, 21 + (i % 40), 20, 100, 60);
++				}
++				GrDestroyGC(x);
++			}
++			break;
+ 		}
+ 		sync_server();
+ 		r[k] = now_ms() - t;
+@@ -181,7 +205,7 @@ int main(int argc, char **argv)
+ 	}
+ 
+ 	f = fopen("/tmp/bench.log", "w");
+-	w95_fill(w, gc, W95_FACE, 0, 0, 232, 134);
++	w95_fill(w, gc, W95_FACE, 0, 0, 232, 150);
+ 	for (k = 0; k < NTESTS; k++) {
+ 		sprintf(line, "%s: %ld ms", names[k], r[k]);
+ 		w95_text(w, gc, W95_DARK, 4, 3 + k * 11, line);
+diff --git a/user/microwin/src/drivers/scr_fb.c b/user/microwin/src/drivers/scr_fb.c
+index 2ff9c7271..07ecc2e0e 100644
+--- a/user/microwin/src/drivers/scr_fb.c
++++ b/user/microwin/src/drivers/scr_fb.c
+@@ -114,13 +114,39 @@ static unsigned char *nds_page[2];
+ static int nds_linebytes, nds_rows;
+ static int nds_dbuf, nds_front;
+ static PSD nds_psd;
+-/* area drawn since the last flip, and the area drawn before the pending flip (empty when x1 > x2) */
+-static int dirty_x1 = 1, dirty_y1, dirty_x2, dirty_y2;
+-static int sync_pending, sync_x1, sync_y1, sync_x2, sync_y2;
++/* areas drawn since the last flip, and the areas drawn before the pending flip: a short list of rectangles, so
++ * thin outlines (window drags) cost a few KB to copy instead of their whole bounding box */
++#define NDIRTY 12
++struct drect { int x1, y1, x2, y2; };
++static struct drect dirty[NDIRTY], syncr[NDIRTY];
++static int ndirty, sync_n;
++static int sync_pending;
++
++static int drect_area(const struct drect *r)
++{
++	return (r->x2 - r->x1 + 1) * (r->y2 - r->y1 + 1);
++}
++
++static void drect_union(struct drect *a, const struct drect *b)
++{
++	if (b->x1 < a->x1) a->x1 = b->x1;
++	if (b->y1 < a->y1) a->y1 = b->y1;
++	if (b->x2 > a->x2) a->x2 = b->x2;
++	if (b->y2 > a->y2) a->y2 = b->y2;
++}
++
++static int drect_growth(const struct drect *a, const struct drect *b)
++{
++	struct drect u = *a;
++
++	drect_union(&u, b);
++	return drect_area(&u) - drect_area(a) - drect_area(b);
++}
+ 
+ static void dirty_add(int x1, int y1, int x2, int y2)
+ {
+-	int t;
++	struct drect n;
++	int t, i, best, bestg, g;
+ 
+ 	if (x1 > x2) { t = x1; x1 = x2; x2 = t; }
+ 	if (y1 > y2) { t = y1; y1 = y2; y2 = t; }
+@@ -130,18 +156,43 @@ static void dirty_add(int x1, int y1, int x2, int y2)
+ 	if (y2 >= nds_rows) y2 = nds_rows - 1;
+ 	if (x1 > x2 || y1 > y2)
+ 		return;
+-	if (dirty_x1 > dirty_x2) {
+-		dirty_x1 = x1; dirty_y1 = y1; dirty_x2 = x2; dirty_y2 = y2;
++	n.x1 = x1; n.y1 = y1; n.x2 = x2; n.y2 = y2;
++	/* merge with a rectangle that overlaps, touches or would hardly grow (a few hundred pixels) */
++	for (i = 0; i < ndirty; i++) {
++		g = drect_growth(&dirty[i], &n);
++		if (g <= 300) {
++			drect_union(&dirty[i], &n);
++			/* the grown rectangle may now reach others: fold them in */
++			for (t = 0; t < ndirty; t++)
++				if (t != i && drect_growth(&dirty[i], &dirty[t]) <= 300) {
++					int last = --ndirty;
++
++					drect_union(&dirty[i], &dirty[t]);
++					dirty[t] = dirty[last];
++					if (i == last)
++						i = t;
++					t = -1;		/* start over: the list changed */
++				}
++			return;
++		}
++	}
++	if (ndirty < NDIRTY) {
++		dirty[ndirty++] = n;
+ 		return;
+ 	}
+-	if (x1 < dirty_x1) dirty_x1 = x1;
+-	if (y1 < dirty_y1) dirty_y1 = y1;
+-	if (x2 > dirty_x2) dirty_x2 = x2;
+-	if (y2 > dirty_y2) dirty_y2 = y2;
++	/* list full: fold the new one into the rectangle it grows least */
++	best = 0;
++	bestg = drect_growth(&dirty[0], &n);
++	for (i = 1; i < ndirty; i++) {
++		g = drect_growth(&dirty[i], &n);
++		if (g < bestg) { bestg = g; best = i; }
++	}
++	drect_union(&dirty[best], &n);
+ }
+ 
+ static void dirty_all(void)
+ {
++	ndirty = 0;
+ 	dirty_add(0, 0, 255, nds_rows - 1);
+ }
+ 
+@@ -276,8 +327,7 @@ static void nds_dbuf_init(PSD psd, int linebytes, int bpp, int yres, int yvirt)
+ 	nds_front = 0;
+ 	nds_dbuf = 1;
+ 	nds_psd = psd;
+-	dirty_x1 = 1;
+-	dirty_x2 = 0;
++	ndirty = 0;
+ 	sync_pending = 0;
+ 
+ 	/* from here on every pixel written to the screen is noted */
+@@ -298,16 +348,16 @@ void fb_nds_flip(PSD psd)
+ 			EPRINTF("nano-X: screen draw functions were replaced; wrapped again, whole screen shown\n");
+ 		dirty_all();
+ 	}
+-	if (dirty_x1 > dirty_x2)
++	if (ndirty == 0)
+ 		return;
+ 	y = drawn ? 256 : 0;
+ 	if (ioctl(fb, NDSFB_FLIP_ASYNC, &y) < 0)
+ 		return;
+ 	nds_front = drawn;
+-	sync_x1 = dirty_x1; sync_y1 = dirty_y1; sync_x2 = dirty_x2; sync_y2 = dirty_y2;
++	memcpy(syncr, dirty, ndirty * sizeof(dirty[0]));
++	sync_n = ndirty;
+ 	sync_pending = 1;
+-	dirty_x1 = 1;
+-	dirty_x2 = 0;
++	ndirty = 0;
+ 	psd->addr = nds_page[drawn ^ 1];
+ }
+ 
+@@ -316,8 +366,11 @@ void fb_nds_sync(void)
+ {
+ 	if (!sync_pending)
+ 		return;
++	int i;
++
+ 	ioctl(fb, NDSFB_FLIP_WAIT, 0);
+-	nds_copy_rect(nds_page[nds_front ^ 1], nds_page[nds_front], sync_x1, sync_y1, sync_x2, sync_y2);
++	for (i = 0; i < sync_n; i++)
++		nds_copy_rect(nds_page[nds_front ^ 1], nds_page[nds_front], syncr[i].x1, syncr[i].y1, syncr[i].x2, syncr[i].y2);
+ 	sync_pending = 0;
+ }
+ 
+diff --git a/vendors/Nintendo/DSI/Makefile b/vendors/Nintendo/DSI/Makefile
+index d47c499bd..80998fb9d 100644
+--- a/vendors/Nintendo/DSI/Makefile
++++ b/vendors/Nintendo/DSI/Makefile
+@@ -154,6 +154,7 @@ finishrom:
+ 	# The desktop programs also live in the ROM (/boot), so a newer desktop works without replacing ROOTFS.IMG
+ 	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/nano-X $(ROMFSDIR)/boot/nano-X
+ 	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/nxterm $(ROMFSDIR)/boot/nxterm
++	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/nanowm $(ROMFSDIR)/boot/nanowm
+ 	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/dsdesk $(ROMFSDIR)/boot/dsdesk
+ 	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/dsnotes $(ROMFSDIR)/boot/dsnotes
+ 	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/dsfiles $(ROMFSDIR)/boot/dsfiles
+diff --git a/vendors/Nintendo/DSI/desktop b/vendors/Nintendo/DSI/desktop
+index 196b8ddac..79b47a5d1 100644
+--- a/vendors/Nintendo/DSI/desktop
++++ b/vendors/Nintendo/DSI/desktop
+@@ -9,7 +9,7 @@ LOG=/tmp/desktop.log
+ 
+ if [ "$1" = "stop" ]; then
+ 	echo "desktop: stop requested" >> $LOG
+-	for p in nxterm nanowm nano-X; do kill `pidof $p` 2>/dev/null; done
++	for p in dsdesk nxterm nanowm nano-X; do kill `pidof $p` 2>/dev/null; done
+ 	exit 0
+ fi
+ 
+diff --git a/vendors/Nintendo/DSI/desktop-apps b/vendors/Nintendo/DSI/desktop-apps
+index a8ec00717..d382479b8 100644
+--- a/vendors/Nintendo/DSI/desktop-apps
++++ b/vendors/Nintendo/DSI/desktop-apps
+@@ -6,7 +6,7 @@ if [ -z "`pidof nano-X`" ]; then
+ 	echo "desktop: nano-X is not running" >> $LOG
+ 	exit 1
+ fi
+-nanowm >> $LOG 2>&1 &
++/boot/nanowm >> $LOG 2>&1 &
+ sleep 1
+ /boot/dsdesk >> $LOG 2>&1 &
+ sleep 1
+-- 
+2.56.0
+
