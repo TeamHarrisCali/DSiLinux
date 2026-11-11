@@ -211,8 +211,21 @@ void DG_SetWindowTitle(const char *title)
 int main(int argc, char **argv)
 {
 	static char *defargv[] = { "dsdoom", "-iwad", "/home/doom/doom1.wad", "-config", "/home/doom/default.cfg", "-savedir", "/home/doom/save",
-				   "-nosound", "-nomusic", "-mb", "5", NULL };
+				   "-nosound", "-nomusic", NULL };
+	char mi[256];
+	FILE *f;
 
+	/* started from the desktop, nobody sees the console: everything it says goes to a file on the card (read it on the PC) */
+	freopen("/home/doom/dsdoom.log", "w", stdout);
+	dup2(fileno(stdout), 2);
+	setvbuf(stdout, NULL, _IONBF, 0);
+	f = fopen("/proc/meminfo", "r");
+	if (f) {
+		while (fgets(mi, sizeof(mi), f))
+			if (!strncmp(mi, "MemFree", 7) || !strncmp(mi, "MemTotal", 8))
+				printf("dsdoom: %s", mi);
+		fclose(f);
+	}
 	mkdir("/home/doom/save", 0755);
 	if (argc <= 1) {
 		argc = (int)(sizeof(defargv) / sizeof(defargv[0])) - 1;

@@ -9,6 +9,8 @@
 * `doom/build.sh` builds `out/doom-build/dsdoom` (about 440 KB flat binary, 256 KB stack) with the DSLinux toolchain in the container.
 * `doom/install.sh doom1.wad` copies binary, WAD and `default.cfg` to `/home/doom` in `linux/ROOTFS.IMG` (card in the PC). It is not in the ROM (the ROM
   is full); Start > Games > DOOM starts `/home/doom/dsdoom`.
-* Picture 320x200 -> 256x192 (4:3), low detail, 9 screen blocks (`default.cfg`), zone memory 5 MB (`-mb 5`), no sound, no music.
+* `doom/doomgeneric-ds.patch` (apply to the doomgeneric sources before building): zone 4 MB (minimum 3 MB) instead of 6 MB, and a 64 KB instead of 256 KB picture buffer, because the console had only about 6.4 MB free next to the desktop.
+* dsdoom writes everything it prints (free memory, start-up messages, errors) to `/home/doom/dsdoom.log` in the image: read it on the PC with `debugfs -R "cat /home/doom/dsdoom.log" ROOTFS.IMG` after a try.
+* Picture 320x200 -> 256x192 (4:3), low detail, 9 screen blocks (`default.cfg`), zone memory 4 MB, no sound, no music.
 * Buttons: d-pad move/turn, A fire (Enter in menus), B use, L/R strafe, Y run, X next weapon ("y" in the quit question), Start menu, Select automap,
   Start + Select leave at once.

@@ -9,5 +9,5 @@ SRC="dummy am_map doomdef doomstat dstrings d_event d_items d_iwad d_loop d_main
 CF="-O2 -fomit-frame-pointer -fno-common -mswp-byte-writes -DCONFIG_NDS_ROM8BIT -mcpu=arm946e-s -mfpu=fpe3 -DEMBED -D__PIC__ -fpic -msingle-pic-base -Dlinux -D__linux__ -Dunix -D__uClinux__ -DNORMALUNIX -DLINUX -DCMAP256 -DDOOMGENERIC_RESX=320 -DDOOMGENERIC_RESY=200 -D_DEFAULT_SOURCE -w -I."
 OBJS=""
 for f in $SRC; do arm-linux-elf-gcc $CF -c $f.c -o ../obj/$f.o || exit 1; OBJS="$OBJS ../obj/$f.o"; done
-arm-linux-elf-gcc -O2 -mcpu=arm946e-s -mfpu=fpe3 -D__PIC__ -fpic -msingle-pic-base -Wl,-elf2flt="-s 262144" $OBJS -o ../dsdoom -lm &&
+arm-linux-elf-gcc -O2 -mcpu=arm946e-s -mfpu=fpe3 -D__PIC__ -fpic -msingle-pic-base -Wl,-elf2flt="-s 131072" $OBJS -o ../dsdoom -lm &&
 arm-linux-elf-size ../dsdoom; ls -la ../dsdoom'
