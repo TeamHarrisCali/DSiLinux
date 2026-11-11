@@ -1,0 +1,103 @@
+From 6731c027de8d2413a6dab335afd7ab24379a64f6 Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <noreply@example.invalid>
+Date: Tue, 10 Nov 2026 21:06:36 -0600
+Subject: [PATCH] DSI product: confine the SD card to its linux/ folder
+ (read-only mount at /mnt, bind-mount linux/ at /media/linux, unmount /mnt;
+ fail closed)
+
+---
+ vendors/Nintendo/DSI/Makefile |  4 +++-
+ vendors/Nintendo/DSI/rc       | 31 +++++++++++++++++++++++++------
+ vendors/Nintendo/DSI/selftest | 11 +++++++++++
+ 3 files changed, 39 insertions(+), 7 deletions(-)
+
+diff --git a/vendors/Nintendo/DSI/Makefile b/vendors/Nintendo/DSI/Makefile
+index 430589084..0c47f193a 100644
+--- a/vendors/Nintendo/DSI/Makefile
++++ b/vendors/Nintendo/DSI/Makefile
+@@ -9,7 +9,7 @@ ELFIMAGE := $(IMAGEDIR)/image.elf
+ FATFS	 := media
+ OPTDIR	 := opt
+ 
+-ROMFS_DIRS := boot dev dev/input proc sbin $(FATFS)/linux $(OPTDIR) tmp sys
++ROMFS_DIRS := boot dev dev/input proc sbin mnt $(FATFS)/linux $(OPTDIR) tmp sys
+ 
+ FS_DIRS := etc/rc.d home lib usr/bin usr/bin/coreutils usr/games usr/lib usr/share/udhcpc \
+ 	   var/lock var/tmp var/run var/log var/mail var/www usr/share/man usr/share/consolefonts \
+@@ -157,6 +157,8 @@ setupimage: finishrom
+ 	-rm -r $(IMAGEDIR)/linux
+ 	# move the files for the flashcard out of the romfs
+ 	mv $(ROMFSDIR)/$(FATFS)/linux $(IMAGEDIR)
++	# empty mount point for the bind mount of the card's linux/ folder (see rc)
++	mkdir -p $(ROMFSDIR)/$(FATFS)/linux
+ 
+ .PHONY: dslinux dslinuxm
+ 	# dslinux(m) builds the image from the romfs.
+diff --git a/vendors/Nintendo/DSI/rc b/vendors/Nintendo/DSI/rc
+index 2b7482d84..85b438f7f 100644
+--- a/vendors/Nintendo/DSI/rc
++++ b/vendors/Nintendo/DSI/rc
+@@ -1,13 +1,32 @@
+ #!/bin/sh
+ 
+ mount -t proc none /proc
+-mount -t vfat -o noatime /dev/dldi1 /media
+-# some CF cards do not have a partition table
+-# try mounting /dev/dldi if mounting /dev/dldi1 fails
+-if [ "$?" != "0" ]
++# ---- Confine the SD card to its linux/ folder -------------------------------------------------------------
++# The whole card is mounted READ-ONLY at /mnt only for a moment. Only its linux/ folder is then bind-mounted at
++# /media/linux and /mnt is unmounted again, so nothing outside linux/ is reachable by path. If any step fails the
++# card is unmounted instead of being left visible.
++CARD=no
++if mount -t vfat -o ro,noatime /dev/dldi1 /mnt
+ then
+-	mount -t vfat -o noatime /dev/dldi /media
+-	[ "$?" = "0" ] || echo "Sorry, failed to mount DLDI device."
++	CARD=yes
++else
++	# some cards have no partition table: try the whole device
++	if mount -t vfat -o ro,noatime /dev/dldi /mnt
++	then
++		CARD=yes
++	else
++		echo "Sorry, failed to mount DLDI device."
++	fi
++fi
++if [ "$CARD" = "yes" ]
++then
++	if mount -o bind /mnt/linux /media/linux
++	then
++		umount /mnt || umount -l /mnt
++	else
++		echo "Card has no usable linux/ folder (or bind mount failed): card NOT mounted."
++		umount /mnt || umount -l /mnt
++	fi
+ fi
+ mount -t ramfs none /var/run
+ mount -t ramfs none /tmp
+diff --git a/vendors/Nintendo/DSI/selftest b/vendors/Nintendo/DSI/selftest
+index 12d60f96d..3de238bc8 100644
+--- a/vendors/Nintendo/DSI/selftest
++++ b/vendors/Nintendo/DSI/selftest
+@@ -19,6 +19,17 @@ then
+ else
+ 	echo "SD  : FAIL - see below"
+ fi
++if ls /mnt | grep -q .
++then
++	echo "CONF: FAIL - whole card visible at /mnt"
++else
++	if ls /media/linux | grep -q .
++	then
++		echo "CONF: PASS - only /linux is reachable"
++	else
++		echo "CONF: card/linux not mounted or empty"
++	fi
++fi
+ dmesg | grep 'dsisd: init'
+ dmesg | grep 'dsisd: diag'
+ echo "======================================"
+-- 
+2.56.0
+

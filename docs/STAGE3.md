@@ -180,6 +180,19 @@ The boot-time self-test and the two `dsisd:` lines stay (they appear once at boo
   Most likely the folder was created but its contents were not copied (to be confirmed on a PC). The tree to copy is `out/dsi-card/sd-root/linux` (subfolders `etc home lib usr var`, about 109 MB).
 - Note for the repository: the listing showed a folder named after the console's ID; it is not recorded here.
 
+## Confinement to the card's linux/ folder (user requirement: nothing may go outside /linux)
+Rule from the user: DSLinux must never touch anything on the SD card outside `sd:/linux`. State before this change: writes are compiled out (nothing can be written), but reads were not confined
+(`ls /media` showed the whole card, including the user's own files).
+"j" build: `rc` mounts the card **read-only** at `/mnt`, bind-mounts only its `linux/` folder at `/media/linux`, then unmounts `/mnt`. After that the rest of the card has no path in the filesystem
+(`..` cannot leave a bind mount). Every step fails closed: if the card or its `linux/` folder is missing or the bind fails, the card is unmounted and a message is printed.
+The self-test has a `CONF:` line: `PASS - only /linux is reachable`, `FAIL - whole card visible at /mnt`, or `card/linux not mounted or empty`.
+Honest limits:
+- A root shell can still mount `/dev/dldi1` by hand and see the whole card. This confines the normal system and its scripts, not a user who deliberately does that.
+- `rc.d/update` (a DSLinux script that downloads and unpacks a new release into `/media`) now fails harmlessly, because `/media` is the read-only built-in filesystem.
+- When writes are enabled later, writes will be reachable only through the bind mount, i.e. inside `linux/` (plus the card's FAT tables, which any file creation changes). The mount stays read-only until then.
+- Not yet run on the console. Linux 2.6.14 kernel and busybox both support `mount -o bind` (checked in the source); the behaviour on the console is unverified.
+ROMs: `out/dsi-mode/dslinux-dsimode-j-uc3.nds` and `-uc2`.
+
 ## 3c. Faster ARM9 clock, 3d. Wi-Fi/cameras/DSP
 Not started. 3c is small but needs the SD result first; 3d unchanged from the feasibility finding.
 
