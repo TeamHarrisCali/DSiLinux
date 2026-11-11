@@ -1,0 +1,210 @@
+From c44060b39aa4693673da887aa1d5cefd8d450591 Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <noreply@example.invalid>
+Date: Tue, 10 Nov 2026 21:12:02 -0600
+Subject: [PATCH] DSI: RAM copies of /etc /var /home over the read-only card;
+ SD read retries, sequence-tagged requests, shorter ARM7 waits, 30 s ARM9
+ timeout
+
+First userland boot: /etc/passwd etc. could not be created (read-only card), and one 2-sector read got no answer within 10 s.
+A late answer could have been taken for the next request, so requests are now tagged.
+---
+ linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c   | 40 ++++++++++++++++----
+ linux-2.6.x/drivers/block/dldi_c.c           | 14 +++++--
+ linux-2.6.x/include/asm-arm/arch-nds/dsisd.h |  7 +++-
+ vendors/Nintendo/DSI/rc                      | 18 ++++++++-
+ 4 files changed, 67 insertions(+), 12 deletions(-)
+
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c b/linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c
+index 421c1931f..8356ea9a1 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c
+@@ -236,12 +236,12 @@ static u32 tmio_cmd(u16 cmd, u32 arg, u16 blocks, void *buf)
+ 	R16(FIFO32_CNT) = FIFO32_CLEAR | FIFO32_EN;
+ 	R16(SD_CMD) = (blocks > 1) ? (CMD_MULTI_DATA | cmd) : cmd;
+ 
+-	for (cap = 0; cap < 3000000; cap++) {
++	for (cap = 0; cap < 1500000; cap++) {
+ 		poll_status();
+ 		if (g_status & STATUS_RESP_END)
+ 			break;
+ 	}
+-	if (cap == 3000000) {
++	if (cap == 1500000) {
+ 		g_last_status = 0xFFFFFFFFu;
+ 		g_last_seen = g_status;
+ 		return 0xFFFFFFFFu;
+@@ -254,8 +254,11 @@ static u32 tmio_cmd(u16 cmd, u32 arg, u16 blocks, void *buf)
+ 
+ 		cap = 0;
+ 		while (!(g_status & ERR_BITS) && left > 0) {
+-			if (++cap > 6000000)
++			if (++cap > 2000000) {
++				g_last_status = 0xFFFFFFFFu;
++				g_last_seen = g_status;
+ 				return 0xFFFFFFFFu;
++			}
+ 			poll_status();
+ 			if (cmd & CMD_DATA_R) {
+ 				if (R16(FIFO32_CNT) & FIFO32_FULL) {
+@@ -273,13 +276,16 @@ static u32 tmio_cmd(u16 cmd, u32 arg, u16 blocks, void *buf)
+ 				}
+ 			}
+ 		}
+-		for (cap = 0; cap < 6000000; cap++) {
++		for (cap = 0; cap < 2000000; cap++) {
+ 			poll_status();
+ 			if (g_status & STATUS_DATA_END)
+ 				break;
+ 		}
+-		if (cap == 6000000)
++		if (cap == 2000000) {
++			g_last_status = 0xFFFFFFFFu;
++			g_last_seen = g_status;
+ 			return 0xFFFFFFFFu;
++		}
+ 	}
+ 	g_last_status = g_status;
+ 	g_last_seen = g_status;
+@@ -496,7 +502,7 @@ static void wait_not_busy(void)
+ }
+ 
+ /* Handle one request block. The caller (main.c) sends the reply FIFO word. */
+-void nds_sd_request(struct nds_sd_block *b)
++static void nds_sd_request_inner(struct nds_sd_block *b)
+ {
+ 	u32 res;
+ 	u32 sect;
+@@ -534,7 +540,21 @@ void nds_sd_request(struct nds_sd_block *b)
+ 			return;
+ #endif
+ 		}
+-		res = tmio_cmd(cmd, sect, (u16)b->count, b->data);
++		{
++			int attempt;
++
++			for (attempt = 0; attempt < 3; attempt++) {
++				res = tmio_cmd(cmd, sect, (u16)b->count, b->data);
++				if (res == 0 || b->cmd == NDS_SD_CMD_WRITE)
++					break;
++				/* failed read: stop the transfer, reset the controller (the card stays selected) and retry */
++				tmio_cmd(CMD_RESP_R1B | 12, 0, 0, 0);
++				R16(SOFT_RST) = 0;
++				R16(SOFT_RST) = 1;
++				DELAY_MS(2);
++			}
++			b->diag[7] = (b->diag[7] & 0xffff0000u) | (attempt & 0xff);	/* retries used */
++		}
+ 		if (b->cmd == NDS_SD_CMD_WRITE)
+ 			wait_not_busy();
+ 		if (res) {
+@@ -554,3 +574,9 @@ void nds_sd_request(struct nds_sd_block *b)
+ 		b->result = NDS_SD_ERR_PARAM;
+ 	}
+ }
++
++void nds_sd_request(struct nds_sd_block *b)
++{
++	nds_sd_request_inner(b);
++	b->done_seq = b->seq;
++}
+diff --git a/linux-2.6.x/drivers/block/dldi_c.c b/linux-2.6.x/drivers/block/dldi_c.c
+index 32e0abfa7..2243b5d16 100644
+--- a/linux-2.6.x/drivers/block/dldi_c.c
++++ b/linux-2.6.x/drivers/block/dldi_c.c
+@@ -109,14 +109,19 @@ static struct dldi_dev *Devices = NULL;
+ static struct nds_sd_block sd_block;	/* 32 byte aligned, see dsisd.h */
+ static DECLARE_WAIT_QUEUE_HEAD(sd_wait);
+ static volatile int sd_done;
++static u32 sd_seq;
+ static DECLARE_MUTEX(sd_mutex);	/* one request block, one request at a time */
+ static int dldi_xfer_err;
+ 
+ static void sd_fifo_cb(u8 cmd)
+ {
+ 	if (cmd == FIFO_FIRMWARE_CMD_SD_REQUEST) {
+-		sd_done = 1;
+-		wake_up(&sd_wait);
++		/* only answers to the CURRENT request count (see done_seq in dsisd.h) */
++		dmac_flush_range((unsigned long)&sd_block, (unsigned long)&sd_block + 128);
++		if (sd_block.done_seq == sd_seq) {
++			sd_done = 1;
++			wake_up(&sd_wait);
++		}
+ 	}
+ }
+ 
+@@ -132,12 +137,15 @@ static int sd_request_locked(unsigned int cmd, unsigned int sector, unsigned int
+ 	sd_block.sector = sector;
+ 	sd_block.count = count;
+ 	sd_block.result = 0xffffffff;
++	sd_seq++;
++	sd_block.seq = sd_seq;
++	sd_block.done_seq = 0;
+ 	sd_done = 0;
+ 	/* write back our data, and drop stale lines so we see the ARM7's data */
+ 	dmac_flush_range((unsigned long)&sd_block,
+ 			 (unsigned long)&sd_block + sizeof(sd_block));
+ 	nds_fifo_send(FIFO_FIRMWARE_CMD(FIFO_FIRMWARE_CMD_SD_REQUEST, 0));
+-	if (!wait_event_timeout(sd_wait, sd_done, 10 * HZ)) {
++	if (!wait_event_timeout(sd_wait, sd_done, 30 * HZ)) {
+ 		printk(KERN_ERR "dsisd: ARM7 did not answer (cmd %u)\n", cmd);
+ 		return -1;
+ 	}
+diff --git a/linux-2.6.x/include/asm-arm/arch-nds/dsisd.h b/linux-2.6.x/include/asm-arm/arch-nds/dsisd.h
+index d0b9cbe68..3dbe8e979 100644
+--- a/linux-2.6.x/include/asm-arm/arch-nds/dsisd.h
++++ b/linux-2.6.x/include/asm-arm/arch-nds/dsisd.h
+@@ -7,7 +7,7 @@
+  * flushes its data cache and sends FIFO_FIRMWARE_CMD_SD_REQUEST; the ARM7
+  * answers with the same command after it has written the result.
+  *
+- * The block is 32 byte aligned and its header is 96 bytes, a multiple of 32, so that the ARM9
++ * The block is 32 byte aligned and its header is 128 bytes, a multiple of 32, so that the ARM9
+  * can flush/invalidate it without touching neighbouring data.
+  */
+ #ifndef __ASM_ARCH_DSISD_H
+@@ -48,6 +48,11 @@ struct nds_sd_block {
+ 	unsigned int diag[8];
+ 	/* NDS_SD_CMD_TOUCHDIAG, see dsitouch_diag() in arm7/dsitouch.c */
+ 	unsigned int touch[8];
++	/* request tagging: the ARM9 sets seq, the ARM7 copies it to done_seq when it has finished,
++	 * so a late answer to an old request is never mistaken for the current one */
++	unsigned int seq;
++	unsigned int done_seq;
++	unsigned int rsv[6];
+ 	unsigned char data[NDS_SD_MAX_SECTORS * NDS_SD_SECTOR_SIZE];
+ } __attribute__((aligned(32)));
+ 
+diff --git a/vendors/Nintendo/DSI/rc b/vendors/Nintendo/DSI/rc
+index 85b438f7f..7a4311938 100644
+--- a/vendors/Nintendo/DSI/rc
++++ b/vendors/Nintendo/DSI/rc
+@@ -28,8 +28,24 @@ then
+ 		umount /mnt || umount -l /mnt
+ 	fi
+ fi
+-mount -t ramfs none /var/run
++# The card is mounted read-only (see above) but DSLinux writes to /etc, /var and /home while it runs. Give those three
++# folders RAM copies: copy them from the card, then bind-mount the copy over the card's folder. Changes are lost at power-off.
++# The card itself is never written. (Skipped per folder if the copy fails, so a failed copy never hides the card's files.)
+ mount -t ramfs none /tmp
++for d in etc var home
++do
++	if [ -d /media/linux/$d ]
++	then
++		/usr/bin/mkdir /tmp/$d
++		if /usr/bin/cp -a /media/linux/$d/. /tmp/$d
++		then
++			mount -o bind /tmp/$d /media/linux/$d
++		else
++			echo "Could not make a RAM copy of /$d."
++		fi
++	fi
++done
++mount -t ramfs none /var/run
+ mount -t sysfs none /sys
+ 
+ # Create r/w /dev entries so dropbear will work
+-- 
+2.56.0
+

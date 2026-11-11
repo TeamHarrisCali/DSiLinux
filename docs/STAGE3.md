@@ -193,6 +193,19 @@ Honest limits:
 - Not yet run on the console. Linux 2.6.14 kernel and busybox both support `mount -o bind` (checked in the source); the behaviour on the console is unverified.
 ROMs: `out/dsi-mode/dslinux-dsimode-j-uc3.nds` and `-uc2`.
 
+## First userland boot (user's photo, "j" build): what happened
+- DSLinux's real startup ran from the card (`/etc/rc.conf does not exist ... default configuration`). Reading the card works well enough to start the userland.
+- `Creating default /etc/passwd` -> `/etc/passwd: cannot create` (x4), `/etc/hosts: cannot create`: the startup writes into `/etc`, which sits on the read-only card. Expected with writes off.
+- `dsisd: ARM7 did not answer (cmd 1)`, then `read sector 4702080 x2 failed: result -1` and buffer I/O errors on that sector: one 2-sector read request got no answer within the ARM9's 10 s timeout.
+  The ARM7's own waits can add up to about 10 s, so it may simply have been stuck in a failing read. Cause not known.
+  A side risk: a late answer could have been taken for the next request.
+"k" build (`out/dsi-mode/dslinux-dsimode-k-uc3.nds`, `-uc2`):
+- RAM copies: `rc` copies `/etc`, `/var`, `/home` from the (read-only, confined) card into ramfs and bind-mounts the copy over the card's folder, so the system can write while the card stays untouched.
+  Changes are lost at power-off. Skipped per folder if the copy fails.
+- Reads: the ARM7 retries a failed read up to 3 times after sending CMD12 and resetting the controller; waits are shorter (about 0.5 s each); the ARM9 waits up to 30 s. Requests carry a sequence number (`seq`/`done_seq`) and a late
+  answer to an old request is ignored. The request header grew to 128 bytes.
+Built; not run.
+
 ## 3c. Faster ARM9 clock, 3d. Wi-Fi/cameras/DSP
 Not started. 3c is small but needs the SD result first; 3d unchanged from the feasibility finding.
 
