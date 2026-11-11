@@ -1,0 +1,229 @@
+From 7c3b37de1433a5c9e5c9b21405cb02ad97ed720a Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 05:33:42 -0600
+Subject: [PATCH] Taskbar: a button for every open window (raise, minimise the
+ active one, restore a minimised one); window list read from the root window's
+ children when idle
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ user/microwin/src/demos/nanox/dsdesk.c | 161 ++++++++++++++++++++++++-
+ 1 file changed, 156 insertions(+), 5 deletions(-)
+
+diff --git a/user/microwin/src/demos/nanox/dsdesk.c b/user/microwin/src/demos/nanox/dsdesk.c
+index 1b302a472..878841448 100644
+--- a/user/microwin/src/demos/nanox/dsdesk.c
++++ b/user/microwin/src/demos/nanox/dsdesk.c
+@@ -1,6 +1,10 @@
+ /*
+- * dsdesk - the DSLinuxDSi desktop panel: a Windows 95 style taskbar with a Start button, a Start menu and a clock.
+- * Programs are started from the menu; "Shut down" stops the desktop.
++ * dsdesk - the DSLinuxDSi desktop panel: a Windows 95 style taskbar with a Start button, a Start menu, a button
++ * for every open window and a clock.
++ * Programs are started from the menu; "Exit desktop" ends the desktop, "Shut down" powers the DS off.
++ * A window button raises its window, or minimises it when it is already the active one; a minimised window comes
++ * back with its button. (The window manager puts every application window in a container window, a child of the
++ * root window; minimising unmaps that container.)
+  */
+ #include <stdio.h>
+ #include <stdlib.h>
+@@ -40,6 +44,55 @@ static int th, barh, startw, itemh, menuw, menuh;
+ static int menu_open, hot = -1, start_down;
+ static time_t menu_since;
+ 
++#define MAXTW	8
++struct tw {
++	GR_WINDOW_ID box;	/* the window manager's container (a child of the root window) */
++	GR_WINDOW_ID client;	/* the application's window inside it */
++	char title[24];
++	int mapped;		/* 0 = minimised */
++	int x0, x1;		/* the button, set when drawn */
++};
++static struct tw tws[MAXTW];
++static int ntw;
++static GR_WINDOW_ID active_client;	/* the window with the keyboard focus */
++static int want_refresh = 1;		/* the root window had child updates: read the window list when idle */
++
++/* read the list of application windows: the root window's children that have a child of their own */
++static void refresh_windows(void)
++{
++	GR_WINDOW_INFO ri, ci;
++	GR_WM_PROPERTIES props;
++	GR_WINDOW_ID id;
++	struct tw t;
++	int i, j;
++
++	ntw = 0;
++	GrGetWindowInfo(GR_ROOT_WINDOW_ID, &ri);
++	for (id = ri.child; id && ntw < MAXTW; id = ci.sibling) {
++		GrGetWindowInfo(id, &ci);
++		if (id == bar || id == menu || !ci.child)
++			continue;
++		memset(&t, 0, sizeof(t));
++		t.box = id;
++		t.client = ci.child;
++		t.mapped = ci.mapped;
++		props.title = NULL;
++		GrGetWMProperties(t.client, &props);
++		snprintf(t.title, sizeof(t.title), "%s", props.title ? (char *)props.title : "window");
++		if (props.title)
++			free(props.title);
++		/* keep the order stable (by id, i.e. by creation) whatever the stacking order does */
++		for (i = 0; i < ntw && tws[i].box < t.box; i++)
++			;
++		for (j = ntw; j > i; j--)
++			tws[j] = tws[j - 1];
++		tws[i] = t;
++		ntw++;
++	}
++	active_client = GrGetFocus();
++	want_refresh = 0;
++}
++
+ static void reap(int sig)
+ {
+ 	while (waitpid(-1, NULL, WNOHANG) > 0)
+@@ -84,6 +137,60 @@ static void draw_bar(void)
+ 	x = si.cols - cw - 3;
+ 	w95_box(bar, gc, x, 3, cw, barh - 5, 1, W95_FACEFILL);
+ 	w95_text(bar, gc, W95_DARK, x + 6, 3 + (barh - 5 - th) / 2, clk);
++
++	/* one button per window between Start and the clock */
++	if (ntw > 0) {
++		int left = startw + 8, avail = x - 4 - left, bw = avail / ntw, k, chars, down;
++		char label[24];
++
++		if (bw > 90)
++			bw = 90;
++		if (bw < 22)
++			bw = 22;
++		chars = (bw - 8) / w95_textw(gc, "M");
++		for (k = 0; k < ntw; k++) {
++			down = tws[k].client == active_client && tws[k].mapped;
++			tws[k].x0 = left + k * bw;
++			tws[k].x1 = tws[k].x0 + bw - 2;
++			w95_box(bar, gc, tws[k].x0, 3, bw - 2, barh - 5, down, W95_FACEFILL);
++			snprintf(label, sizeof(label), "%s", tws[k].title);
++			if (chars < (int)sizeof(label) && chars > 0)
++				label[chars] = 0;
++			w95_text(bar, gc, tws[k].mapped ? W95_DARK : W95_SHADOW, tws[k].x0 + 4 + down,
++				 3 + (barh - 5 - th) / 2 + down, label);
++		}
++	}
++}
++
++/* a click on window button k: raise it, minimise it if it is the active one, or bring a minimised one back */
++static void window_button(int k)
++{
++	struct tw *t = &tws[k];
++	int i;
++
++	if (!t->mapped) {
++		GrMapWindow(t->box);
++		GrRaiseWindow(t->box);
++		GrSetFocus(t->client);
++		t->mapped = 1;
++		active_client = t->client;
++	} else if (t->client == active_client) {
++		GrUnmapWindow(t->box);
++		t->mapped = 0;
++		active_client = 0;
++		for (i = ntw - 1; i >= 0; i--)	/* the focus goes to another open window */
++			if (i != k && tws[i].mapped) {
++				GrSetFocus(tws[i].client);
++				active_client = tws[i].client;
++				break;
++			}
++	} else {
++		GrRaiseWindow(t->box);
++		GrSetFocus(t->client);
++		active_client = t->client;
++	}
++	want_refresh = 1;	/* check against the server when idle */
++	draw_bar();
+ }
+ 
+ static void draw_item(int i)
+@@ -185,10 +292,20 @@ int main(int argc, char **argv)
+ 			    "taskbar", GR_ROOT_WINDOW_ID, 0, si.rows - barh, si.cols, barh, W95_FACE);
+ 	GrSelectEvents(bar, GR_EVENT_MASK_EXPOSURE | GR_EVENT_MASK_BUTTON_DOWN | GR_EVENT_MASK_BUTTON_UP);
+ 	GrMapWindow(bar);
++	GrSelectEvents(GR_ROOT_WINDOW_ID, GR_EVENT_MASK_CHLD_UPDATE);
+ 
+ 	for (;;) {
+-		GrGetNextEventTimeout(&ev, 5000);
++		int changed = 0;
++		static int ticks, last_min = -1, check_focus;
++
++		GrGetNextEventTimeout(&ev, 300);
+ 		switch (ev.type) {
++		case GR_EVENT_TYPE_CHLD_UPDATE:
++			if (ev.update.utype == GR_UPDATE_ACTIVATE)
++				check_focus = 1;	/* another window got the focus */
++			else if (ev.update.utype != GR_UPDATE_MOVE)
++				want_refresh = 1;	/* windows came or went: read the list when things are quiet */
++			break;
+ 		case GR_EVENT_TYPE_EXPOSURE:
+ 			if (ev.exposure.wid == bar)
+ 				draw_bar();
+@@ -204,6 +321,16 @@ int main(int argc, char **argv)
+ 					draw_bar();
+ 					open_menu();
+ 				}
++			} else if (ev.button.wid == bar) {
++				int k;
++
++				for (k = 0; k < ntw; k++)
++					if (ev.button.x >= tws[k].x0 && ev.button.x < tws[k].x1) {
++						if (menu_open)
++							close_menu();
++						window_button(k);
++						break;
++					}
+ 			}
+ 			break;
+ 		case GR_EVENT_TYPE_MOUSE_POSITION:
+@@ -242,14 +369,38 @@ int main(int argc, char **argv)
+ 			}
+ 			break;
+ 		case GR_EVENT_TYPE_TIMEOUT:
++			/* quiet for 0.3 s: do the slow things that need an answer from the server */
++			ticks++;
++			if (want_refresh) {
++				refresh_windows();
++				changed = 1;
++				check_focus = 0;
++			} else if (check_focus || (ticks & 3) == 0) {
++				GR_WINDOW_ID f = GrGetFocus();
++
++				check_focus = 0;
++				if (f != active_client) {
++					active_client = f;
++					changed = 1;
++				}
++			}
++			{
++				time_t now = time(NULL);
++				struct tm *tm = localtime(&now);
++
++				if (tm && tm->tm_min != last_min) {	/* the clock shows minutes */
++					last_min = tm->tm_min;
++					changed = 1;
++				}
++			}
+ 			break;
+ 		}
+ 		if (menu_open && time(NULL) - menu_since > MENU_SECONDS && hot == -1)
+ 			close_menu();
+ 		else if (menu_open && hot != -1)
+ 			menu_since = time(NULL);
+-		if (ev.type == GR_EVENT_TYPE_TIMEOUT)
+-			draw_bar();	/* the clock */
++		if (changed)
++			draw_bar();
+ 	}
+ 	return 0;
+ }
+-- 
+2.56.0
+
