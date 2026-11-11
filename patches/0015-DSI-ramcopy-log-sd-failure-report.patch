@@ -1,0 +1,241 @@
+From a2794c941632fae99aaa0adc15ae989141578392 Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <noreply@example.invalid>
+Date: Tue, 10 Nov 2026 21:22:32 -0600
+Subject: [PATCH] DSI: log + tar fallback for the RAM copies, self-test after
+ rc.common too; SD read failure report (LASTERR) and one re-init retry
+
+---
+ linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c   | 32 +++++++++++++++++++-
+ linux-2.6.x/drivers/block/dldi_c.c           | 20 +++++++++++-
+ linux-2.6.x/include/asm-arm/arch-nds/dsisd.h |  1 +
+ vendors/Nintendo/DSI/rc                      | 30 +++++++++++++++---
+ vendors/Nintendo/DSI/selftest                |  2 +-
+ 5 files changed, 77 insertions(+), 8 deletions(-)
+
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c b/linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c
+index 8356ea9a1..7788dacbc 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c
+@@ -162,6 +162,8 @@ static u32 g_last_cmd;
+ static u32 g_ncmd;
+ static u32 g_last_status;
+ static u32 g_last_seen;
++static u32 g_stage;	/* where the last command was: 1 start, 2 waiting for response, 3 data, 4 waiting for data end */
++static u32 g_req_sector, g_req_count, g_req_cmd, g_req_tries;
+ 
+ static void delay_loops(u32 n)
+ {
+@@ -225,6 +227,7 @@ static u32 tmio_cmd(u16 cmd, u32 arg, u16 blocks, void *buf)
+ 	u32 cap;
+ 	u32 *p = (u32 *)buf;
+ 
++	g_stage = 1;
+ 	ack_status();		/* drop anything latched by the previous command */
+ 	g_status = 0;
+ 	g_last_cmd = cmd & 0xff;
+@@ -236,6 +239,7 @@ static u32 tmio_cmd(u16 cmd, u32 arg, u16 blocks, void *buf)
+ 	R16(FIFO32_CNT) = FIFO32_CLEAR | FIFO32_EN;
+ 	R16(SD_CMD) = (blocks > 1) ? (CMD_MULTI_DATA | cmd) : cmd;
+ 
++	g_stage = 2;
+ 	for (cap = 0; cap < 1500000; cap++) {
+ 		poll_status();
+ 		if (g_status & STATUS_RESP_END)
+@@ -252,6 +256,8 @@ static u32 tmio_cmd(u16 cmd, u32 arg, u16 blocks, void *buf)
+ 		u32 left = blocks;
+ 		u32 words, i;
+ 
++		g_stage = 3;
++
+ 		cap = 0;
+ 		while (!(g_status & ERR_BITS) && left > 0) {
+ 			if (++cap > 2000000) {
+@@ -276,6 +282,7 @@ static u32 tmio_cmd(u16 cmd, u32 arg, u16 blocks, void *buf)
+ 				}
+ 			}
+ 		}
++		g_stage = 4;
+ 		for (cap = 0; cap < 2000000; cap++) {
+ 			poll_status();
+ 			if (g_status & STATUS_DATA_END)
+@@ -540,6 +547,9 @@ static void nds_sd_request_inner(struct nds_sd_block *b)
+ 			return;
+ #endif
+ 		}
++		g_req_sector = b->sector;
++		g_req_count = b->count;
++		g_req_cmd = b->cmd;
+ 		{
+ 			int attempt;
+ 
+@@ -553,7 +563,15 @@ static void nds_sd_request_inner(struct nds_sd_block *b)
+ 				R16(SOFT_RST) = 1;
+ 				DELAY_MS(2);
+ 			}
+-			b->diag[7] = (b->diag[7] & 0xffff0000u) | (attempt & 0xff);	/* retries used */
++			g_req_tries = attempt;
++			if (res && b->cmd == NDS_SD_CMD_READ) {
++				/* retries exhausted: bring the card back from scratch once and try one last time */
++				tmio_cmd(CMD_RESP_R1B | 12, 0, 0, 0);
++				if (card_init_steps(b) == NDS_SD_OK) {
++					res = tmio_cmd(cmd, sect, (u16)b->count, b->data);
++					g_req_tries = 4;
++				}
++			}
+ 		}
+ 		if (b->cmd == NDS_SD_CMD_WRITE)
+ 			wait_not_busy();
+@@ -565,6 +583,18 @@ static void nds_sd_request_inner(struct nds_sd_block *b)
+ 		}
+ 		return;
+ 
++	case NDS_SD_CMD_LASTERR:
++		b->diag[0] = g_req_sector;
++		b->diag[1] = g_req_count | (g_req_cmd << 16);
++		b->diag[2] = g_req_tries;
++		b->diag[3] = g_inited;
++		b->diag[4] = g_last_status;
++		b->diag[5] = g_last_seen;
++		b->diag[6] = g_stage | (g_last_cmd << 8) | ((g_ncmd & 0xff) << 16);
++		b->diag[7] = R32(SD_STATUS);
++		b->result = NDS_SD_OK;
++		return;
++
+ 	case NDS_SD_CMD_TOUCHDIAG:
+ 		dsitouch_diag(b->touch);
+ 		b->result = NDS_SD_OK;
+diff --git a/linux-2.6.x/drivers/block/dldi_c.c b/linux-2.6.x/drivers/block/dldi_c.c
+index 2243b5d16..d2c0d69a0 100644
+--- a/linux-2.6.x/drivers/block/dldi_c.c
++++ b/linux-2.6.x/drivers/block/dldi_c.c
+@@ -110,6 +110,7 @@ static struct nds_sd_block sd_block;	/* 32 byte aligned, see dsisd.h */
+ static DECLARE_WAIT_QUEUE_HEAD(sd_wait);
+ static volatile int sd_done;
+ static u32 sd_seq;
++static long sd_timeout = 30 * HZ;
+ static DECLARE_MUTEX(sd_mutex);	/* one request block, one request at a time */
+ static int dldi_xfer_err;
+ 
+@@ -145,7 +146,7 @@ static int sd_request_locked(unsigned int cmd, unsigned int sector, unsigned int
+ 	dmac_flush_range((unsigned long)&sd_block,
+ 			 (unsigned long)&sd_block + sizeof(sd_block));
+ 	nds_fifo_send(FIFO_FIRMWARE_CMD(FIFO_FIRMWARE_CMD_SD_REQUEST, 0));
+-	if (!wait_event_timeout(sd_wait, sd_done, 30 * HZ)) {
++	if (!wait_event_timeout(sd_wait, sd_done, sd_timeout)) {
+ 		printk(KERN_ERR "dsisd: ARM7 did not answer (cmd %u)\n", cmd);
+ 		return -1;
+ 	}
+@@ -235,6 +236,23 @@ static void dsisd_transfer(unsigned long sector, unsigned long nsect,
+ 			       write ? "write" : "read", sector, n, ret,
+ 			       sd_block.info[0]);
+ 			dldi_xfer_err = 1;
++			/* ask the ARM7 what it was doing (short timeout: if it does not answer this either, it is stuck) */
++			{
++				long save = sd_timeout;
++				int r;
++
++				sd_timeout = 5 * HZ;
++				r = sd_request(NDS_SD_CMD_LASTERR, 0, 0);
++				sd_timeout = save;
++				if (r == NDS_SD_OK)
++					printk(KERN_ERR "dsisd: ARM7 alive; req %u x%u cmd %u tries %u inited %u | "
++					       "last st %08x seen %08x stage/cmd/n %06x now %08x\n",
++					       sd_block.diag[0], sd_block.diag[1] & 0xffff, sd_block.diag[1] >> 16,
++					       sd_block.diag[2], sd_block.diag[3], sd_block.diag[4], sd_block.diag[5],
++					       sd_block.diag[6], sd_block.diag[7]);
++				else
++					printk(KERN_ERR "dsisd: ARM7 does not answer at all (stuck)\n");
++			}
+ 			return;
+ 		}
+ 		if (!write)
+diff --git a/linux-2.6.x/include/asm-arm/arch-nds/dsisd.h b/linux-2.6.x/include/asm-arm/arch-nds/dsisd.h
+index 3dbe8e979..db3e2dbf7 100644
+--- a/linux-2.6.x/include/asm-arm/arch-nds/dsisd.h
++++ b/linux-2.6.x/include/asm-arm/arch-nds/dsisd.h
+@@ -19,6 +19,7 @@
+ #define NDS_SD_CMD_INIT		0
+ #define NDS_SD_CMD_READ		1
+ #define NDS_SD_CMD_WRITE	2
++#define NDS_SD_CMD_LASTERR	4	/* not SD: report what the last request was doing (diag[]) */
+ #define NDS_SD_CMD_TOUCHDIAG	3	/* not SD: fetch the DSi touch reader's counters into touch[] */
+ 
+ /* result codes, 0 = success */
+diff --git a/vendors/Nintendo/DSI/rc b/vendors/Nintendo/DSI/rc
+index 34da8aaaf..1f35f6bdc 100644
+--- a/vendors/Nintendo/DSI/rc
++++ b/vendors/Nintendo/DSI/rc
+@@ -32,28 +32,46 @@ fi
+ # folders RAM copies: copy them from the card, then bind-mount the copy over the card's folder. Changes are lost at power-off.
+ # The card itself is never written. (Skipped per folder if the copy fails, so a failed copy never hides the card's files.)
+ mount -t ramfs none /tmp
++LOG=/tmp/ramcopy.log
++echo "RAM copy log" > $LOG
+ for d in etc var home
+ do
+ 	if [ -d /media/linux/$d ]
+ 	then
+-		# copy the folder itself (not its contents) to a name that does not exist yet
+-		/usr/bin/cp -a /media/linux/$d /tmp/$d
++		# 1st try: cp -a of the folder itself to a name that does not exist yet
++		echo "cp $d" >> $LOG
++		/usr/bin/cp -a /media/linux/$d /tmp/$d >> $LOG 2>&1
++		# 2nd try if that left nothing: tar through a pipe
++		if ls /media/linux/$d | grep -q .
++		then
++			if ls /tmp/$d | grep -q .
++			then
++				echo "ok $d" >> $LOG
++			else
++				echo "tar $d" >> $LOG
++				/usr/bin/tar -cf - -C /media/linux $d | /usr/bin/tar -xf - -C /tmp >> $LOG 2>&1
++			fi
++		else
++			/usr/bin/mkdir /tmp/$d >> $LOG 2>&1
++		fi
++		# never hide the card's files behind an empty copy
+ 		if [ -d /tmp/$d ]
+ 		then
+-			# never hide the card's files behind an empty copy: a non-empty card folder needs a non-empty copy
+ 			if ls /media/linux/$d | grep -q .
+ 			then
+ 				if ls /tmp/$d | grep -q .
+ 				then
+ 					mount -o bind /tmp/$d /media/linux/$d
++					echo "bound $d" >> $LOG
+ 				else
+-					echo "RAM copy of /$d is empty: not used."
++					echo "RAM copy of /$d is empty: not used." >> $LOG
+ 				fi
+ 			else
+ 				mount -o bind /tmp/$d /media/linux/$d
++				echo "bound $d (empty)" >> $LOG
+ 			fi
+ 		else
+-			echo "Could not make a RAM copy of /$d."
++			echo "no RAM copy of /$d" >> $LOG
+ 		fi
+ 	fi
+ done
+@@ -81,3 +99,5 @@ mknod /var/run/ttypf c 3 15
+ # the missing rc.common aborts this script.
+ [ -x /boot/selftest ] && /boot/selftest
+ . /etc/rc.common
++# the self-test again, after rc.common's long output, so it is on screen when boot ends
++[ -x /boot/selftest ] && /boot/selftest
+diff --git a/vendors/Nintendo/DSI/selftest b/vendors/Nintendo/DSI/selftest
+index b5814616d..a2869fb83 100644
+--- a/vendors/Nintendo/DSI/selftest
++++ b/vendors/Nintendo/DSI/selftest
+@@ -33,7 +33,7 @@ fi
+ echo "RAM copies in /tmp:"
+ ls /tmp
+ ls /etc/rc.common
+-ls /var/run
++[ -f /tmp/ramcopy.log ] && /usr/bin/head -12 /tmp/ramcopy.log
+ dmesg | grep 'dsisd: init'
+ dmesg | grep 'dsisd: diag'
+ echo "======================================"
+-- 
+2.56.0
+

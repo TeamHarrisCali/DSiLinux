@@ -214,6 +214,18 @@ Built; not run.
 "l" build (`out/dsi-mode/dslinux-dsimode-l-uc3.nds`, `-uc2`): copies the folder itself (`cp -a /media/linux/$d /tmp/$d`, no pre-created target), and only bind-mounts the copy if it is non-empty when the card's folder is non-empty;
 otherwise prints `RAM copy of /x is empty: not used.` and leaves the card's folder visible. The self-test now also prints `ls /tmp`, `ls /etc/rc.common` and `ls /var/run` so the result of the copies is visible. Built; not run.
 
+## "l" build on the console (user's photo), plus the user's note about I/O errors
+- `/etc/rc.common` found and run, `/var/run` present (`ttyp0..f` listed), so the startup now proceeds. `/etc/passwd: cannot create` and `/etc/hosts: cannot create` remain: `ls /tmp` printed nothing, i.e. **no RAM copy was made**
+  (cause unknown; the messages from the copy step had scrolled off). `rc.common` now produces about 25 lines after the self-test, which pushes the self-test off the screen.
+- The user also reports `end_request: I/O error, dev dldi` and `Buffer I/O error on device dldi1`: reads at some sectors (earlier: sector 4,702,080, a 2-sector read, with the 1-sector retries failing too) still fail.
+"m" build (`out/dsi-mode/dslinux-dsimode-m-uc3.nds`, `-uc2`):
+- RAM copy step logs to `/tmp/ramcopy.log` (shown by the self-test), tries `cp -a`, then `tar` through a pipe, binds a copy only if non-empty.
+- The self-test also runs after `rc.common`, so it is on screen when boot ends.
+- On a failed read the kernel asks the ARM7 what it was doing and prints one line:
+  `dsisd: ARM7 alive; req <sector> x<count> cmd <1 read> tries <n> inited <n> | last st <status> seen <bits> stage/cmd/n <stage:1 start 2 response 3 data 4 data-end, cmd, count> now <status>`,
+  or `dsisd: ARM7 does not answer at all (stuck)` (5 s). The ARM7 also retries a failed read up to 3 times (CMD12 + controller reset), then re-initialises the card once and tries a last time.
+Built; not run.
+
 ## 3c. Faster ARM9 clock, 3d. Wi-Fi/cameras/DSP
 Not started. 3c is small but needs the SD result first; 3d unchanged from the feasibility finding.
 
