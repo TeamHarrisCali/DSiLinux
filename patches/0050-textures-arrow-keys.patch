@@ -1,0 +1,986 @@
+From 703cb87ec9742a02e3681d69d1bcf046d39f9964 Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 06:39:12 -0600
+Subject: [PATCH] Textures: NDSFB_GX_TEXLOAD (VRAM bank D as texture slot 0),
+ gx_texture/gx_texcoord/mesh texcoords in dsgx.h, brick cube demo (dsgl3d key
+ t, /boot/gl cube); arrow keys: touch screen arrow buttons, Nano-X decodes ESC
+ [ sequences (the d-pad's Esc used to close programs), nxterm sends arrows to
+ the shell
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ .../drivers/input/touchscreen/nds_ts.c        | 106 ++++++++++++++
+ linux-2.6.x/drivers/video/ndsfb.c             |  46 +++++++
+ user/microwin/src/demos/nanox/Makefile        |   4 +-
+ user/microwin/src/demos/nanox/dsgl3d.c        | 130 +++++++-----------
+ user/microwin/src/demos/nanox/dsgx.c          |  85 ++++--------
+ user/microwin/src/demos/nanox/dsgx.h          |  74 +++++++++-
+ user/microwin/src/demos/nanox/dsgx_demo.h     | 127 +++++++++++++++++
+ user/microwin/src/demos/nanox/nxterm.c        |  20 ++-
+ user/microwin/src/drivers/kbd_tty.c           |  35 +++++
+ vendors/Nintendo/DSI/gl                       |   7 +-
+ 10 files changed, 484 insertions(+), 150 deletions(-)
+ create mode 100644 user/microwin/src/demos/nanox/dsgx_demo.h
+
+diff --git a/linux-2.6.x/drivers/input/touchscreen/nds_ts.c b/linux-2.6.x/drivers/input/touchscreen/nds_ts.c
+index 49d144953..65df24dc4 100644
+--- a/linux-2.6.x/drivers/input/touchscreen/nds_ts.c
++++ b/linux-2.6.x/drivers/input/touchscreen/nds_ts.c
+@@ -166,6 +166,7 @@ static int pad_lx, pad_ly, pad_moved;
+ static unsigned long pad_t0;
+ 
+ static int in_strip(u8 x, u8 y);
++static int in_arrows(u8 x, u8 y);
+ 
+ static int in_pad(u8 x, u8 y)
+ {
+@@ -175,6 +176,8 @@ static int in_pad(u8 x, u8 y)
+ 		return 0;
+ 	if (in_strip(x, y))		/* the quick buttons */
+ 		return 0;
++	if (in_arrows(x, y))		/* the arrow keys */
++		return 0;
+ 	return 1;
+ }
+ 
+@@ -443,6 +446,102 @@ static void strip_touch(int touched, u8 x)
+ 	}
+ }
+ 
++
++/*
++ * Arrow keys: four 16x16 buttons (left, up, down, right) in the bottom right corner of the trackpad area, for programs
++ * that need arrow keys (the DS d-pad sends them too, but a touch is handy). The key is held while the touch lasts, so
++ * it repeats.
++ */
++#define ARROW_TILE0	230		/* 4 buttons x 4 tiles: 230..245 (the tile data ends at 255) */
++#define ARROW_N		4
++#define ARROW_COL0	24		/* tile column of the first button; each is 2 tiles wide */
++#define ARROW_ROW0	7		/* tile rows 7 and 8 */
++static const int arrow_key[ARROW_N] = { KEY_LEFT, KEY_UP, KEY_DOWN, KEY_RIGHT };
++
++static int in_arrows(u8 x, u8 y)
++{
++	return y >= ARROW_ROW0 * 8 && y < (ARROW_ROW0 + 2) * 8 && x >= ARROW_COL0 * 8;
++}
++
++/* arrow shape (pointing up) in a 16x16 grid: head rows 3..8, stem rows 9..12 */
++static int arrow_up_px(int r, int c)
++{
++	if (r >= 3 && r <= 8)
++		return c >= 7 - (r - 3) && c <= 8 + (r - 3);
++	if (r >= 9 && r <= 12)
++		return c >= 6 && c <= 9;
++	return 0;
++}
++
++static void draw_arrows(void)
++{
++	int b, r, c, t;
++
++	for (b = 0; b < ARROW_N; b++) {
++		u8 big[16][16];
++		u8 cell[16][8];
++		int key = arrow_key[b];
++
++		for (r = 0; r < 16; r++)
++			for (c = 0; c < 16; c++) {
++				int on, rr = r, cc = c;
++
++				switch (key) {
++				case KEY_UP:	on = arrow_up_px(rr, cc); break;
++				case KEY_DOWN:	on = arrow_up_px(15 - rr, cc); break;
++				case KEY_LEFT:	on = arrow_up_px(cc, rr); break;
++				default:	on = arrow_up_px(cc, 15 - rr); break;
++				}
++				big[r][c] = on ? 1 : 4;			/* 1 symbol, 4 face */
++				if (r == 0 || c == 0)
++					big[r][c] = 2;			/* light edge */
++				if (r == 15 || c == 15)
++					big[r][c] = 3;			/* dark edge */
++			}
++		t = ARROW_TILE0 + b * 4;
++		for (c = 0; c < 2; c++) {		/* left and right half: tiles t, t+1 and t+2, t+3 */
++			for (r = 0; r < 16; r++) {
++				int k;
++
++				for (k = 0; k < 8; k++)
++					cell[r][k] = big[r][c * 8 + k];
++			}
++			cell_to_tiles(cell, t + c * 2);
++		}
++		for (c = 0; c < 2; c++)
++			for (r = 0; r < 2; r++) {
++				int x = ARROW_COL0 + b * 2 + c, y = ARROW_ROW0 + r;
++
++				bgmap[y * 32 + x] = fgmap[y * 32 + x] = (t + c * 2 + r) | 0x2000;
++			}
++	}
++}
++
++static int arrow_active = KEY_RESERVED;		/* the arrow key held by the current touch */
++
++static void arrow_touch(int touched, u8 x, u8 y)
++{
++	int want = KEY_RESERVED;
++
++	if (touched && in_arrows(x, y)) {
++		int i = (x / 8 - ARROW_COL0) / 2;
++
++		if (i >= 0 && i < ARROW_N)
++			want = arrow_key[i];
++	}
++	if (want == arrow_active)
++		return;
++	if (arrow_active != KEY_RESERVED) {
++		input_report_key(&ndstouch_dev, arrow_active, 0);
++		input_sync(&ndstouch_dev);
++	}
++	arrow_active = want;
++	if (want != KEY_RESERVED) {
++		input_report_key(&ndstouch_dev, want, 1);
++		input_sync(&ndstouch_dev);
++	}
++}
++
+ /* blue-grey panel over the trackpad area: map entries use palette bank 1 whose entry 6 (the solid tile's colour) differs */
+ static void draw_pad(void)
+ {
+@@ -458,6 +557,7 @@ static void draw_pad(void)
+ 		}
+ 	}
+ 	draw_strip();
++	draw_arrows();
+ }
+ 
+ static void update_keyboard(u16 pressedKey)
+@@ -594,6 +694,10 @@ static void ndstouch_input_event(u8 touched, u8 x, u8 y)
+ 	switch(mode) {
+ 		case KEYBOARD_MODE:
+ 			/* a touch that starts on the trackpad only moves the pointer, one that starts on the keyboard only types */
++			if (arrow_active != KEY_RESERVED || (touched && !wasTouched && !pad_active && !btn_active && in_arrows(x, y))) {
++				arrow_touch(touched, x, y);
++				break;
++			}
+ 			if (btn_active || (touched && !wasTouched && !pad_active && in_strip(x, y))) {
+ 				strip_touch(touched, x);
+ 				break;
+@@ -689,6 +793,8 @@ static int __init touchscreen_init(void)
+ 			ndstouch_dev.keybit[LONG(qwertyKeyMap[i])] |= BIT(qwertyKeyMap[i]);
+ 	}
+ 
++	for (i = 0; i < ARROW_N; i++)
++		ndstouch_dev.keybit[LONG(arrow_key[i])] |= BIT(arrow_key[i]);
+ 	input_register_device(&ndstouch_dev);
+ 	input_register_device(&ndspad_dev);
+ 
+diff --git a/linux-2.6.x/drivers/video/ndsfb.c b/linux-2.6.x/drivers/video/ndsfb.c
+index d72f82eee..d2d64b87b 100644
+--- a/linux-2.6.x/drivers/video/ndsfb.c
++++ b/linux-2.6.x/drivers/video/ndsfb.c
+@@ -245,6 +245,7 @@ static int ndsfb_blank(int blank_mode, struct fb_info *info);
+ #define NDSFB_GX_SETUP	0x4e05
+ #define NDSFB_GX_SUBMIT	0x4e06
+ #define NDSFB_VSYNC	0x4e07	/* wait for the next vertical blank */
++#define NDSFB_GX_TEXLOAD	0x4e08	/* copy texture data into the 3D engine's texture memory */
+ static DECLARE_WAIT_QUEUE_HEAD(ndsfb_flip_wq);
+ static volatile int ndsfb_flip_pending;
+ static int ndsfb_flip_y;
+@@ -324,7 +325,15 @@ struct ndsfb_cursor {
+  *                   engines' command registers (a command with several parameters is several pairs with the
+  *                   same offset). Only offsets 0x400-0x5ff (command ports), 0x060, 0x350, 0x354 are accepted.
+  * The geometry FIFO stalls the CPU when it is full, which is how a program is paced.
++ *   NDSFB_GX_TEXLOAD struct ndsfb_gx_tex: copy bytes of texture data to byte offset of the 128 KB texture memory
++ *                   (VRAM bank D, texture slot 0: texture offset n in TEXIMAGE_PARAM is n / 8). The bank is
++ *                   mapped to the CPU only for the copy; the engine reads textures while it is a texture slot.
+  */
++struct ndsfb_gx_tex {
++	unsigned long data;		/* user pointer */
++	unsigned int bytes;		/* even */
++	unsigned int offset;		/* multiple of 8 */
++};
+ struct ndsfb_gx_submit {
+ 	unsigned long words;		/* user pointer to count * 2 unsigned ints */
+ 	unsigned int count;
+@@ -343,11 +352,44 @@ static void ndsfb_gx_setup(int on)
+ 		DISPLAY_CR |= (1 << 3) | (1 << 8);		/* BG0 is 3D, BG0 on */
+ 	} else {
+ 		DISPLAY_CR &= ~((1 << 3) | (1 << 8));
++		writeb(0, VRAM_D_CR);
+ 		ndsfb_gx_on = 0;
+ 		POWER_CR &= ~(POWER_MATRIX | POWER_3D_CORE);
+ 	}
+ }
+ 
++#define GX_TEX_BYTES	0x20000
++#define VRAM_D_LCDC	((volatile u16 *)0x06860000)
++
++static int ndsfb_gx_texload(struct ndsfb_gx_tex __user *arg)
++{
++	struct ndsfb_gx_tex t;
++	u16 buf[128];
++	unsigned int done = 0, n, i;
++
++	if (!ndsfb_gx_on)
++		return -EINVAL;
++	if (copy_from_user(&t, arg, sizeof(t)))
++		return -EFAULT;
++	if ((t.bytes & 1) || (t.offset & 7) || t.offset > GX_TEX_BYTES || t.bytes > GX_TEX_BYTES - t.offset)
++		return -EINVAL;
++	writeb(VRAM_ENABLE | 0, VRAM_D_CR);		/* bank D at the CPU (0x06860000) */
++	while (done < t.bytes) {
++		n = t.bytes - done;
++		if (n > sizeof(buf))
++			n = sizeof(buf);
++		if (copy_from_user(buf, (void __user *)(t.data + done), n)) {
++			writeb(VRAM_ENABLE | 3, VRAM_D_CR);
++			return -EFAULT;
++		}
++		for (i = 0; i < n / 2; i++)
++			VRAM_D_LCDC[(t.offset + done) / 2 + i] = buf[i];
++		done += n;
++	}
++	writeb(VRAM_ENABLE | 3 | VRAM_OFFSET(0), VRAM_D_CR);	/* texture slot 0 */
++	return 0;
++}
++
+ static int gx_reg_ok(unsigned int off)
+ {
+ 	return (off >= 0x400 && off < 0x600) || off == 0x060 || off == 0x350 || off == 0x354;
+@@ -731,6 +773,10 @@ static int ndsfb_ioctl(struct inode *inode, struct file *file,
+ 				return -EINVAL;
+ 			ndsfb_gx_setup(arg != 0);
+ 			return 0;
++		case NDSFB_GX_TEXLOAD:
++			if (info->par != 0)
++				return -EINVAL;
++			return ndsfb_gx_texload((struct ndsfb_gx_tex __user *)argp);
+ 		case NDSFB_GX_SUBMIT:
+ 			if (info->par != 0)
+ 				return -EINVAL;
+diff --git a/user/microwin/src/demos/nanox/Makefile b/user/microwin/src/demos/nanox/Makefile
+index 07d67c8ad..f58642c4a 100644
+--- a/user/microwin/src/demos/nanox/Makefile
++++ b/user/microwin/src/demos/nanox/Makefile
+@@ -185,11 +185,11 @@ $(TOP)/bin/dsfiles: dsfiles.o $(NANOXCLIENTLIBS) $(TOP)/config
+ 	@echo "Linking $@ ..."
+ 	$(CC) $(CFLAGS) $(LDFLAGS) $< -o $@ $(LD_NANOXCLIENTLIBS)
+ 
+-$(TOP)/bin/dsgx: dsgx.o dsgx.h $(NANOXCLIENTLIBS) $(TOP)/config
++$(TOP)/bin/dsgx: dsgx.o dsgx.h dsgx_demo.h $(NANOXCLIENTLIBS) $(TOP)/config
+ 	@echo "Linking $@ ..."
+ 	$(CC) $(CFLAGS) $(LDFLAGS) dsgx.o -o $@ $(LD_NANOXCLIENTLIBS) $(LIBM)
+ 
+-$(TOP)/bin/dsgl3d: dsgl3d.o dsgx.h dsgx_win.h $(NANOXCLIENTLIBS) $(TOP)/config
++$(TOP)/bin/dsgl3d: dsgl3d.o dsgx.h dsgx_win.h dsgx_demo.h $(NANOXCLIENTLIBS) $(TOP)/config
+ 	@echo "Linking $@ ..."
+ 	$(CC) $(CFLAGS) $(LDFLAGS) $< -o $@ $(LD_NANOXCLIENTLIBS) $(LIBM)
+ 
+diff --git a/user/microwin/src/demos/nanox/dsgl3d.c b/user/microwin/src/demos/nanox/dsgl3d.c
+index 460c866fa..9a377a26d 100644
+--- a/user/microwin/src/demos/nanox/dsgl3d.c
++++ b/user/microwin/src/demos/nanox/dsgl3d.c
+@@ -1,72 +1,13 @@
+ /*
+  * dsgl3d - hardware 3D (the DS 3D engine) in a desktop window: three lit gears, written with dsgx.h / dsgx_win.h.
+- * Arrow keys turn the view, a = edge smoothing on/off, c = hidden face culling on/off, Esc or q or the close box end
++ * Arrow keys turn the view, a = edge smoothing on/off, c = hidden face culling on/off, t = gears or a textured
++ * brick cube, Esc or q or the close box end
+  * it. The window takes the keyboard focus when it starts. The first line in the corner is the frame rate really shown
+  * (each frame waits for the screen refresh, 60 at most), the second the state of the a and c switches.
+  */
+ #include <sys/time.h>
+ #include "dsgx_win.h"
+-
+-static void gear(struct gx_mesh *m, double inner_radius, double outer_radius, double width, int teeth,
+-		 double tooth_depth)
+-{
+-	int i;
+-	double r0, r1, r2, angle, da, u, v, len;
+-
+-	gx_mesh_init(m, 400);
+-	r0 = inner_radius;
+-	r1 = outer_radius - tooth_depth / 2.0;
+-	r2 = outer_radius + tooth_depth / 2.0;
+-	da = 2.0 * M_PI / teeth / 4.0;
+-
+-	gx_mesh_normal(m, 0.0, 0.0, 1.0);
+-	gx_mesh_begin(m, GX_QUAD_STRIP);		/* front face */
+-	for (i = 0; i <= teeth; i++) {
+-		angle = i * 2.0 * M_PI / teeth;
+-		gx_mesh_vertex(m, r0 * cos(angle), r0 * sin(angle), width * 0.5);
+-		gx_mesh_vertex(m, r1 * cos(angle), r1 * sin(angle), width * 0.5);
+-		gx_mesh_vertex(m, r0 * cos(angle), r0 * sin(angle), width * 0.5);
+-		gx_mesh_vertex(m, r1 * cos(angle + 3 * da), r1 * sin(angle + 3 * da), width * 0.5);
+-	}
+-	gx_mesh_end(m);
+-
+-	gx_mesh_begin(m, GX_QUAD_STRIP);		/* outward faces of the teeth */
+-	for (i = 0; i < teeth; i++) {
+-		angle = i * 2.0 * M_PI / teeth;
+-
+-		gx_mesh_vertex(m, r1 * cos(angle), r1 * sin(angle), width * 0.5);
+-		gx_mesh_vertex(m, r1 * cos(angle), r1 * sin(angle), -width * 0.5);
+-		u = r2 * cos(angle + da) - r1 * cos(angle);
+-		v = r2 * sin(angle + da) - r1 * sin(angle);
+-		len = sqrt(u * u + v * v);
+-		u /= len;
+-		v /= len;
+-		gx_mesh_normal(m, v, -u, 0.0);
+-		gx_mesh_vertex(m, r2 * cos(angle + da), r2 * sin(angle + da), width * 0.5);
+-		gx_mesh_vertex(m, r2 * cos(angle + da), r2 * sin(angle + da), -width * 0.5);
+-		gx_mesh_normal(m, cos(angle), sin(angle), 0.0);
+-		gx_mesh_vertex(m, r2 * cos(angle + 2 * da), r2 * sin(angle + 2 * da), width * 0.5);
+-		gx_mesh_vertex(m, r2 * cos(angle + 2 * da), r2 * sin(angle + 2 * da), -width * 0.5);
+-		u = r1 * cos(angle + 3 * da) - r2 * cos(angle + 2 * da);
+-		v = r1 * sin(angle + 3 * da) - r2 * sin(angle + 2 * da);
+-		gx_mesh_normal(m, v, -u, 0.0);
+-		gx_mesh_vertex(m, r1 * cos(angle + 3 * da), r1 * sin(angle + 3 * da), width * 0.5);
+-		gx_mesh_vertex(m, r1 * cos(angle + 3 * da), r1 * sin(angle + 3 * da), -width * 0.5);
+-		gx_mesh_normal(m, cos(angle), sin(angle), 0.0);
+-	}
+-	gx_mesh_vertex(m, r1 * cos(0), r1 * sin(0), width * 0.5);
+-	gx_mesh_vertex(m, r1 * cos(0), r1 * sin(0), -width * 0.5);
+-	gx_mesh_end(m);
+-
+-	gx_mesh_begin(m, GX_QUAD_STRIP);		/* inside radius cylinder */
+-	for (i = 0; i <= teeth; i++) {
+-		angle = i * 2.0 * M_PI / teeth;
+-		gx_mesh_normal(m, -cos(angle), -sin(angle), 0.0);
+-		gx_mesh_vertex(m, r0 * cos(angle), r0 * sin(angle), -width * 0.5);
+-		gx_mesh_vertex(m, r0 * cos(angle), r0 * sin(angle), width * 0.5);
+-	}
+-	gx_mesh_end(m);
+-}
++#include "dsgx_demo.h"
+ 
+ static long usec(void)
+ {
+@@ -80,7 +21,9 @@ int main(int argc, char **argv)
+ {
+ 	GR_EVENT ev;
+ 	struct gxw w;
+-	static struct gx_mesh g[3];
++	static struct gx_mesh g[3], cubem;
++	static unsigned short bricks[BRICK_SIZE * BRICK_SIZE];
++	int scene = 0;
+ 	int running = 1, aa = 1, cull = 0, frames = 0;
+ 	long fps_t = 0;
+ 	char txt[32];
+@@ -95,8 +38,11 @@ int main(int argc, char **argv)
+ 	gear(&g[0], 1.0, 4.0, 1.0, 20, 0.7);
+ 	gear(&g[1], 0.5, 2.0, 2.0, 10, 0.7);
+ 	gear(&g[2], 1.3, 2.0, 0.5, 10, 0.7);
++	cube(&cubem);
++	make_bricks(bricks);
++	gx_texture_load(0, bricks, sizeof(bricks));
+ 	gxw_create(&w, "3D gears", 30, 8, 160, 120, 5.0, 60.0);
+-	gx_control(aa ? GX_CTRL_AA : 0);
++	gx_control((aa ? GX_CTRL_AA : 0) | GX_CTRL_TEXTURE);
+ 	gx_flush();
+ 
+ 	while (running) {
+@@ -113,13 +59,17 @@ int main(int argc, char **argv)
+ 				break;
+ 			case 'a':
+ 				aa = !aa;
+-				gx_control(aa ? GX_CTRL_AA : 0);
++				gx_control((aa ? GX_CTRL_AA : 0) | GX_CTRL_TEXTURE);
+ 				changed = 1;
+ 				break;
+ 			case 'c':
+ 				cull = !cull;
+ 				changed = 1;
+ 				break;
++			case 't':
++				scene = !scene;
++				changed = 1;
++				break;
+ 			case MWKEY_LEFT:
+ 				view_roty += 5.0;
+ 				break;
+@@ -150,26 +100,37 @@ int main(int argc, char **argv)
+ 		gx_rotate('x', view_rotx);
+ 		gx_rotate('y', view_roty);
+ 
+-		gx_push();
+-		gx_translate(-3.0, -2.0, 0.0);
+-		gx_rotate('z', angle);
+-		gx_material(GX_RGB(25, 3, 0), GX_RGB(6, 6, 6));
+-		gx_mesh_draw(&g[0]);
+-		gx_pop(1);
+-
+-		gx_push();
+-		gx_translate(3.1, -2.0, 0.0);
+-		gx_rotate('z', -2.0 * angle - 9.0);
+-		gx_material(GX_RGB(0, 25, 6), GX_RGB(6, 6, 6));
+-		gx_mesh_draw(&g[1]);
+-		gx_pop(1);
++		if (scene) {
++			gx_texture(0, BRICK_SIZE, BRICK_SIZE, GX_TEX_REPEAT);
++			gx_rotate('y', angle);
++			gx_rotate('x', angle * 0.7);
++			gx_scale(3.5, 3.5, 3.5);
++			gx_material(GX_RGB(31, 31, 31), GX_RGB(9, 9, 9));
++			gx_mesh_draw(&cubem);
++		} else {
++			gx_cmd(GXR_TEXIMAGE, 0);		/* no texture */
++			gx_push();
++			gx_translate(-3.0, -2.0, 0.0);
++			gx_rotate('z', angle);
++			gx_material(GX_RGB(25, 3, 0), GX_RGB(6, 6, 6));
++			gx_mesh_draw(&g[0]);
++			gx_pop(1);
++
++			gx_push();
++			gx_translate(3.1, -2.0, 0.0);
++			gx_rotate('z', -2.0 * angle - 9.0);
++			gx_material(GX_RGB(0, 25, 6), GX_RGB(6, 6, 6));
++			gx_mesh_draw(&g[1]);
++			gx_pop(1);
++
++			gx_push();
++			gx_translate(-3.1, 4.2, 0.0);
++			gx_rotate('z', -2.0 * angle - 25.0);
++			gx_material(GX_RGB(6, 6, 31), GX_RGB(6, 6, 6));
++			gx_mesh_draw(&g[2]);
++			gx_pop(1);
+ 
+-		gx_push();
+-		gx_translate(-3.1, 4.2, 0.0);
+-		gx_rotate('z', -2.0 * angle - 25.0);
+-		gx_material(GX_RGB(6, 6, 31), GX_RGB(6, 6, 6));
+-		gx_mesh_draw(&g[2]);
+-		gx_pop(1);
++		}
+ 
+ 		gx_swap();
+ 		gx_flush();
+@@ -187,6 +148,7 @@ int main(int argc, char **argv)
+ 			}
+ 			sprintf(txt, "a:aa %s c:cull %s", aa ? "on" : "off", cull ? "on" : "off");
+ 			gxw_text(&w, 1, txt);
++			gxw_text(&w, 2, scene ? "t:scene cube" : "t:scene gears");
+ 		}
+ 	}
+ 	gx_close();
+diff --git a/user/microwin/src/demos/nanox/dsgx.c b/user/microwin/src/demos/nanox/dsgx.c
+index 1c81776cb..4d5609149 100644
+--- a/user/microwin/src/demos/nanox/dsgx.c
++++ b/user/microwin/src/demos/nanox/dsgx.c
+@@ -1,6 +1,7 @@
+ /*
+  * dsgx - the hardware 3D engine on the text screen (stop the desktop first), written with dsgx.h.
+  *   dsgx        the lit gears        dsgx tri     one colour triangle (the smallest test)
++ *   dsgx cube   a lit, textured brick cube (the texture memory and texture mapping)
+  * Esc or q quits and prints the frame rate (each frame waits for the screen refresh: 60 at most).
+  * The frame buffer is cleared to transparent pixels so the 3D picture, which is behind it, shows.
+  */
+@@ -9,58 +10,7 @@
+ #include <sys/time.h>
+ #include <linux/fb.h>
+ #include <linux/kd.h>
+-#include "dsgx.h"
+-
+-static void gear(struct gx_mesh *m, double ri, double ro, double width, int teeth, double depth)
+-{
+-	int i;
+-	double r0 = ri, r1 = ro - depth / 2.0, r2 = ro + depth / 2.0, a, da = 2.0 * M_PI / teeth / 4.0, u, v, len;
+-
+-	gx_mesh_init(m, 400);
+-	gx_mesh_normal(m, 0.0, 0.0, 1.0);
+-	gx_mesh_begin(m, GX_QUAD_STRIP);
+-	for (i = 0; i <= teeth; i++) {
+-		a = i * 2.0 * M_PI / teeth;
+-		gx_mesh_vertex(m, r0 * cos(a), r0 * sin(a), width * 0.5);
+-		gx_mesh_vertex(m, r1 * cos(a), r1 * sin(a), width * 0.5);
+-		gx_mesh_vertex(m, r0 * cos(a), r0 * sin(a), width * 0.5);
+-		gx_mesh_vertex(m, r1 * cos(a + 3 * da), r1 * sin(a + 3 * da), width * 0.5);
+-	}
+-	gx_mesh_end(m);
+-	gx_mesh_begin(m, GX_QUAD_STRIP);
+-	for (i = 0; i < teeth; i++) {
+-		a = i * 2.0 * M_PI / teeth;
+-		gx_mesh_vertex(m, r1 * cos(a), r1 * sin(a), width * 0.5);
+-		gx_mesh_vertex(m, r1 * cos(a), r1 * sin(a), -width * 0.5);
+-		u = r2 * cos(a + da) - r1 * cos(a);
+-		v = r2 * sin(a + da) - r1 * sin(a);
+-		len = sqrt(u * u + v * v);
+-		gx_mesh_normal(m, v / len, -u / len, 0.0);
+-		gx_mesh_vertex(m, r2 * cos(a + da), r2 * sin(a + da), width * 0.5);
+-		gx_mesh_vertex(m, r2 * cos(a + da), r2 * sin(a + da), -width * 0.5);
+-		gx_mesh_normal(m, cos(a), sin(a), 0.0);
+-		gx_mesh_vertex(m, r2 * cos(a + 2 * da), r2 * sin(a + 2 * da), width * 0.5);
+-		gx_mesh_vertex(m, r2 * cos(a + 2 * da), r2 * sin(a + 2 * da), -width * 0.5);
+-		u = r1 * cos(a + 3 * da) - r2 * cos(a + 2 * da);
+-		v = r1 * sin(a + 3 * da) - r2 * sin(a + 2 * da);
+-		len = sqrt(u * u + v * v);
+-		gx_mesh_normal(m, v / len, -u / len, 0.0);
+-		gx_mesh_vertex(m, r1 * cos(a + 3 * da), r1 * sin(a + 3 * da), width * 0.5);
+-		gx_mesh_vertex(m, r1 * cos(a + 3 * da), r1 * sin(a + 3 * da), -width * 0.5);
+-		gx_mesh_normal(m, cos(a), sin(a), 0.0);
+-	}
+-	gx_mesh_vertex(m, r1, 0.0, width * 0.5);
+-	gx_mesh_vertex(m, r1, 0.0, -width * 0.5);
+-	gx_mesh_end(m);
+-	gx_mesh_begin(m, GX_QUAD_STRIP);
+-	for (i = 0; i <= teeth; i++) {
+-		a = i * 2.0 * M_PI / teeth;
+-		gx_mesh_normal(m, -cos(a), -sin(a), 0.0);
+-		gx_mesh_vertex(m, r0 * cos(a), r0 * sin(a), -width * 0.5);
+-		gx_mesh_vertex(m, r0 * cos(a), r0 * sin(a), width * 0.5);
+-	}
+-	gx_mesh_end(m);
+-}
++#include "dsgx_demo.h"
+ 
+ static long usec(void)
+ {
+@@ -75,8 +25,10 @@ int main(int argc, char **argv)
+ 	struct fb_fix_screeninfo fix;
+ 	struct termios old, raw;
+ 	unsigned char *mem;
+-	static struct gx_mesh g[3];
+-	int tty, i, tri = (argc > 1 && !strcmp(argv[1], "tri"));
++	static struct gx_mesh g[3], cubem;
++	static unsigned short bricks[BRICK_SIZE * BRICK_SIZE];
++	int tty, i, tri = (argc > 1 && !strcmp(argv[1], "tri")),
++	    cubemode = (argc > 1 && !strcmp(argv[1], "cube"));
+ 	long frames = 0, t0, t1;
+ 	double angle = 0.0;
+ 	char c;
+@@ -101,12 +53,16 @@ int main(int argc, char **argv)
+ 	raw.c_cc[VTIME] = 0;
+ 	tcsetattr(0, TCSANOW, &raw);
+ 
+-	if (!tri) {
++	if (cubemode) {
++		cube(&cubem);
++		make_bricks(bricks);
++		gx_texture_load(0, bricks, sizeof(bricks));
++	} else if (!tri) {
+ 		gear(&g[0], 1.0, 4.0, 1.0, 20, 0.7);
+ 		gear(&g[1], 0.5, 2.0, 2.0, 10, 0.7);
+ 		gear(&g[2], 1.3, 2.0, 0.5, 10, 0.7);
+ 	}
+-	gx_control(GX_CTRL_AA);
++	gx_control(GX_CTRL_AA | GX_CTRL_TEXTURE);
+ 	gx_viewport(0, 0, 255, 191);
+ 	gx_mode(GX_PROJECTION);
+ 	gx_identity();
+@@ -121,7 +77,19 @@ int main(int argc, char **argv)
+ 		gx_vsync();
+ 		gx_mode(GX_MODELVIEW);
+ 		gx_identity();
+-		if (tri) {
++		if (cubemode) {
++			gx_light(0, 31, 31, 31, -5.0, -5.0, -10.0);
++			gx_polyattr(1, GX_CULL_NONE, 31);
++			gx_translate(0.0, 0.0, -45.0);
++			gx_rotate('x', 20.0);
++			gx_rotate('y', angle);
++			gx_rotate('x', angle * 0.7);
++			gx_scale(5.0, 5.0, 5.0);
++			gx_texture(0, BRICK_SIZE, BRICK_SIZE, GX_TEX_REPEAT);
++			gx_material(GX_RGB(31, 31, 31), GX_RGB(9, 9, 9));
++			gx_mesh_draw(&cubem);
++		} else if (tri) {
++			gx_cmd(GXR_TEXIMAGE, 0);
+ 			gx_polyattr(0, GX_CULL_NONE, 31);
+ 			gx_translate(0.0, 0.0, -3.0);
+ 			gx_rotate('z', angle);
+@@ -131,6 +99,7 @@ int main(int argc, char **argv)
+ 			gx_color(0, 0, 31); gx_vertex(0.0, 1.0, 0.0);
+ 			gx_end();
+ 		} else {
++			gx_cmd(GXR_TEXIMAGE, 0);
+ 			gx_light(0, 31, 31, 31, -5.0, -5.0, -10.0);
+ 			gx_polyattr(1, GX_CULL_NONE, 31);
+ 			gx_translate(0.0, 0.0, -45.0);
+@@ -155,6 +124,6 @@ int main(int argc, char **argv)
+ 	if (tty >= 0)
+ 		ioctl(tty, KDSETMODE, KD_TEXT);
+ 	printf("dsgx %s: %ld frames in %.2f s = %.1f frames per second (waiting for each screen refresh)\n",
+-	       tri ? "triangle" : "gears", frames, (t1 - t0) / 1e6, frames * 1e6 / (double)(t1 - t0));
++	       tri ? "triangle" : cubemode ? "cube" : "gears", frames, (t1 - t0) / 1e6, frames * 1e6 / (double)(t1 - t0));
+ 	return 0;
+ }
+diff --git a/user/microwin/src/demos/nanox/dsgx.h b/user/microwin/src/demos/nanox/dsgx.h
+index be8fb1f3c..bca6d4b20 100644
+--- a/user/microwin/src/demos/nanox/dsgx.h
++++ b/user/microwin/src/demos/nanox/dsgx.h
+@@ -15,6 +15,14 @@
+  *               gx_swap(); gx_flush();
+  *   gx_close();
+  *
++ * Textures (RGB555 pictures in the engine's 128 KB texture memory):
++ *   gx_texture_load(0, pixels, w * h * 2);      once: bit 15 of each 16 bit pixel must be set (opaque)
++ *   gx_control(GX_CTRL_AA | GX_CTRL_TEXTURE);
++ *   per frame: gx_texture(0, w, h, GX_TEX_REPEAT);  gx_polyattr(...);  then  gx_texcoord(s, t) before each
++ *   gx_vertex(), s and t in texels (0..w, 0..h; more repeats the picture). Lit polygons multiply the picture with
++ *   the light; use a white material (GX_RGB(31,31,31)) for the picture's own colours.
++ *   Meshes: gx_mesh_texcoord(m, s, t) before gx_mesh_vertex().
++ *
+  * Number formats: angles in degrees, coordinates in world units (a vertex must lie within +-8, matrices are
+  * unrestricted), colours as 5 bit components (0..31).
+  */
+@@ -37,6 +45,7 @@
+ #define GX_IOC_SETUP	0x4e05
+ #define GX_IOC_SUBMIT	0x4e06
+ #define GX_IOC_VSYNC	0x4e07
++#define GX_IOC_TEXLOAD	0x4e08
+ 
+ /* engine registers, offsets from 0x04000000 */
+ #define GXR_CONTROL	0x060
+@@ -75,6 +84,9 @@
+ #define GX_QUAD_STRIP	3
+ #define GX_CTRL_TEXTURE	0x01		/* texture mapping on */
+ #define GX_CTRL_AA	0x10		/* smooth polygon edges */
++#define GX_TEX_REPEAT	0x30000		/* gx_texture() flags: repeat s and t (else clamp) */
++#define GX_TEX_FLIP	0xc0000		/* repeat mirrored */
++#define GX_TEX_BYTES	0x20000		/* the texture memory */
+ #define GX_CULL_BACK	2		/* draw front faces only (counter clockwise is front) */
+ #define GX_CULL_FRONT	1
+ #define GX_CULL_NONE	3
+@@ -248,6 +260,55 @@ static void gx_polyattr(int lights, int cull, int alpha)
+ 	gx_cmd(GXR_POLYATTR, (lights & 15) | (cull << 6) | (alpha << 16));
+ }
+ 
++/* ---- textures ---- */
++struct gx_texload {
++	unsigned long data;
++	unsigned int bytes, offset;
++};
++
++/* copy a picture (16 bit pixels, bit 15 set, rows of width pixels) to the texture memory at byte offset
++ * (multiple of 8). Returns 0 or -1. */
++static int gx_texture_load(unsigned int offset, const void *pixels, unsigned int bytes)
++{
++	struct gx_texload t;
++
++	gx_flush();			/* the engine must be idle of earlier texture use: queued words go first */
++	t.data = (unsigned long)pixels;
++	t.bytes = bytes;
++	t.offset = offset;
++	if (ioctl(gx_fb, GX_IOC_TEXLOAD, &t) < 0) {
++		perror("dsgx: texture load");
++		return -1;
++	}
++	return 0;
++}
++
++static int gx_tex_log2(int n)		/* 8 -> 0, 16 -> 1 ... 1024 -> 7 */
++{
++	int l = 0;
++
++	while ((8 << l) < n && l < 7)
++		l++;
++	return l;
++}
++
++/* use the picture at byte offset of the texture memory, w and h in pixels (powers of two, 8..1024); flags:
++ * GX_TEX_REPEAT, GX_TEX_FLIP or 0 */
++static void gx_texture(unsigned int offset, int w, int h, unsigned int flags)
++{
++	gx_cmd(GXR_TEXIMAGE, (offset >> 3) | flags | (gx_tex_log2(w) << 20) | (gx_tex_log2(h) << 23) | (7u << 26));
++}
++
++static int gx_t16(double v)		/* texels as 12.4 fixed point */
++{
++	return (int)(v * 16.0 + (v < 0 ? -0.5 : 0.5));
++}
++
++static void gx_texcoord(double s, double t)
++{
++	gx_cmd(GXR_TEXCOORD, (gx_t16(s) & 0xffff) | ((unsigned int)gx_t16(t) << 16));
++}
++
+ /* ---- primitives ---- */
+ static void gx_begin(int type)	{ gx_cmd(GXR_BEGIN, type); }
+ static void gx_end(void)	{ gx_cmd(GXR_END, 0); }
+@@ -265,7 +326,7 @@ static void gx_swap(void)	{ gx_cmd(GXR_SWAP, 0); }
+ 
+ /* ---- recorded meshes: build once (slow maths allowed), draw every frame (just words) ---- */
+ struct gx_vtx {
+-	unsigned int xy, z, normal;
++	unsigned int xy, z, normal, uv;
+ };
+ struct gx_strip {
+ 	int type, first, count;
+@@ -276,6 +337,8 @@ struct gx_mesh {
+ 	struct gx_strip s[16];
+ 	int ns;
+ 	unsigned int normal;		/* normal in effect for the next vertex */
++	unsigned int uv;		/* texture coordinate in effect */
++	int textured;
+ };
+ 
+ static void gx_mesh_init(struct gx_mesh *m, int cap)
+@@ -290,6 +353,12 @@ static void gx_mesh_normal(struct gx_mesh *m, double x, double y, double z)
+ 	m->normal = gx_pack_dir(x, y, z);
+ }
+ 
++static void gx_mesh_texcoord(struct gx_mesh *m, double s, double t)
++{
++	m->uv = (gx_t16(s) & 0xffff) | ((unsigned int)gx_t16(t) << 16);
++	m->textured = 1;
++}
++
+ static void gx_mesh_begin(struct gx_mesh *m, int type)
+ {
+ 	if (m->ns >= 16)
+@@ -309,6 +378,7 @@ static void gx_mesh_vertex(struct gx_mesh *m, double x, double y, double z)
+ 	v->xy = (gx_f12(x) & 0xffff) | ((unsigned int)gx_f12(y) << 16);
+ 	v->z = gx_f12(z) & 0xffff;
+ 	v->normal = m->normal;
++	v->uv = m->uv;
+ 	m->s[m->ns].count++;
+ }
+ 
+@@ -331,6 +401,8 @@ static void gx_mesh_draw(const struct gx_mesh *m)
+ 				gx_cmd(GXR_NORMAL, m->v[j].normal);
+ 				last = m->v[j].normal;
+ 			}
++			if (m->textured)
++				gx_cmd(GXR_TEXCOORD, m->v[j].uv);
+ 			gx_cmd(GXR_VTX16, m->v[j].xy);
+ 			gx_cmd(GXR_VTX16, m->v[j].z);
+ 		}
+diff --git a/user/microwin/src/demos/nanox/dsgx_demo.h b/user/microwin/src/demos/nanox/dsgx_demo.h
+new file mode 100644
+index 000000000..783f9168b
+--- /dev/null
++++ b/user/microwin/src/demos/nanox/dsgx_demo.h
+@@ -0,0 +1,127 @@
++/*
++ * dsgx_demo.h - the scenes shared by the 3D demos dsgl3d (desktop window) and dsgx (text screen), built on dsgx.h:
++ * the three gears of the OpenGL "gears" demo and a textured cube with a procedural brick picture.
++ */
++#ifndef DSGX_DEMO_H
++#define DSGX_DEMO_H
++
++#include "dsgx.h"
++
++static void gear(struct gx_mesh *m, double inner_radius, double outer_radius, double width, int teeth,
++		 double tooth_depth)
++{
++	int i;
++	double r0, r1, r2, angle, da, u, v, len;
++
++	gx_mesh_init(m, 400);
++	r0 = inner_radius;
++	r1 = outer_radius - tooth_depth / 2.0;
++	r2 = outer_radius + tooth_depth / 2.0;
++	da = 2.0 * M_PI / teeth / 4.0;
++
++	gx_mesh_normal(m, 0.0, 0.0, 1.0);
++	gx_mesh_begin(m, GX_QUAD_STRIP);		/* front face */
++	for (i = 0; i <= teeth; i++) {
++		angle = i * 2.0 * M_PI / teeth;
++		gx_mesh_vertex(m, r0 * cos(angle), r0 * sin(angle), width * 0.5);
++		gx_mesh_vertex(m, r1 * cos(angle), r1 * sin(angle), width * 0.5);
++		gx_mesh_vertex(m, r0 * cos(angle), r0 * sin(angle), width * 0.5);
++		gx_mesh_vertex(m, r1 * cos(angle + 3 * da), r1 * sin(angle + 3 * da), width * 0.5);
++	}
++	gx_mesh_end(m);
++
++	gx_mesh_begin(m, GX_QUAD_STRIP);		/* outward faces of the teeth */
++	for (i = 0; i < teeth; i++) {
++		angle = i * 2.0 * M_PI / teeth;
++
++		gx_mesh_vertex(m, r1 * cos(angle), r1 * sin(angle), width * 0.5);
++		gx_mesh_vertex(m, r1 * cos(angle), r1 * sin(angle), -width * 0.5);
++		u = r2 * cos(angle + da) - r1 * cos(angle);
++		v = r2 * sin(angle + da) - r1 * sin(angle);
++		len = sqrt(u * u + v * v);
++		u /= len;
++		v /= len;
++		gx_mesh_normal(m, v, -u, 0.0);
++		gx_mesh_vertex(m, r2 * cos(angle + da), r2 * sin(angle + da), width * 0.5);
++		gx_mesh_vertex(m, r2 * cos(angle + da), r2 * sin(angle + da), -width * 0.5);
++		gx_mesh_normal(m, cos(angle), sin(angle), 0.0);
++		gx_mesh_vertex(m, r2 * cos(angle + 2 * da), r2 * sin(angle + 2 * da), width * 0.5);
++		gx_mesh_vertex(m, r2 * cos(angle + 2 * da), r2 * sin(angle + 2 * da), -width * 0.5);
++		u = r1 * cos(angle + 3 * da) - r2 * cos(angle + 2 * da);
++		v = r1 * sin(angle + 3 * da) - r2 * sin(angle + 2 * da);
++		gx_mesh_normal(m, v, -u, 0.0);
++		gx_mesh_vertex(m, r1 * cos(angle + 3 * da), r1 * sin(angle + 3 * da), width * 0.5);
++		gx_mesh_vertex(m, r1 * cos(angle + 3 * da), r1 * sin(angle + 3 * da), -width * 0.5);
++		gx_mesh_normal(m, cos(angle), sin(angle), 0.0);
++	}
++	gx_mesh_vertex(m, r1 * cos(0), r1 * sin(0), width * 0.5);
++	gx_mesh_vertex(m, r1 * cos(0), r1 * sin(0), -width * 0.5);
++	gx_mesh_end(m);
++
++	gx_mesh_begin(m, GX_QUAD_STRIP);		/* inside radius cylinder */
++	for (i = 0; i <= teeth; i++) {
++		angle = i * 2.0 * M_PI / teeth;
++		gx_mesh_normal(m, -cos(angle), -sin(angle), 0.0);
++		gx_mesh_vertex(m, r0 * cos(angle), r0 * sin(angle), -width * 0.5);
++		gx_mesh_vertex(m, r0 * cos(angle), r0 * sin(angle), width * 0.5);
++	}
++	gx_mesh_end(m);
++}
++
++#define BRICK_SIZE 64
++
++/* a 64x64 brick wall in RGB555 (bit 15 set: opaque); offset 0 of the texture memory */
++static void make_bricks(unsigned short *px)
++{
++	int x, y;
++
++	for (y = 0; y < BRICK_SIZE; y++) {
++		int row = y / 16, yy = y % 16;
++		int off = (row & 1) ? 16 : 0;
++
++		for (x = 0; x < BRICK_SIZE; x++) {
++			int xx = (x + off) % 32, r, g, b, n;
++
++			n = ((x * 7 + y * 13 + row * 5) % 5);	/* a little grain */
++			if (yy < 2 || xx < 2) {			/* mortar */
++				r = 20; g = 20; b = 18;
++			} else {
++				r = 22 + n - ((x / 32 + row) & 1) * 3;
++				g = 7 + n / 2;
++				b = 4;
++			}
++			if (y == 0 || x == 0 || y == BRICK_SIZE - 1 || x == BRICK_SIZE - 1)
++				r = g = b = 4;		/* dark frame so the cube's edges stand out */
++			px[y * BRICK_SIZE + x] = 0x8000 | GX_RGB(r, g, b);
++		}
++	}
++}
++
++/* a cube of side 2 centred on the origin, outward faces counter clockwise, the brick picture 2 x 2 times on each face */
++static void cube(struct gx_mesh *m)
++{
++	static const float f[6][4][3] = {
++		{{-1,-1, 1},{ 1,-1, 1},{ 1, 1, 1},{-1, 1, 1}},
++		{{ 1,-1,-1},{-1,-1,-1},{-1, 1,-1},{ 1, 1,-1}},
++		{{ 1,-1, 1},{ 1,-1,-1},{ 1, 1,-1},{ 1, 1, 1}},
++		{{-1,-1,-1},{-1,-1, 1},{-1, 1, 1},{-1, 1,-1}},
++		{{-1, 1, 1},{ 1, 1, 1},{ 1, 1,-1},{-1, 1,-1}},
++		{{-1,-1,-1},{ 1,-1,-1},{ 1,-1, 1},{-1,-1, 1}}
++	};
++	static const float n[6][3] = { {0,0,1},{0,0,-1},{1,0,0},{-1,0,0},{0,1,0},{0,-1,0} };
++	static const int uv[4][2] = { {0, 2 * BRICK_SIZE}, {2 * BRICK_SIZE, 2 * BRICK_SIZE}, {2 * BRICK_SIZE, 0}, {0, 0} };
++	int i, j;
++
++	gx_mesh_init(m, 24);
++	gx_mesh_begin(m, GX_QUADS);
++	for (i = 0; i < 6; i++) {
++		gx_mesh_normal(m, n[i][0], n[i][1], n[i][2]);
++		for (j = 0; j < 4; j++) {
++			gx_mesh_texcoord(m, uv[j][0], uv[j][1]);
++			gx_mesh_vertex(m, f[i][j][0], f[i][j][1], f[i][j][2]);
++		}
++	}
++	gx_mesh_end(m);
++}
++
++#endif
+diff --git a/user/microwin/src/demos/nanox/nxterm.c b/user/microwin/src/demos/nanox/nxterm.c
+index 33454f7d3..3bee78adb 100644
+--- a/user/microwin/src/demos/nanox/nxterm.c
++++ b/user/microwin/src/demos/nanox/nxterm.c
+@@ -726,9 +726,25 @@ term(void)
+ 
+ 		case GR_EVENT_TYPE_KEY_DOWN:
+ 			kp=(GR_EVENT_KEYSTROKE *)&wevent;
+-			/* toss all special keys*/
+-			if (kp->ch & MWKEY_NONASCII_MASK)
++			/* special keys: the arrows, home/end, page and delete go to the shell as escape sequences */
++			if (kp->ch & MWKEY_NONASCII_MASK) {
++				const char *seq = NULL;
++
++				switch (kp->ch) {
++				case MWKEY_UP: seq = "\033[A"; break;
++				case MWKEY_DOWN: seq = "\033[B"; break;
++				case MWKEY_RIGHT: seq = "\033[C"; break;
++				case MWKEY_LEFT: seq = "\033[D"; break;
++				case MWKEY_HOME: seq = "\033[H"; break;
++				case MWKEY_END: seq = "\033[F"; break;
++				case MWKEY_DELETE: seq = "\033[3~"; break;
++				case MWKEY_PAGEUP: seq = "\033[5~"; break;
++				case MWKEY_PAGEDOWN: seq = "\033[6~"; break;
++				}
++				if (seq)
++					write(pipeh, seq, strlen(seq));
+ 				break;
++			}
+ 			*buf = kp->ch & 0xff;
+ 			write(pipeh, buf,1);
+ 			break;
+diff --git a/user/microwin/src/drivers/kbd_tty.c b/user/microwin/src/drivers/kbd_tty.c
+index bb15d8930..68d9e2860 100644
+--- a/user/microwin/src/drivers/kbd_tty.c
++++ b/user/microwin/src/drivers/kbd_tty.c
+@@ -126,6 +126,41 @@ TTY_Read(MWKEY *kbuf, MWKEYMOD *modifiers, MWSCANCODE *scancode)
+ 	cc = read(fd, buf, 1);
+ 	if (cc > 0) {
+ 		mwkey = buf[0];
++#if NDSDRIVER
++		/* the console sends arrow, home/end and page keys as ESC [ A and so on, all bytes together: turn them
++		 * into the Nano-X keys. A lone ESC (nothing follows at once) stays ESC. */
++		if (mwkey == 27) {
++			unsigned char s1, s2;
++
++			if (read(fd, &s1, 1) == 1 && (s1 == '[' || s1 == 'O') && read(fd, &s2, 1) == 1) {
++				MWKEY k = 0;
++
++				switch (s2) {
++				case 'A': k = MWKEY_UP; break;
++				case 'B': k = MWKEY_DOWN; break;
++				case 'C': k = MWKEY_RIGHT; break;
++				case 'D': k = MWKEY_LEFT; break;
++				case 'H': k = MWKEY_HOME; break;
++				case 'F': k = MWKEY_END; break;
++				case '1': case '2': case '3': case '4': case '5': case '6': {
++					unsigned char s3;
++
++					if (read(fd, &s3, 1) == 1 && s3 == '~')
++						k = s2 == '1' ? MWKEY_HOME : s2 == '2' ? MWKEY_INSERT :
++						    s2 == '3' ? MWKEY_DELETE : s2 == '4' ? MWKEY_END :
++						    s2 == '5' ? MWKEY_PAGEUP : MWKEY_PAGEDOWN;
++					break;
++				}
++				}
++				if (k) {
++					*kbuf = k;
++					*modifiers = 0;
++					*scancode = 0;
++					return 1;
++				}
++			}
++		}
++#endif
+ 		if (mwkey == 27 && escape_quits)	/* ESC -> quit*/
+ 			mwkey = MWKEY_QUIT;
+ 		else if (mwkey == ('P'&0x1f))		/* ^P -> print*/
+diff --git a/vendors/Nintendo/DSI/gl b/vendors/Nintendo/DSI/gl
+index 76680146d..0dc2de30a 100644
+--- a/vendors/Nintendo/DSI/gl
++++ b/vendors/Nintendo/DSI/gl
+@@ -2,15 +2,16 @@
+ # 3D speed test on the text screen: TinySDGL's "gears" (a software OpenGL, no 3D hardware used).
+ # The desktop owns the screen: stop it first (Start menu > Exit desktop, or /boot/desktop stop).
+ # It prints frames per second every few seconds. Esc or q ends it, the arrow keys turn the gears.
+-# /boot/gl hw: the same gears on the DS hardware 3D engine; /boot/gl tri: one coloured triangle (smallest test).
++# /boot/gl hw: the same gears on the DS hardware 3D engine; /boot/gl tri: one coloured triangle (smallest test);
++# /boot/gl cube: a lit brick-textured cube (the 3D engine's texture memory).
+ # /boot/gl profile: a 15 second profiling run (dsgears) that prints a table of where the time of a frame goes.
+ if [ -n "`pidof nano-X`" ]; then
+ 	echo "gl: stop the desktop first (Start menu > Exit desktop)"
+ 	exit 1
+ fi
+-if [ "$1" = "hw" ] || [ "$1" = "tri" ]; then
++if [ "$1" = "hw" ] || [ "$1" = "tri" ] || [ "$1" = "cube" ]; then
+ 	echo "dsgx: the DS's hardware 3D engine. Esc or q to quit"
+-	if [ "$1" = "tri" ]; then /boot/dsgx tri; else /boot/dsgx; fi
++	if [ "$1" = "tri" ] || [ "$1" = "cube" ]; then /boot/dsgx $1; else /boot/dsgx; fi
+ elif [ "$1" = "profile" ]; then
+ 	echo "dsgears: 5 tests of 3 s, then a table of where a frame's time goes"
+ 	/boot/dsgears
+-- 
+2.56.0
+
