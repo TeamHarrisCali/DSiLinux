@@ -1,0 +1,112 @@
+From 669a5f69b884f8b16c1231ec84a7ec5a5e1121f8 Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 07:54:16 -0600
+Subject: [PATCH] Fix savelog for the target shell (msh: no redirected { }
+ groups): the log text comes from /boot/logbody run as a child, compared with
+ cmp; the previous version wrote nothing to the card
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ vendors/Nintendo/DSI/Makefile |  1 +
+ vendors/Nintendo/DSI/logbody  | 21 +++++++++++++++++++
+ vendors/Nintendo/DSI/savelog  | 38 ++++++++++-------------------------
+ 3 files changed, 33 insertions(+), 27 deletions(-)
+ create mode 100644 vendors/Nintendo/DSI/logbody
+
+diff --git a/vendors/Nintendo/DSI/Makefile b/vendors/Nintendo/DSI/Makefile
+index 46ef26ad3..a78858242 100644
+--- a/vendors/Nintendo/DSI/Makefile
++++ b/vendors/Nintendo/DSI/Makefile
+@@ -108,6 +108,7 @@ romfs:
+ 	$(ROMFSINST) /boot/rc.fat
+ 	$(ROMFSINST) -p +x /boot/savelog
+ 	$(ROMFSINST) -p +x /boot/autolog
++	$(ROMFSINST) -p +x /boot/logbody
+ 	$(ROMFSINST) -p +x /boot/desktop
+ 	$(ROMFSINST) -p +x /boot/desktop-apps
+ 	$(ROMFSINST) -p +x /boot/shutdown
+diff --git a/vendors/Nintendo/DSI/logbody b/vendors/Nintendo/DSI/logbody
+new file mode 100644
+index 000000000..1c8279389
+--- /dev/null
++++ b/vendors/Nintendo/DSI/logbody
+@@ -0,0 +1,21 @@
++#!/bin/sh
++# The text of the log (run by /boot/savelog; plain commands only, the target shell is msh). Prints to standard output.
++echo "--- dmesg ---"
++dmesg
++echo "--- rc.common.log ---"
++[ -f /tmp/rc.common.log ] && /usr/bin/cat /tmp/rc.common.log
++echo "--- ramcopy.log ---"
++[ -f /tmp/ramcopy.log ] && /usr/bin/cat /tmp/ramcopy.log
++echo "--- desktop.log ---"
++[ -f /tmp/desktop.log ] && /usr/bin/cat /tmp/desktop.log
++echo "--- /proc/dsimic (microphone counters) ---"
++/usr/bin/cat /proc/dsimic 2>&1
++echo "--- /proc/dsivolume ---"
++/usr/bin/cat /proc/dsivolume 2>&1
++echo "--- /proc/meminfo ---"
++/usr/bin/cat /proc/meminfo 2>&1
++echo "--- /home/memos ---"
++ls -l /home/memos 2>&1
++echo "--- /home/photos ---"
++ls -l /home/photos 2>&1
++echo "--- end ---"
+diff --git a/vendors/Nintendo/DSI/savelog b/vendors/Nintendo/DSI/savelog
+index 4b190bad6..a8580baf7 100644
+--- a/vendors/Nintendo/DSI/savelog
++++ b/vendors/Nintendo/DSI/savelog
+@@ -3,39 +3,23 @@
+ # write on the SD card (the ARM7 refuses every other write). Read it on a PC.
+ #   /boot/savelog          save now (the Start menu's Save log, and once at boot)
+ #   /boot/savelog quiet    save only if something changed, print nothing (used by /boot/autolog)
++# The target shell is msh: plain commands only (no { } groups with redirection, no $( )).
+ Q=0
+ [ "$1" = quiet ] && Q=1
+-[ -c /dev/dsilog ] || { [ $Q = 1 ] || echo "savelog: no /dev/dsilog"; exit 0; }
++if [ ! -c /dev/dsilog ]
++then
++	[ $Q = 1 ] || echo "savelog: no /dev/dsilog"
++	exit 0
++fi
+ B=/tmp/bootlog.body
+ L=/tmp/bootlog.txt
+-{
+-echo "--- dmesg ---"
+-dmesg
+-echo "--- rc.common.log ---"
+-[ -f /tmp/rc.common.log ] && /usr/bin/cat /tmp/rc.common.log
+-echo "--- ramcopy.log ---"
+-[ -f /tmp/ramcopy.log ] && /usr/bin/cat /tmp/ramcopy.log
+-echo "--- desktop.log ---"
+-[ -f /tmp/desktop.log ] && /usr/bin/cat /tmp/desktop.log
+-echo "--- /proc/dsimic (microphone counters) ---"
+-/usr/bin/cat /proc/dsimic 2>&1
+-echo "--- /proc/dsivolume ---"
+-/usr/bin/cat /proc/dsivolume 2>&1
+-echo "--- /proc/meminfo ---"
+-/usr/bin/cat /proc/meminfo 2>&1
+-echo "--- /home/memos ---"
+-ls -l /home/memos 2>&1
+-echo "--- /home/photos ---"
+-ls -l /home/photos 2>&1
+-echo "--- end ---"
+-} > $B 2>&1
+-if [ $Q = 1 ] && [ "`/usr/bin/cat $B`" = "`/usr/bin/cat $B.prev 2>/dev/null`" ]; then
++/bin/sh /boot/logbody > $B 2>&1
++if [ $Q = 1 ] && [ -f $B.prev ] && /usr/bin/cmp -s $B $B.prev
++then
+ 	exit 0
+ fi
+-{
+-echo "=== DSLinuxDSi log, saved at uptime `/usr/bin/cat /proc/uptime 2>/dev/null` ==="
+-/usr/bin/cat $B
+-} > $L
++echo "=== DSLinuxDSi log, uptime `/usr/bin/cat /proc/uptime` ===" > $L
++/usr/bin/cat $B >> $L
+ if /usr/bin/cat $L > /dev/dsilog
+ then
+ 	/usr/bin/cat $B > $B.prev
+-- 
+2.56.0
+
