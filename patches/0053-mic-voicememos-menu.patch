@@ -1,0 +1,1438 @@
+From 8f62f0ea849eead1b62086525f4d39d6cd4df193 Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 07:11:45 -0600
+Subject: [PATCH] Microphone in DSi mode (codec ADC + MICCNT FIFO sampled by
+ the timer interrupt, 1 KB capture periods, cache flush), dsmemo voice memos
+ with live scope and level meter for recording and playback, cascading Start
+ menu groups (Accessories, Multimedia, Games, System), taskbar tray with
+ volume percent, tidier window buttons; Minesweeper/Tetris shipped in /boot
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ linux-2.6.x/arch/arm/mach-nds/arm7/dsitouch.c |   5 +
+ linux-2.6.x/arch/arm/mach-nds/arm7/dsitouch.h |   1 +
+ .../arch/arm/mach-nds/arm7/microphone.c       |  94 ++-
+ linux-2.6.x/sound/arm/nds-sound.c             |   5 +-
+ user/microwin/Makefile                        |   1 +
+ user/microwin/src/demos/nanox/Makefile        |   9 +-
+ user/microwin/src/demos/nanox/dsdesk.c        | 302 +++++---
+ user/microwin/src/demos/nanox/dsmemo.c        | 687 ++++++++++++++++++
+ vendors/Nintendo/DSI/Makefile                 |   3 +
+ 9 files changed, 1013 insertions(+), 94 deletions(-)
+ create mode 100644 user/microwin/src/demos/nanox/dsmemo.c
+
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/dsitouch.c b/linux-2.6.x/arch/arm/mach-nds/arm7/dsitouch.c
+index 98f5351c6..dfeb69f25 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/arm7/dsitouch.c
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/dsitouch.c
+@@ -128,6 +128,11 @@ void dsitouch_cdc_write(u8 bank, u8 reg, u8 value)
+ 	cdc_write(bank, reg, value);
+ }
+ 
++u8 dsitouch_cdc_read(u8 bank, u8 reg)
++{
++	return cdc_read(bank, reg);
++}
++
+ /* diagnostics, fetched by the ARM9 (dsitouch_diag) */
+ static u32 st_probe, st_scfg, st_status, st_penreg, st_adc1, st_adc2;
+ static u32 st_pen_calls, st_pen_true, st_rd_ok, st_rd_bad, st_rd_noisy;
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/dsitouch.h b/linux-2.6.x/arch/arm/mach-nds/arm7/dsitouch.h
+index 008c04d48..baa55d898 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/arm7/dsitouch.h
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/dsitouch.h
+@@ -11,5 +11,6 @@ int dsitouch_pen_down(void);
+ int dsitouch_read_xy(s16 *rawx, s16 *rawy);
+ /* write a codec register (page = bank), used for the output volume */
+ void dsitouch_cdc_write(u8 bank, u8 reg, u8 value);
++u8 dsitouch_cdc_read(u8 bank, u8 reg);
+ 
+ #endif
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/microphone.c b/linux-2.6.x/arch/arm/mach-nds/arm7/microphone.c
+index efda625ed..6e09b11db 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/arm7/microphone.c
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/microphone.c
+@@ -4,6 +4,72 @@
+ #include "microphone.h"
+ #include "arm7.h"
+ #include "asm/arch/fifo.h"
++#include "dsitouch.h"
++
++/*
++ * DSi mode: the microphone is not on the DS touch chip's AUX input any more. It is the TSC2117 codec's ADC (switched on
++ * through codec registers) and the samples come out of a small FIFO (MICCNT/MICDATA at 0x04004600/04), as in BlocksDS
++ * libnds (source/arm7/microphone.twl.c, Copyright (C) 2017 fincs, zlib licence; this version is altered: no BIOS
++ * delay calls, FIFO drained by the timer interrupt instead of a one-sample-at-a-time restart). The timer interrupt
++ * stays the pace of the recording: each tick takes the newest sample the FIFO has (the FIFO runs at 32.7 kHz, more
++ * than any rate asked for).
++ */
++#define REG_MICCNT		(*(volatile u16 *)0x04004600)
++#define REG_MICDATA		(*(volatile u32 *)0x04004604)
++#define MICCNT_FORMAT_NORMAL	2
++#define MICCNT_EMPTY		(1 << 8)
++#define MICCNT_CLEAR_FIFO	(1 << 12)
++#define MICCNT_ENABLE		(1 << 15)
++
++#define CDC_CONTROL		0x00
++#define CDC_SOUND		0x01
++#define CDC_DAC_CTRL		0x3F
++#define CDC_ADC_MIC		0x51
++#define CDC_ADC_VOL_FINE	0x52
++#define CDC_MIC_BIAS		0x2E
++#define CDC_MIC_GAIN		0x2F
++#define DSI_MIC_GAIN		3	/* 0..3 = 15.5, 21.5, 27.5, 33.5 dB (libnds uses the highest) */
++
++static s16 dsi_last;
++
++static void dsi_spin(int n)
++{
++	while (n-- > 0)
++		asm volatile("" ::: "memory");
++}
++
++static void dsi_mic_amp(int on)
++{
++	static const u8 gaintbl[] = { 31, 43, 55, 67 };
++
++	if (on) {
++		int adc_on, dac_on;
++
++		dsitouch_cdc_write(CDC_SOUND, CDC_MIC_BIAS, 0x03);		/* ADC bias */
++		adc_on = dsitouch_cdc_read(CDC_CONTROL, CDC_ADC_MIC) & 0x80;
++		dac_on = dsitouch_cdc_read(CDC_CONTROL, CDC_DAC_CTRL) & 0xC0;
++		dsitouch_cdc_write(CDC_CONTROL, CDC_ADC_MIC, 0x80);		/* ADC on */
++		if (!adc_on || !dac_on)
++			dsi_spin(600000);					/* about 20 ms to settle */
++		dsitouch_cdc_write(CDC_CONTROL, CDC_ADC_VOL_FINE, 0x00);	/* unmute */
++		dsitouch_cdc_write(CDC_SOUND, CDC_MIC_GAIN, gaintbl[DSI_MIC_GAIN]);
++	} else {
++		dsitouch_cdc_write(CDC_CONTROL, CDC_ADC_VOL_FINE, 0x80);	/* mute */
++		dsitouch_cdc_write(CDC_CONTROL, CDC_ADC_MIC, 0x00);		/* ADC off */
++		dsitouch_cdc_write(CDC_SOUND, CDC_MIC_BIAS, 0x00);
++		REG_MICCNT &= ~MICCNT_ENABLE;
++	}
++}
++
++/* the newest sample in the FIFO (signed 16 bit), else the previous one */
++static s16 dsi_sample(void)
++{
++	int n = 64;
++
++	while (!(REG_MICCNT & MICCNT_EMPTY) && n--)
++		dsi_last = (s16)(REG_MICDATA & 0xffff);
++	return dsi_last;
++}
+ 
+ //same as SOUND_FREQ(n)
+ #define MIC_FREQ(n)		(0 - (0x1000000 / (n)))
+@@ -21,7 +87,10 @@ static u32 period_size = 0; //number of bytes to read before signaling arm9
+  ********************/
+ void mic_on()
+ {
+-	mic_on_off(1); // or power_write(POWER_MIC_CONTROL, 1);
++	if (dsitouch_active())
++		dsi_mic_amp(1);
++	else
++		mic_on_off(1); // or power_write(POWER_MIC_CONTROL, 1);
+ }
+ 
+ /********************
+@@ -29,7 +98,10 @@ void mic_on()
+  ********************/
+ void mic_off()
+ {
+-	mic_on_off(0); // or power_write(POWER_MIC_CONTROL, 0);
++	if (dsitouch_active())
++		dsi_mic_amp(0);
++	else
++		mic_on_off(0); // or power_write(POWER_MIC_CONTROL, 0);
+ }
+ 
+ /********************
+@@ -39,12 +111,14 @@ void mic_set_power(u8 power) {
+ 	if (power == 0) 
+ 	{
+ 		mic_off();
+-		power_write(POWER_MIC_GAIN, 0);
++		if (!dsitouch_active())
++			power_write(POWER_MIC_GAIN, 0);
+ 	}
+ 	else 
+ 	{
+ 		mic_on();
+-		power_write(POWER_MIC_GAIN, power - 1);
++		if (!dsitouch_active())
++			power_write(POWER_MIC_GAIN, power - 1);
+ 	}
+ }
+ 
+@@ -96,6 +170,12 @@ void mic_start()
+ {
+ 	// Setup timer3, since timer0 is used for wifi, 
+ 	// and timers 1 and 2 are for sound.
++	if (dsitouch_active()) {		/* DSi: FIFO on, 32.7 kHz, normal format, emptied */
++		REG_MICCNT &= ~MICCNT_ENABLE;
++		REG_MICCNT = MICCNT_CLEAR_FIFO | MICCNT_FORMAT_NORMAL;
++		REG_MICCNT |= MICCNT_ENABLE;
++		dsi_last = 0;
++	}
+ 	REG_TM3CNT_L = MIC_FREQ(mic_rate);
+ 	REG_TM3CNT_H = NDS_TCR_ENB | NDS_TCR_CLK | NDS_TCR_IRQ;
+ 	NDS_IE |= IRQ_TIMER3;
+@@ -108,6 +188,8 @@ int mic_stop(void)
+ {
+ 	//turn off the timer.
+ 	REG_TM3CNT_H &= ~NDS_TCR_ENB;
++	if (dsitouch_active())
++		REG_MICCNT &= ~MICCNT_ENABLE;
+ 	//disable the timer irq.
+ 	NDS_IE &= ~IRQ_TIMER3;
+ 	mic_buffer8 = 0;
+@@ -124,7 +206,7 @@ void mic_timer_handler(void)
+ 	{
+ 		if (mic_buffer8) 
+ 		{
+-			mic_buffer8[current_ptr] = mic_read8();
++			mic_buffer8[current_ptr] = dsitouch_active() ? (u8)((dsi_sample() >> 8) ^ 0x80) : mic_read8();
+ 			if (mic_format & MIC_FORMAT_SIGNED)
+ 				mic_buffer8[current_ptr] = mic_buffer8[current_ptr] ^ 0x80;
+ 			current_ptr++;
+@@ -134,7 +216,7 @@ void mic_timer_handler(void)
+ 	{
+ 		if (mic_buffer16)
+ 		{
+-			mic_buffer16[current_ptr/2] = mic_read12();
++			mic_buffer16[current_ptr/2] = dsitouch_active() ? (u16)(((u16)dsi_sample() ^ 0x8000) >> 4) : mic_read12();
+ 			if (mic_format & MIC_FORMAT_SIGNED)
+ 				mic_buffer16[current_ptr/2] = (mic_buffer16[current_ptr/2] - 2048) << 4;
+ 			current_ptr+=2;
+diff --git a/linux-2.6.x/sound/arm/nds-sound.c b/linux-2.6.x/sound/arm/nds-sound.c
+index 4fc6259e2..9a7213adf 100644
+--- a/linux-2.6.x/sound/arm/nds-sound.c
++++ b/linux-2.6.x/sound/arm/nds-sound.c
+@@ -14,6 +14,7 @@
+ #include <sound/initval.h>
+ #include <sound/pcm.h>
+ #include <asm/mach-types.h>
++#include <asm/cacheflush.h>
+ 
+ #include <asm/arch/fifo.h>
+ 
+@@ -87,7 +88,7 @@ static snd_pcm_hardware_t snd_nds_capture_hw = {
+ 	.channels_min = 1,
+ 	.channels_max = 1,
+ 	.buffer_bytes_max = DMA_BUFFERSIZE_CAPTURE,
+-	.period_bytes_min = DMA_BUFFERSIZE_CAPTURE/16,
++	.period_bytes_min = DMA_BUFFERSIZE_CAPTURE/64,		/* 1 KB: a recording program sees new data about every 60 ms */
+ 	.period_bytes_max = DMA_BUFFERSIZE_CAPTURE/8,
+ 	.periods_min = 1,
+ 	.periods_max = 1024,
+@@ -407,6 +408,8 @@ static int snd_nds_capture_copy(snd_pcm_substream_t *substream, int channel,
+ 		ccount = count * 2;
+ 		break;
+ 	}
++	/* the ARM7 wrote these bytes behind the ARM9 data cache */
++	dmac_flush_range((unsigned long)&capturebuf[cpos], (unsigned long)&capturebuf[cpos] + ccount);
+ 	memcpy(dst, &capturebuf[cpos], ccount);
+ 
+ 	return 0;
+diff --git a/user/microwin/Makefile b/user/microwin/Makefile
+index bd9d2b61c..8f325dde6 100644
+--- a/user/microwin/Makefile
++++ b/user/microwin/Makefile
+@@ -17,6 +17,7 @@ real_romfs:
+ 	$(ROMFSINST) /bin/dsgl3d
+ 	$(ROMFSINST) /bin/dsgx
+ 	$(ROMFSINST) /bin/dsplay
++	$(ROMFSINST) /bin/dsmemo
+ 	$(ROMFSINST) -e CONFIG_USER_MICROWIN_BIN_LANDMINE    /bin/landmine
+ 	$(ROMFSINST) -e CONFIG_USER_MICROWIN_BIN_LAUNCHER    /bin/launcher
+ 	$(ROMFSINST) -e CONFIG_USER_MICROWIN_BIN_MOVE        /bin/move
+diff --git a/user/microwin/src/demos/nanox/Makefile b/user/microwin/src/demos/nanox/Makefile
+index cef93ff75..2e6bcacfd 100644
+--- a/user/microwin/src/demos/nanox/Makefile
++++ b/user/microwin/src/demos/nanox/Makefile
+@@ -84,10 +84,11 @@ OBJS =	demo.o \
+ 	dsbench.o \
+ 	dsgl3d.o \
+ 	dsgx.o \
+-	dsplay.o
++	dsplay.o \
++	dsmemo.o
+ 
+ TARGETS = \
+-	$(TOP)/bin/dsdesk $(TOP)/bin/dsnotes $(TOP)/bin/dsfiles $(TOP)/bin/dsbench $(TOP)/bin/dsgl3d $(TOP)/bin/dsgx $(TOP)/bin/dsplay \
++	$(TOP)/bin/dsdesk $(TOP)/bin/dsnotes $(TOP)/bin/dsfiles $(TOP)/bin/dsbench $(TOP)/bin/dsgl3d $(TOP)/bin/dsgx $(TOP)/bin/dsplay $(TOP)/bin/dsmemo \
+ 	$(TOP)/bin/demo $(TOP)/bin/move $(TOP)/bin/landmine \
+ 	$(TOP)/bin/world $(TOP)/bin/nxclock \
+ 	$(TOP)/bin/nxlsclients $(TOP)/bin/nxev \
+@@ -186,6 +187,10 @@ $(TOP)/bin/dsfiles: dsfiles.o $(NANOXCLIENTLIBS) $(TOP)/config
+ 	@echo "Linking $@ ..."
+ 	$(CC) $(CFLAGS) $(LDFLAGS) $< -o $@ $(LD_NANOXCLIENTLIBS)
+ 
++$(TOP)/bin/dsmemo: dsmemo.o w95.h $(NANOXCLIENTLIBS) $(TOP)/config
++	@echo "Linking $@ ..."
++	$(CC) $(CFLAGS) $(LDFLAGS) dsmemo.o -o $@ $(LD_NANOXCLIENTLIBS)
++
+ $(TOP)/bin/dsplay: dsplay.o $(TOP)/config
+ 	@echo "Linking $@ ..."
+ 	$(CC) $(CFLAGS) $(LDFLAGS) dsplay.o -o $@ $(LIBM)
+diff --git a/user/microwin/src/demos/nanox/dsdesk.c b/user/microwin/src/demos/nanox/dsdesk.c
+index 8bc51af79..b04ef3feb 100644
+--- a/user/microwin/src/demos/nanox/dsdesk.c
++++ b/user/microwin/src/demos/nanox/dsdesk.c
+@@ -19,31 +19,63 @@
+ 
+ struct item {
+ 	const char *name;
+-	const char *prog;
++	const char *prog;	/* program to start, or NULL for a group */
+ 	const char *arg;
++	const struct item *sub;	/* the group's items */
++	int nsub;
++	int sep;		/* a separator line above this item */
+ };
+ 
+-static struct item items[] = {
+-	{ "Terminal", "/boot/nxterm", NULL },
+-	{ "Notes", "/boot/dsnotes", NULL },
+-	{ "Files", "/boot/dsfiles", NULL },
+-	{ "Clock", "/usr/bin/nxclock", NULL },
+-	{ "3D gears", "/boot/dsgl3d", NULL },
+-	{ "Sound test", "/boot/dsplay", NULL },
+-	{ "Bench", "/boot/dsbench", NULL },
+-	{ "Save log", "/boot/savelog", NULL },
+-	{ "Exit desktop", "/boot/desktop", "stop" },
+-	{ "Shut down", "/boot/shutdown", NULL },
++/* Start menu: groups open to the side while the pointer is on them */
++static const struct item accessories[] = {
++	{ "Notes", "/boot/dsnotes" },
++	{ "Clock", "/usr/bin/nxclock" },
++};
++static const struct item multimedia[] = {
++	{ "Voice memos", "/boot/dsmemo" },
++	{ "Sound test", "/boot/dsplay" },
++	{ "3D gears", "/boot/dsgl3d" },
++};
++static const struct item games[] = {
++	{ "Minesweeper", "/boot/landmine" },
++	{ "Tetris", "/boot/ntetris" },
++};
++static const struct item system_items[] = {
++	{ "Bench", "/boot/dsbench" },
++	{ "Save log", "/boot/savelog" },
++};
++#define COUNT(a)	((int)(sizeof(a) / sizeof((a)[0])))
++static const struct item root_items[] = {
++	{ "Terminal", "/boot/nxterm" },
++	{ "Files", "/boot/dsfiles" },
++	{ "Accessories", NULL, NULL, accessories, COUNT(accessories), 1 },
++	{ "Multimedia", NULL, NULL, multimedia, COUNT(multimedia) },
++	{ "Games", NULL, NULL, games, COUNT(games) },
++	{ "System", NULL, NULL, system_items, COUNT(system_items) },
++	{ "Exit desktop", "/boot/desktop", "stop", NULL, 0, 1 },
++	{ "Shut down", "/boot/shutdown" },
+ };
+-#define NITEMS	(sizeof(items) / sizeof(items[0]))
+ 
+ #define MENU_SECONDS	8	/* the menu closes itself after this long */
+ 
+-static GR_WINDOW_ID bar, menu;
++static GR_WINDOW_ID bar;
+ static GR_GC_ID gc;
+ static GR_SCREEN_INFO si;
+-static int th, barh, startw, itemh, menuw, menuh;
+-static int menu_open, hot = -1, start_down;
++static int th, barh, startw, itemh;
++static int menu_open, start_down;
++
++/* the open menu windows: level 0 is the Start menu, deeper levels are groups opened from the level before */
++#define MAXLVL	3
++struct level {
++	const struct item *list;
++	int n;
++	GR_WINDOW_ID win;
++	int x, y, w, h;
++	int hot;		/* highlighted item or -1 */
++	int ytop[8];		/* top of each item (n <= 8) */
++};
++static struct level lv[MAXLVL];
++static int nlv;
+ static time_t menu_since;
+ 
+ #define MAXTW	8
+@@ -72,7 +104,7 @@ static void refresh_windows(void)
+ 	GrGetWindowInfo(GR_ROOT_WINDOW_ID, &ri);
+ 	for (id = ri.child; id && ntw < MAXTW; id = ci.sibling) {
+ 		GrGetWindowInfo(id, &ci);
+-		if (id == bar || id == menu || !ci.child)
++		if (id == bar || !ci.child)
+ 			continue;
+ 		memset(&t, 0, sizeof(t));
+ 		t.box = id;
+@@ -137,6 +169,7 @@ static void launch(const char *prog, const char *arg)
+ #define VOLW	130
+ #define VOL_SECONDS	2
+ static GR_WINDOW_ID volwin;
++static int vol_cur = -1, bar_dirty;		/* volume percent shown in the taskbar tray (-1 unknown) */
+ static time_t vol_since;
+ static int vol_last = -2, vol_pct, vol_status;
+ static char vol_msg[40];
+@@ -210,6 +243,10 @@ static void poll_volume(void)
+ 	}
+ 	vol_msg[0] = 0;
+ 	vol_status = status;
++	if (pct != vol_cur) {
++		vol_cur = pct;
++		bar_dirty = 1;		/* the tray shows it */
++	}
+ 	if (vol_last == -2) {			/* first reading: remember it, show nothing */
+ 		vol_last = level;
+ 		return;
+@@ -247,6 +284,25 @@ static void draw_bar(void)
+ 	w95_box(bar, gc, x, 3, cw, barh - 5, 1, W95_FACEFILL);
+ 	w95_text(bar, gc, W95_DARK, x + 6, 3 + (barh - 5 - th) / 2, clk);
+ 
++	/* volume in the tray, left of the clock: a small speaker and the percentage */
++	if (vol_cur >= 0) {
++		char vt[8];
++		int vw;
++
++		sprintf(vt, "%d%%", vol_cur);
++		vw = w95_textw(gc, vt) + 18;
++		x -= vw + 2;
++		w95_box(bar, gc, x, 3, vw, barh - 5, 1, W95_FACEFILL);
++		w95_fill(bar, gc, W95_DARK, x + 4, 3 + (barh - 5) / 2 - 1, 2, 3);	/* speaker body */
++		w95_fill(bar, gc, W95_DARK, x + 6, 3 + (barh - 5) / 2 - 2, 1, 5);
++		w95_fill(bar, gc, W95_DARK, x + 7, 3 + (barh - 5) / 2 - 3, 1, 7);	/* the cone */
++		w95_text(bar, gc, W95_DARK, x + 11, 3 + (barh - 5 - th) / 2, vt);
++	}
++
++	/* a divider after the Start button */
++	w95_vline(bar, gc, W95_SHADOW, startw + 5, 3, barh - 3);
++	w95_vline(bar, gc, W95_LIGHT, startw + 6, 3, barh - 3);
++
+ 	/* one button per window between Start and the clock */
+ 	if (ntw > 0) {
+ 		int left = startw + 8, avail = x - 4 - left, bw = avail / ntw, k, chars, down;
+@@ -263,8 +319,11 @@ static void draw_bar(void)
+ 			tws[k].x1 = tws[k].x0 + bw - 2;
+ 			w95_box(bar, gc, tws[k].x0, 3, bw - 2, barh - 5, down, W95_FACEFILL);
+ 			snprintf(label, sizeof(label), "%s", tws[k].title);
+-			if (chars < (int)sizeof(label) && chars > 0)
++			if (chars > 0 && (int)strlen(label) > chars) {		/* too long: cut and end with .. */
+ 				label[chars] = 0;
++				if (chars > 3)
++					label[chars - 1] = label[chars - 2] = '.';
++			}
+ 			w95_text(bar, gc, tws[k].mapped ? W95_DARK : W95_SHADOW, tws[k].x0 + 4 + down,
+ 				 3 + (barh - 5 - th) / 2 + down, label);
+ 		}
+@@ -302,59 +361,105 @@ static void window_button(int k)
+ 	draw_bar();
+ }
+ 
+-static void draw_item(int i)
++static int level_of(GR_WINDOW_ID w)
+ {
+-	int y = 3 + i * itemh;
++	int i;
+ 
+-	if (i == (int)NITEMS - 1) {	/* separator above Shut down */
+-		w95_hline(menu, gc, W95_SHADOW, 3, menuw - 4, y);
+-		w95_hline(menu, gc, W95_LIGHT, 3, menuw - 4, y + 1);
+-		y += 3;
+-	}
+-	if (i == hot) {
+-		w95_fill(menu, gc, W95_NAVY, 3, y, menuw - 6, itemh);
+-		w95_text(menu, gc, W95_LIGHT, 22, y + (itemh - th) / 2, items[i].name);
+-	} else {
+-		w95_fill(menu, gc, W95_FACE, 3, y, menuw - 6, itemh);
+-		w95_text(menu, gc, W95_DARK, 22, y + (itemh - th) / 2, items[i].name);
+-	}
+-	/* a small icon square per entry */
+-	w95_fill(menu, gc, i == (int)NITEMS - 1 ? GR_RGB(255, 0, 0) : GR_RGB(0, 128, 128), 7, y + (itemh - 8) / 2, 8, 8);
++	for (i = 0; i < nlv; i++)
++		if (lv[i].win == w)
++			return i;
++	return -1;
+ }
+ 
+-static void draw_menu(void)
++static void draw_item(int l, int i)
+ {
+-	unsigned i;
++	struct level *m = &lv[l];
++	const struct item *it = &m->list[i];
++	int y = m->ytop[i];
+ 
+-	w95_box(menu, gc, 0, 0, menuw, menuh, 0, W95_FACEFILL);
+-	for (i = 0; i < NITEMS; i++)
+-		draw_item(i);
++	if (it->sep) {		/* the separator line sits in the 3 pixels above the item */
++		w95_hline(m->win, gc, W95_SHADOW, 3, m->w - 4, y - 3);
++		w95_hline(m->win, gc, W95_LIGHT, 3, m->w - 4, y - 2);
++	}
++	w95_fill(m->win, gc, i == m->hot ? W95_NAVY : W95_FACE, 3, y, m->w - 6, itemh);
++	w95_text(m->win, gc, i == m->hot ? W95_LIGHT : W95_DARK, 18, y + (itemh - th) / 2, it->name);
++	if (it->sub)		/* a group: arrow at the right */
++		w95_text(m->win, gc, i == m->hot ? W95_LIGHT : W95_DARK, m->w - 12, y + (itemh - th) / 2, ">");
++	else			/* a small icon square per entry */
++		w95_fill(m->win, gc, !strcmp(it->name, "Shut down") || !strcmp(it->name, "Exit desktop") ?
++			 GR_RGB(255, 0, 0) : GR_RGB(0, 128, 128), 7, y + (itemh - 8) / 2, 8, 8);
+ }
+ 
+-static int menu_item_at(int y)
++static void draw_level(int l)
+ {
+-	unsigned i;
++	int i;
+ 
+-	for (i = 0; i < NITEMS; i++) {
+-		int top = 3 + i * itemh + (i == NITEMS - 1 ? 3 : 0);
++	w95_box(lv[l].win, gc, 0, 0, lv[l].w, lv[l].h, 0, W95_FACEFILL);
++	for (i = 0; i < lv[l].n; i++)
++		draw_item(l, i);
++}
++
++static int level_item_at(int l, int y)
++{
++	int i;
+ 
+-		if (y >= top && y < top + itemh)
++	for (i = 0; i < lv[l].n; i++)
++		if (y >= lv[l].ytop[i] && y < lv[l].ytop[i] + itemh)
+ 			return i;
+-	}
+ 	return -1;
+ }
+ 
++static void close_levels(int keep)	/* close every level deeper than keep - 1 */
++{
++	while (nlv > keep) {
++		nlv--;
++		GrDestroyWindow(lv[nlv].win);
++	}
++}
++
++/* open a menu level for list; (x, y) is where its top left would like to be (it is moved up to fit above the taskbar) */
++static void open_level(const struct item *list, int n, int x, int y, int bottom_aligned)
++{
++	struct level *m = &lv[nlv];
++	int i, maxw = 0, w, yy = 3;
++
++	m->list = list;
++	m->n = n;
++	m->hot = -1;
++	for (i = 0; i < n; i++) {
++		w = w95_textw(gc, list[i].name) + (list[i].sub ? 8 : 0);
++		if (w > maxw)
++			maxw = w;
++		if (list[i].sep)
++			yy += 3;
++		m->ytop[i] = yy;
++		yy += itemh;
++	}
++	m->w = maxw + 30;
++	m->h = yy + 3;
++	m->x = x;
++	if (x + m->w > si.cols)
++		m->x = si.cols - m->w;
++	m->y = bottom_aligned ? si.rows - barh - m->h : y;
++	if (m->y + m->h > si.rows - barh)
++		m->y = si.rows - barh - m->h;
++	if (m->y < 0)
++		m->y = 0;
++	m->win = GrNewWindowEx(GR_WM_PROPS_NODECORATE | GR_WM_PROPS_NOFOCUS | GR_WM_PROPS_NOMOVE,
++			       "menu", GR_ROOT_WINDOW_ID, m->x, m->y, m->w, m->h, W95_FACE);
++	GrSelectEvents(m->win, GR_EVENT_MASK_EXPOSURE | GR_EVENT_MASK_BUTTON_UP | GR_EVENT_MASK_BUTTON_DOWN |
++		       GR_EVENT_MASK_MOUSE_POSITION | GR_EVENT_MASK_MOUSE_EXIT);
++	GrMapWindow(m->win);
++	nlv++;
++}
++
+ static void open_menu(void)
+ {
+ 	if (menu_open)
+ 		return;
+-	menu = GrNewWindowEx(GR_WM_PROPS_NODECORATE | GR_WM_PROPS_NOFOCUS | GR_WM_PROPS_NOMOVE,
+-			     "menu", GR_ROOT_WINDOW_ID, 2, si.rows - barh - menuh, menuw, menuh, W95_FACE);
+-	GrSelectEvents(menu, GR_EVENT_MASK_EXPOSURE | GR_EVENT_MASK_BUTTON_UP | GR_EVENT_MASK_BUTTON_DOWN |
+-		       GR_EVENT_MASK_MOUSE_POSITION | GR_EVENT_MASK_MOUSE_EXIT);
+-	GrMapWindow(menu);
++	nlv = 0;
++	open_level(root_items, COUNT(root_items), 2, 0, 1);
+ 	menu_open = 1;
+-	hot = -1;
+ 	menu_since = time(NULL);
+ }
+ 
+@@ -362,19 +467,48 @@ static void close_menu(void)
+ {
+ 	if (!menu_open)
+ 		return;
+-	GrDestroyWindow(menu);
++	close_levels(0);
+ 	menu_open = 0;
+ 	start_down = 0;
+ 	draw_bar();
+ }
+ 
++/* the pointer is on item h of level l: highlight it, and open or close groups to match */
++static void hover(int l, int h)
++{
++	struct level *m = &lv[l];
++
++	if (h == m->hot && !(h >= 0 && m->list[h].sub && nlv == l + 1))
++		return;
++	if (h != m->hot) {
++		int was = m->hot;
++
++		m->hot = h;
++		if (was >= 0)
++			draw_item(l, was);
++		if (h >= 0)
++			draw_item(l, h);
++	}
++	if (nlv > l + 1)
++		close_levels(l + 1);
++	if (h >= 0 && m->list[h].sub && nlv < MAXLVL)
++		open_level(m->list[h].sub, m->list[h].nsub, m->x + m->w - 3, m->y + m->ytop[h] - 3, 0);
++}
++
++static int any_hot(void)
++{
++	int i;
++
++	for (i = 0; i < nlv; i++)
++		if (lv[i].hot >= 0)
++			return 1;
++	return 0;
++}
++
+ int main(int argc, char **argv)
+ {
+ 	GR_EVENT ev;
+ 	GR_FONT_ID font;
+-	unsigned i;
+-	int maxw = 0, w;
+-
+ 	signal(SIGCHLD, reap);
+ 	if (GrOpen() < 0) {
+ 		fprintf(stderr, "dsdesk: cannot connect to Nano-X\n");
+@@ -389,13 +523,6 @@ int main(int argc, char **argv)
+ 	barh = th + 8;
+ 	startw = w95_textw(gc, "Start") + 24;
+ 	itemh = th + 6;
+-	for (i = 0; i < NITEMS; i++) {
+-		w = w95_textw(gc, items[i].name);
+-		if (w > maxw)
+-			maxw = w;
+-	}
+-	menuw = maxw + 30;
+-	menuh = NITEMS * itemh + 6 + 3;
+ 
+ 	bar = GrNewWindowEx(GR_WM_PROPS_NODECORATE | GR_WM_PROPS_NOFOCUS | GR_WM_PROPS_NOMOVE | GR_WM_PROPS_NORAISE,
+ 			    "taskbar", GR_ROOT_WINDOW_ID, 0, si.rows - barh, si.cols, barh, W95_FACE);
+@@ -420,8 +547,8 @@ int main(int argc, char **argv)
+ 				draw_bar();
+ 			else if (volwin && ev.exposure.wid == volwin)
+ 				draw_vol();
+-			else if (menu_open && ev.exposure.wid == menu)
+-				draw_menu();
++			else if (menu_open && level_of(ev.exposure.wid) >= 0)
++				draw_level(level_of(ev.exposure.wid));
+ 			break;
+ 		case GR_EVENT_TYPE_BUTTON_DOWN:
+ 			if (ev.button.wid == bar && ev.button.x < startw + 2) {
+@@ -445,44 +572,49 @@ int main(int argc, char **argv)
+ 			}
+ 			break;
+ 		case GR_EVENT_TYPE_MOUSE_POSITION:
+-			if (menu_open && ev.mouse.wid == menu) {
+-				int h = menu_item_at(ev.mouse.y);
+-
+-				if (h != hot) {
+-					int was = hot;
++			if (menu_open) {
++				int l = level_of(ev.mouse.wid);
+ 
+-					hot = h;
+-					if (was >= 0)
+-						draw_item(was);
+-					if (hot >= 0)
+-						draw_item(hot);
+-				}
++				if (l >= 0)
++					hover(l, level_item_at(l, ev.mouse.y));
+ 			}
+ 			break;
+ 		case GR_EVENT_TYPE_BUTTON_UP:
+-			if (menu_open && ev.button.wid == menu) {
+-				int h = menu_item_at(ev.button.y);
++			if (menu_open) {
++				int l = level_of(ev.button.wid);
++				int h = l >= 0 ? level_item_at(l, ev.button.y) : -1;
+ 
+-				if (h >= 0) {
+-					const char *p = items[h].prog, *a = items[h].arg;
++				if (h >= 0 && !lv[l].list[h].sub) {
++					const char *p = lv[l].list[h].prog, *a = lv[l].list[h].arg;
+ 
+ 					close_menu();
+ 					launch(p, a);
++				} else if (h >= 0) {
++					hover(l, h);		/* a click on a group opens it too */
+ 				}
+ 			}
+ 			break;
+ 		case GR_EVENT_TYPE_MOUSE_EXIT:
+-			if (menu_open && ev.general.wid == menu && hot != -1) {
+-				int was = hot;
++			if (menu_open) {
++				int l = level_of(ev.general.wid);
++
++				/* the group's own entry stays lit while its list is open */
++				if (l >= 0 && l == nlv - 1 && lv[l].hot != -1) {
++					int was = lv[l].hot;
+ 
+-				hot = -1;
+-				draw_item(was);
++					lv[l].hot = -1;
++					draw_item(l, was);
++				}
+ 			}
+ 			break;
+ 		case GR_EVENT_TYPE_TIMEOUT:
+ 			/* quiet for 0.3 s: do the slow things that need an answer from the server */
+ 			ticks++;
+ 			poll_volume();
++			if (bar_dirty) {
++				bar_dirty = 0;
++				changed = 1;
++			}
+ 			if (want_refresh) {
+ 				refresh_windows();
+ 				changed = 1;
+@@ -507,9 +639,9 @@ int main(int argc, char **argv)
+ 			}
+ 			break;
+ 		}
+-		if (menu_open && time(NULL) - menu_since > MENU_SECONDS && hot == -1)
++		if (menu_open && time(NULL) - menu_since > MENU_SECONDS && !any_hot())
+ 			close_menu();
+-		else if (menu_open && hot != -1)
++		else if (menu_open && any_hot())
+ 			menu_since = time(NULL);
+ 		if (changed)
+ 			draw_bar();
+diff --git a/user/microwin/src/demos/nanox/dsmemo.c b/user/microwin/src/demos/nanox/dsmemo.c
+new file mode 100644
+index 000000000..3edfd4260
+--- /dev/null
++++ b/user/microwin/src/demos/nanox/dsmemo.c
+@@ -0,0 +1,687 @@
++/*
++ * dsmemo - voice memos for the DSLinuxDSi desktop: record from the microphone, play back, with a live waveform
++ * scope and a level meter for both. Memos are 16 bit mono WAV files in /home/memos (memo001.wav ...; Files shows
++ * them, dsplay can play them).
++ *
++ * Buttons: Rec, Stop, Play, < > (choose a memo), Del (press twice). Keys: r record, s stop, p or space play/stop,
++ * left/right or , . choose, d delete (twice), q or Esc quit.
++ * Sound goes through the OSS device /dev/dsp (the kernel's NDS ALSA driver); both directions are used in non
++ * blocking mode so the window keeps drawing. Drawing is incremental: the scope scrolls with one blit and only the
++ * new columns are drawn, since every request costs time on the DS.
++ */
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <unistd.h>
++#include <fcntl.h>
++#include <errno.h>
++#include <dirent.h>
++#include <sys/stat.h>
++#include <sys/ioctl.h>
++#include <sys/time.h>
++#include "nano-X.h"
++#include "w95.h"
++
++#define MEMO_DIR	"/home/memos"
++#define RATE		16000
++#define MAXMEMOS	64
++#define MAXLOAD		(3 * 1024 * 1024)	/* longest memo that is loaded for playback */
++
++/* OSS ioctl numbers (linux/soundcard.h): the same on ARM */
++#define SNDCTL_DSP_SETFRAGMENT	0xC004500A
++#define SNDCTL_DSP_SPEED	0xC0045002
++#define SNDCTL_DSP_SETFMT	0xC0045005
++#define SNDCTL_DSP_CHANNELS	0xC0045006
++#define AFMT_S16_LE		0x10
++
++/* window layout (client coordinates) */
++#define WIN_W	208
++#define WIN_H	124
++#define SX	4		/* scope */
++#define SY	4
++#define SW	200
++#define SH	44
++#define LY	52		/* level meter */
++#define LH	7
++#define TY	63		/* status text */
++#define NY	75		/* memo name */
++#define BY	92		/* buttons */
++#define BH	18
++#define BW	31
++#define BGAP	2
++#define BX0	6
++#define NBTN	6
++#define FULL	12000		/* sample value that fills the scope and the meter */
++#define COLSAMP	(RATE / 25)	/* samples per scope column (25 columns a second) */
++
++enum { IDLE, REC, PLAY };
++static int state = IDLE;
++
++static GR_WINDOW_ID win;
++static GR_GC_ID gc;
++static int th;
++
++static char names[MAXMEMOS][24];
++static int nmemos, sel;
++static int del_armed;
++static char msg[40];
++
++/* scope history, so an exposure can redraw it */
++static short hist_min[SW], hist_max[SW];
++static int level_disp;			/* 0..100, with a slow fall */
++
++/* column builder */
++static int acc_n, acc_min, acc_max;
++static short pend_min[64], pend_max[64];
++static int npend;
++static int tick_peak;
++
++/* recording / playback state */
++static int dsp = -1, file = -1;
++static long rec_bytes;
++static unsigned char *pcm;		/* loaded memo */
++static long pcm_len, pcm_written, pcm_fed;
++static int pcm_rate, pcm_ch;
++static struct timeval t_start;
++static int last_secs = -1;
++
++static long elapsed_us(void)
++{
++	struct timeval now;
++
++	gettimeofday(&now, NULL);
++	return (now.tv_sec - t_start.tv_sec) * 1000000L + (now.tv_usec - t_start.tv_usec);
++}
++
++/* ------------------------------------------------------------------ files */
++
++static int cmpnames(const void *a, const void *b)
++{
++	return strcmp((const char *)a, (const char *)b);
++}
++
++static void scan_memos(void)
++{
++	DIR *d;
++	struct dirent *e;
++
++	nmemos = 0;
++	d = opendir(MEMO_DIR);
++	if (d) {
++		while ((e = readdir(d)) != NULL && nmemos < MAXMEMOS) {
++			int n = strlen(e->d_name);
++
++			if (n > 8 && n < 24 && !strncmp(e->d_name, "memo", 4) && !strcmp(e->d_name + n - 4, ".wav"))
++				strcpy(names[nmemos++], e->d_name);
++		}
++		closedir(d);
++	}
++	qsort(names, nmemos, sizeof(names[0]), cmpnames);
++	if (sel >= nmemos)
++		sel = nmemos - 1;
++	if (sel < 0)
++		sel = 0;
++}
++
++static void put32(unsigned char *p, unsigned long v)
++{
++	p[0] = v;
++	p[1] = v >> 8;
++	p[2] = v >> 16;
++	p[3] = v >> 24;
++}
++
++static void wav_header(unsigned char *h, long datalen)
++{
++	memcpy(h, "RIFF", 4);
++	put32(h + 4, 36 + datalen);
++	memcpy(h + 8, "WAVEfmt ", 8);
++	put32(h + 16, 16);
++	h[20] = 1; h[21] = 0;			/* PCM */
++	h[22] = 1; h[23] = 0;			/* mono */
++	put32(h + 24, RATE);
++	put32(h + 28, RATE * 2);
++	h[32] = 2; h[33] = 0;			/* block align */
++	h[34] = 16; h[35] = 0;			/* bits */
++	memcpy(h + 36, "data", 4);
++	put32(h + 40, datalen);
++}
++
++/* ------------------------------------------------------------------ drawing */
++
++#define C_BLACK		GR_RGB(0, 0, 0)
++#define C_GREEN		GR_RGB(0, 230, 0)
++#define C_DKGREEN	GR_RGB(0, 80, 0)
++#define C_RED		GR_RGB(230, 30, 30)
++
++static int ypos(int v)
++{
++	int h = SH / 2 - 1, y;
++
++	if (v > FULL)
++		v = FULL;
++	if (v < -FULL)
++		v = -FULL;
++	y = SY + SH / 2 - v * h / FULL;
++	return y;
++}
++
++static void draw_column(int x, int vmin, int vmax)
++{
++	w95_fill(win, gc, C_BLACK, x, SY, 1, SH);
++	w95_hline(win, gc, C_DKGREEN, x, x, SY + SH / 2);
++	w95_vline(win, gc, C_GREEN, x, ypos(vmax), ypos(vmin));
++}
++
++/* the scope is a window onto the last SW columns; new columns come in at the right edge */
++static void flush_columns(void)
++{
++	int n = npend, i;
++
++	if (!n)
++		return;
++	memmove(hist_min, hist_min + n, (SW - n) * sizeof(short));
++	memmove(hist_max, hist_max + n, (SW - n) * sizeof(short));
++	for (i = 0; i < n; i++) {
++		hist_min[SW - n + i] = pend_min[i];
++		hist_max[SW - n + i] = pend_max[i];
++	}
++	GrCopyArea(win, gc, SX, SY, SW - n, SH, win, SX + n, SY, MWROP_COPY);
++	for (i = 0; i < n; i++)
++		draw_column(SX + SW - n + i, pend_min[i], pend_max[i]);
++	npend = 0;
++}
++
++static void draw_scope_all(void)
++{
++	int x;
++
++	w95_box(win, gc, SX - 2, SY - 2, SW + 4, SH + 4, 1, W95_KEEP);
++	for (x = 0; x < SW; x++)
++		draw_column(SX + x, hist_min[x], hist_max[x]);
++}
++
++static void draw_level(void)
++{
++	int w = (SW - 4) * level_disp / 100;
++
++	w95_box(win, gc, SX - 2, LY - 2, SW + 4, LH + 4, 1, W95_KEEP);
++	w95_fill(win, gc, C_BLACK, SX, LY, SW, LH);
++	if (w > 0)
++		w95_fill(win, gc, level_disp > 85 ? C_RED : C_GREEN, SX, LY, w, LH);
++}
++
++static void draw_status(void)
++{
++	char t[48];
++	int secs;
++
++	w95_fill(win, gc, W95_FACE, 0, TY, WIN_W, th + 1);
++	if (msg[0]) {
++		strcpy(t, msg);
++	} else if (state == REC) {
++		secs = rec_bytes / (RATE * 2);
++		sprintf(t, "REC  %02d:%02d", secs / 60, secs % 60);
++	} else if (state == PLAY) {
++		long cur = pcm_ch ? elapsed_us() / 1000000L : 0;
++		long tot = pcm_len / (pcm_rate * 2L * pcm_ch);
++
++		if (cur > tot)
++			cur = tot;
++		sprintf(t, "PLAY %02ld:%02ld / %02ld:%02ld", cur / 60, cur % 60, tot / 60, tot % 60);
++	} else {
++		strcpy(t, "Ready");
++	}
++	w95_text(win, gc, state == REC ? C_RED : W95_DARK, 6, TY, t);
++
++	w95_fill(win, gc, W95_FACE, 0, NY, WIN_W, th + 1);
++	if (nmemos)
++		sprintf(t, "%s  (%d/%d)", names[sel], sel + 1, nmemos);
++	else
++		strcpy(t, "no memos yet");
++	w95_text(win, gc, W95_DARK, 6, NY, t);
++}
++
++static void draw_buttons(void)
++{
++	static const char *lab[NBTN] = { "Rec", "Stop", "Play", "<", ">", "Del" };
++	int i;
++
++	for (i = 0; i < NBTN; i++) {
++		int down = (i == 0 && state == REC) || (i == 2 && state == PLAY) || (i == 5 && del_armed);
++
++		w95_button(win, gc, BX0 + i * (BW + BGAP), BY, BW, BH, del_armed && i == 5 ? "Sure?" : lab[i], down);
++	}
++}
++
++static void redraw_all(void)
++{
++	w95_fill(win, gc, W95_FACE, 0, 0, WIN_W, WIN_H);
++	draw_scope_all();
++	draw_level();
++	draw_status();
++	draw_buttons();
++}
++
++/* ------------------------------------------------------------------ scope input */
++
++static void feed(const short *s, int step, int count)
++{
++	int i, v;
++
++	for (i = 0; i < count; i++) {
++		v = s[i * step];
++		if (!acc_n || v < acc_min)
++			acc_min = v;
++		if (!acc_n || v > acc_max)
++			acc_max = v;
++		acc_n++;
++		if ((v < 0 ? -v : v) > tick_peak)
++			tick_peak = v < 0 ? -v : v;
++		if (acc_n >= COLSAMP) {
++			if (npend < 64) {
++				pend_min[npend] = acc_min;
++				pend_max[npend] = acc_max;
++				npend++;
++			}
++			acc_n = 0;
++		}
++	}
++}
++
++static void level_update(void)
++{
++	int pct = tick_peak * 100 / FULL;
++
++	if (pct > 100)
++		pct = 100;
++	level_disp = pct > level_disp ? pct : level_disp * 3 / 4;
++	tick_peak = 0;
++	draw_level();
++}
++
++/* ------------------------------------------------------------------ sound device */
++
++static int dsp_open(int mode, int rate, int channels)
++{
++	int fd = open("/dev/dsp", mode | O_NONBLOCK), frag = (8 << 16) | 10, fmt = AFMT_S16_LE, r = rate, c = channels;
++
++	if (fd < 0)
++		return -1;
++	ioctl(fd, SNDCTL_DSP_SETFRAGMENT, &frag);	/* 1 KB pieces: lively scope */
++	ioctl(fd, SNDCTL_DSP_SETFMT, &fmt);
++	ioctl(fd, SNDCTL_DSP_CHANNELS, &c);
++	ioctl(fd, SNDCTL_DSP_SPEED, &r);
++	return fd;
++}
++
++static void stop_all(void)
++{
++	if (state == REC && file >= 0) {
++		unsigned char h[44];
++
++		wav_header(h, rec_bytes);
++		lseek(file, 0, SEEK_SET);
++		write(file, h, 44);
++		close(file);
++		file = -1;
++	}
++	if (dsp >= 0) {
++		close(dsp);
++		dsp = -1;
++	}
++	if (pcm) {
++		free(pcm);
++		pcm = NULL;
++	}
++	state = IDLE;
++	level_disp = 0;
++}
++
++static void start_record(void)
++{
++	char path[64];
++	unsigned char h[44];
++	int n, i;
++
++	stop_all();
++	mkdir(MEMO_DIR, 0755);
++	for (n = 1; n < 1000; n++) {
++		sprintf(path, MEMO_DIR "/memo%03d.wav", n);
++		if (access(path, F_OK) != 0)
++			break;
++	}
++	file = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
++	if (file < 0) {
++		sprintf(msg, "cannot write %s", MEMO_DIR);
++		return;
++	}
++	dsp = dsp_open(O_RDONLY, RATE, 1);
++	if (dsp < 0) {
++		close(file);
++		file = -1;
++		unlink(path);
++		strcpy(msg, "cannot open /dev/dsp");
++		return;
++	}
++	wav_header(h, 0);
++	write(file, h, 44);
++	rec_bytes = 0;
++	msg[0] = 0;
++	memset(hist_min, 0, sizeof(hist_min));
++	memset(hist_max, 0, sizeof(hist_max));
++	acc_n = 0;
++	npend = 0;
++	state = REC;
++	gettimeofday(&t_start, NULL);
++	last_secs = -1;
++	scan_memos();
++	for (i = 0; i < nmemos; i++)
++		if (!strcmp(names[i], strrchr(path, '/') + 1))
++			sel = i;
++	draw_scope_all();
++}
++
++static int load_memo(const char *name)
++{
++	char path[64];
++	unsigned char h[44];
++	int f;
++	long total;
++
++	sprintf(path, MEMO_DIR "/%s", name);
++	f = open(path, O_RDONLY);
++	if (f < 0)
++		return -1;
++	if (read(f, h, 44) != 44 || memcmp(h, "RIFF", 4) || memcmp(h + 8, "WAVE", 4) || memcmp(h + 36, "data", 4) ||
++	    h[20] != 1 || h[34] != 16 || h[22] < 1 || h[22] > 2) {
++		close(f);
++		return -2;
++	}
++	pcm_ch = h[22];
++	pcm_rate = h[24] | (h[25] << 8) | (h[26] << 16);
++	total = h[40] | (h[41] << 8) | (h[42] << 16) | ((long)h[43] << 24);
++	if (total > MAXLOAD)
++		total = MAXLOAD;
++	if (total < 2) {
++		close(f);
++		return -3;
++	}
++	pcm = malloc(total);
++	if (!pcm) {
++		close(f);
++		return -4;
++	}
++	pcm_len = 0;
++	while (pcm_len < total) {
++		int n = read(f, pcm + pcm_len, total - pcm_len > 8192 ? 8192 : total - pcm_len);
++
++		if (n <= 0)
++			break;
++		pcm_len += n;
++	}
++	close(f);
++	pcm_len &= ~3L;
++	return pcm_len > 0 ? 0 : -3;
++}
++
++static void start_play(void)
++{
++	int r;
++
++	stop_all();
++	if (!nmemos) {
++		strcpy(msg, "nothing to play");
++		return;
++	}
++	r = load_memo(names[sel]);
++	if (r) {
++		sprintf(msg, "cannot load memo (%d)", r);
++		return;
++	}
++	dsp = dsp_open(O_WRONLY, pcm_rate, pcm_ch);
++	if (dsp < 0) {
++		free(pcm);
++		pcm = NULL;
++		strcpy(msg, "cannot open /dev/dsp");
++		return;
++	}
++	msg[0] = 0;
++	memset(hist_min, 0, sizeof(hist_min));
++	memset(hist_max, 0, sizeof(hist_max));
++	acc_n = 0;
++	npend = 0;
++	pcm_written = 0;
++	pcm_fed = 0;
++	state = PLAY;
++	gettimeofday(&t_start, NULL);
++	last_secs = -1;
++	draw_scope_all();
++}
++
++/* called every 40 ms while recording or playing */
++static void tick(void)
++{
++	if (state == REC) {
++		short buf[512];
++		int n, loops = 0;
++
++		while (loops++ < 8 && (n = read(dsp, buf, sizeof(buf))) > 0) {
++			write(file, buf, n);
++			rec_bytes += n;
++			feed(buf, 1, n / 2);
++		}
++		if (rec_bytes == 0 && elapsed_us() > 2000000L && !msg[0]) {
++			strcpy(msg, "REC  (no microphone data yet)");
++			last_secs = -1;
++		} else if (rec_bytes > 0 && msg[0]) {
++			msg[0] = 0;
++			last_secs = -1;
++		}
++		if (rec_bytes > 20L * 1024 * 1024) {	/* 10 minutes: enough */
++			int i;
++
++			stop_all();
++			scan_memos();
++			for (i = 0; i < nmemos; i++)
++				sel = i;
++			strcpy(msg, "stopped: size limit");
++			draw_buttons();
++			draw_status();
++			return;
++		}
++	} else if (state == PLAY) {
++		long pos, bps = pcm_rate * 2L * pcm_ch;
++		int n;
++
++		while (pcm_written < pcm_len) {
++			n = write(dsp, pcm + pcm_written, pcm_len - pcm_written > 4096 ? 4096 : pcm_len - pcm_written);
++			if (n <= 0)
++				break;
++			pcm_written += n;
++		}
++		pos = (long)((elapsed_us() / 1000L) * bps / 1000L);	/* what has been heard so far, estimated */
++		if (pos > pcm_written)
++			pos = pcm_written;
++		pos &= ~3L;
++		if (pos > pcm_fed) {
++			feed((const short *)(pcm + pcm_fed), pcm_ch, (pos - pcm_fed) / (2 * pcm_ch));
++			pcm_fed = pos;
++		}
++		if (pos >= pcm_len) {
++			stop_all();
++			draw_buttons();
++			last_secs = -1;
++		}
++	}
++	flush_columns();
++	level_update();
++	if (state != IDLE) {
++		int secs = (int)(elapsed_us() / 1000000L);
++
++		if (secs != last_secs) {
++			last_secs = secs;
++			draw_status();
++		}
++	} else {
++		draw_status();
++	}
++}
++
++/* ------------------------------------------------------------------ commands */
++
++static void do_stop(void)
++{
++	int was = state, i;
++
++	stop_all();
++	if (was == REC) {
++		scan_memos();
++		for (i = 0; i < nmemos; i++)
++			sel = i;		/* names sort by number: the last one is the new memo */
++	}
++	msg[0] = 0;
++	draw_buttons();
++	draw_status();
++}
++
++static void do_delete(void)
++{
++	char path[64];
++
++	if (state != IDLE || !nmemos)
++		return;
++	if (!del_armed) {
++		del_armed = 1;
++		draw_buttons();
++		return;
++	}
++	del_armed = 0;
++	sprintf(path, MEMO_DIR "/%s", names[sel]);
++	unlink(path);
++	scan_memos();
++	strcpy(msg, "deleted");
++	draw_buttons();
++	draw_status();
++}
++
++static void command(int b)
++{
++	if (b != 5 && del_armed) {
++		del_armed = 0;
++		draw_buttons();
++	}
++	msg[0] = 0;
++	switch (b) {
++	case 0:
++		if (state != REC)
++			start_record();
++		break;
++	case 1:
++		do_stop();
++		return;
++	case 2:
++		if (state == PLAY)
++			do_stop();
++		else if (state == IDLE)
++			start_play();
++		break;
++	case 3:
++		if (state == IDLE && sel > 0)
++			sel--;
++		break;
++	case 4:
++		if (state == IDLE && sel + 1 < nmemos)
++			sel++;
++		break;
++	case 5:
++		do_delete();
++		return;
++	}
++	draw_buttons();
++	draw_status();
++}
++
++int main(int argc, char **argv)
++{
++	GR_EVENT ev;
++	GR_FONT_ID font;
++
++	if (GrOpen() < 0) {
++		fprintf(stderr, "dsmemo: cannot connect to Nano-X\n");
++		return 1;
++	}
++	gc = GrNewGC();
++	font = GrCreateFont("Tiny", 0, NULL);
++	GrSetGCFont(gc, font);
++	w95_init(font);
++	th = w95_texth(gc);
++	w95_gc(C_BLACK);
++	w95_gc(C_GREEN);
++	w95_gc(C_DKGREEN);
++	w95_gc(C_RED);
++	scan_memos();
++	if (nmemos)
++		sel = nmemos - 1;
++
++	win = GrNewWindowEx(GR_WM_PROPS_APPFRAME | GR_WM_PROPS_CAPTION | GR_WM_PROPS_CLOSEBOX, "Voice memos",
++			    GR_ROOT_WINDOW_ID, 24, 8, WIN_W, WIN_H, W95_FACE);
++	GrSelectEvents(win, GR_EVENT_MASK_EXPOSURE | GR_EVENT_MASK_BUTTON_DOWN | GR_EVENT_MASK_KEY_DOWN |
++		       GR_EVENT_MASK_CLOSE_REQ);
++	GrMapWindow(win);
++	GrSetFocus(win);
++
++	for (;;) {
++		GrGetNextEventTimeout(&ev, state != IDLE ? 40 : 1000);
++		switch (ev.type) {
++		case GR_EVENT_TYPE_EXPOSURE:
++			redraw_all();
++			break;
++		case GR_EVENT_TYPE_CLOSE_REQ:
++			stop_all();
++			GrClose();
++			return 0;
++		case GR_EVENT_TYPE_BUTTON_DOWN:
++			if (ev.button.y >= BY && ev.button.y < BY + BH && ev.button.x >= BX0) {
++				int b = (ev.button.x - BX0) / (BW + BGAP);
++
++				if (b >= 0 && b < NBTN && (ev.button.x - BX0) % (BW + BGAP) < BW)
++					command(b);
++			}
++			break;
++		case GR_EVENT_TYPE_KEY_DOWN:
++			switch (ev.keystroke.ch) {
++			case 'r':
++				command(0);
++				break;
++			case 's':
++				command(1);
++				break;
++			case 'p':
++			case ' ':
++				command(state == IDLE ? 2 : 1);
++				break;
++			case MWKEY_LEFT:
++			case ',':
++				command(3);
++				break;
++			case MWKEY_RIGHT:
++			case '.':
++				command(4);
++				break;
++			case 'd':
++				command(5);
++				break;
++			case 'q':
++			case MWKEY_ESCAPE:
++				stop_all();
++				GrClose();
++				return 0;
++			}
++			break;
++		}
++		if (state != IDLE)
++			tick();
++	}
++	return 0;
++}
+diff --git a/vendors/Nintendo/DSI/Makefile b/vendors/Nintendo/DSI/Makefile
+index 7ff298ef0..c97c4fffd 100644
+--- a/vendors/Nintendo/DSI/Makefile
++++ b/vendors/Nintendo/DSI/Makefile
+@@ -164,6 +164,9 @@ finishrom:
+ 	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/dsgears $(ROMFSDIR)/boot/dsgears
+ 	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/dsgx $(ROMFSDIR)/boot/dsgx
+ 	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/dsplay $(ROMFSDIR)/boot/dsplay
++	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/dsmemo $(ROMFSDIR)/boot/dsmemo
++	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/landmine $(ROMFSDIR)/boot/landmine
++	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/ntetris $(ROMFSDIR)/boot/ntetris
+ 	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/madplay $(ROMFSDIR)/$(OPTDIR)
+ 	# Compress the data area of these programs
+ 	$(CROSS)flthdr -d $(ROMFSDIR)/$(OPTDIR)/*
+-- 
+2.56.0
+
