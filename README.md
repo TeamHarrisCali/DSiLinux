@@ -24,7 +24,7 @@ the changes are in `patches/` (23 small patches, in order) and explained in `doc
 | Userland from the card, shell prompt | console | `/etc`, `/var`, `/home` get RAM copies at boot so the system can write while the card stays untouched (changes are lost at power-off) |
 | One writable file on the card: `sd:/linux/DSILOG.TXT` | console | See "Writing to the card" |
 | Boot self-test (RAM, SD, confinement) printed at the end of boot | console | `/boot/selftest` |
-| ARM9 at 134 MHz | console (nothing to change) | `SCFG_CLK` already reads `0001` (134 MHz) before the kernel touches it, so every DSi-mode build runs the ARM9 at 134 MHz; the boot log's `66.76 BogoMIPS` is consistent with that. The optional `CONFIG_NDS_DSI_FASTCPU` does nothing here |
+| ARM9 at 134 MHz | console (nothing to change) | The `u` build reads the clock register (read-only) and the self-test shows `CLK : PASS - ARM9 at 134 MHz (the fastest)`; the loader sets it. The optional `CONFIG_NDS_DSI_FASTCPU` writes the same bit and changes nothing |
 
 ## Not done, not verified, or out of scope
 
@@ -35,7 +35,6 @@ the changes are in `patches/` (23 small patches, in order) and explained in `doc
 - **`fwver` (DS firmware version at boot):** skipped by default; its firmware read could wait forever in DSi mode.
 - **General SD writing:** deliberately not provided (see below).
 - **DS and DS-Lite builds:** the original DSLinux builds are unchanged here; only the Stage 1 build was run (in melonDS).
-- The `u` ROM (clock lines in the self-test) has not been run yet; the `s` ROM before it ran on the console with a clean log and all checks passing.
 
 ## Writing to the card (the only way it can happen)
 

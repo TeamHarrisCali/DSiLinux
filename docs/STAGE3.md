@@ -283,7 +283,7 @@ The user later confirmed that the second photo (the one with the `SCFG_CLK` line
 ## Clock check in the self-test ("u" build)
 The `s` ROM's saved log (kernel `#25`) shows `Calibrating delay loop... 66.76 BogoMIPS (lpj=333824)`, identical to `t-fast` and to the `r` ROM, so the ARM9 speed is the same in all of them.
 The `u` build (`out/dsi-mode/dslinux-dsimode-u-uc3.nds`, `-uc2`) reads `SCFG_CLK` (read-only, only when DSi mode is proven), logs `NDS: ARM9 clock 134 MHz (SCFG_CLK xxxx)` or `67 MHz`, and the end-of-boot self-test prints
-`CLK : PASS - ARM9 at 134 MHz (the fastest)` (or `ARM9 at 67 MHz (not the fastest)` / `? (no clock line)`) plus the `Calibrating delay loop` line. Built; not run. (A first attempt at this build still had the fast option on, left over in the kernel config; it was caught by checking
+`CLK : PASS - ARM9 at 134 MHz (the fastest)` (or `ARM9 at 67 MHz (not the fastest)` / `? (no clock line)`) plus the `Calibrating delay loop` line. **Verified on the console** (user's photo of the `u` ROM): `CLK : PASS - ARM9 at 134 MHz (the fastest)`, `Calibrating delay loop... 66.76 BogoMIPS (lpj=333824)`, RAM/SD/CONF PASS, `Savelog: written to sd:/linux/DSILOG.TXT`. (A first attempt at this build still had the fast option on, left over in the kernel config; it was caught by checking
 the image for the write message and rebuilt with the option off.)
 
 ## 3c. Faster ARM9 clock: nothing to do (measured on the console)
