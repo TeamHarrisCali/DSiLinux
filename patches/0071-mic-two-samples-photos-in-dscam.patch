@@ -1,0 +1,686 @@
+From 8f67825c3601e99bbe4a673732656cb206a14111 Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 14:33:34 -0600
+Subject: [PATCH] Mic: both 16 bit samples of every FIFO word (32728 samples/s,
+ the upper half was thrown away: an unfiltered decimation that folded high
+ frequencies into the voice band), sample order detected from the data,
+ capture rate 32728; dsmemo filters (80 Hz high-pass, 49 tap 4 kHz low-pass)
+ and halves to 16364 Hz; Photos is now a mode of dscam (one 3D user, starts
+ via 'dscam photos', one running copy told by signals), camera off while
+ viewing
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ .../arch/arm/mach-nds/arm7/microphone.c       |  52 ++-
+ linux-2.6.x/arch/arm/mach-nds/volume.c        |   2 +-
+ linux-2.6.x/sound/arm/nds-sound.c             |   6 +-
+ user/microwin/src/demos/nanox/dscam.c         | 300 +++++++++++++++---
+ user/microwin/src/demos/nanox/dsdesk.c        |   2 +-
+ user/microwin/src/demos/nanox/dsmemo.c        |  55 ++--
+ 6 files changed, 344 insertions(+), 73 deletions(-)
+
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/microphone.c b/linux-2.6.x/arch/arm/mach-nds/arm7/microphone.c
+index fca3c0d79..8daa65b36 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/arm7/microphone.c
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/microphone.c
+@@ -39,6 +39,9 @@ static s16 dbg_smin = 0x7fff, dbg_smax = -0x8000;
+ static u32 dbg_restart_ovr, dbg_restart_stall;
+ static int empty_run;
+ static u32 dbg_raw, dbg_hi_other;
++static int ord_known, ord_hi_first, ord_n;
++static u32 ord_x, ord_y;
++static s16 ord_prev_lo, ord_prev_hi;
+ static int mic_is_running;
+ static u32 dbg_on, dbg_start, dbg_stop, dbg_irq, dbg_full, dbg_empty, dbg_have, dbg_wraps;
+ 
+@@ -198,6 +201,8 @@ void mic_start()
+ 		dbg_smin = 0x7fff;
+ 		dbg_smax = -0x8000;
+ 		dbg_restart_ovr = dbg_restart_stall = 0;
++		ord_known = ord_hi_first = ord_n = 0;
++		ord_x = ord_y = 0;
+ 		empty_run = 0;
+ 	}
+ 	if (dsitouch_active())
+@@ -264,6 +269,13 @@ static void dsi_push(s16 sample)
+  * the ARM9 sound driver offers as the capture rate). (The first version took the newest sample once per tick at a rate that
+  * was twice what was asked for: half speed and a whine from every sample being stored twice.)
+  */
++/*
++ * Each FIFO word holds TWO 16 bit samples (the log of w96l: lastraw=00030004, upper half never just the sign of the lower half):
++ * the FIFO's 16364 words a second are 32728 samples a second, the I2S rate. Taking only the lower half was an unfiltered decimation
++ * by two that folded everything above 8 kHz into the voice band (the whine at inconsistent times). Which half is the earlier sample
++ * is not documented: it is found from the data, for a smooth signal the right order has the smaller sum of differences between
++ * neighbouring samples (measured over the first 2048 words after the start; until then low half first).
++ */
+ static void dsi_timer_tick(void)
+ {
+ 	u16 cnt = REG_MICCNT;
+@@ -283,16 +295,36 @@ static void dsi_timer_tick(void)
+ 	dbg_full++;
+ 	while (!(REG_MICCNT & MICCNT_EMPTY) && n--) {
+ 		u32 raw = REG_MICDATA;
++		s16 lo = (s16)(raw & 0xffff), hi = (s16)(raw >> 16), first, second;
+ 
+ 		dbg_raw = raw;
+-		if ((raw >> 16) != ((raw & 0x8000) ? 0xffff : 0))	/* more than a sign extension in the upper half? */
++		if ((raw >> 16) != ((raw & 0x8000) ? 0xffff : 0))
+ 			dbg_hi_other++;
+-		dsi_last = (s16)(raw & 0xffff);
+-		if (dsi_last < dbg_smin)
+-			dbg_smin = dsi_last;
+-		if (dsi_last > dbg_smax)
+-			dbg_smax = dsi_last;
+-		dsi_push(dsi_last);
++		if (!ord_known) {
++			if (ord_n) {
++				ord_x += (u32)(lo > ord_prev_hi ? lo - ord_prev_hi : ord_prev_hi - lo);	/* order lo,hi: hi(n-1) then lo(n) */
++				ord_y += (u32)(hi > ord_prev_lo ? hi - ord_prev_lo : ord_prev_lo - hi);	/* order hi,lo: lo(n-1) then hi(n) */
++			}
++			ord_prev_lo = lo;
++			ord_prev_hi = hi;
++			if (++ord_n >= 2048) {
++				ord_hi_first = ord_y < ord_x;
++				ord_known = 1;
++			}
++		}
++		first = ord_hi_first ? hi : lo;
++		second = ord_hi_first ? lo : hi;
++		dsi_last = second;
++		if (first < dbg_smin)
++			dbg_smin = first;
++		if (second < dbg_smin)
++			dbg_smin = second;
++		if (first > dbg_smax)
++			dbg_smax = first;
++		if (second > dbg_smax)
++			dbg_smax = second;
++		dsi_push(first);
++		dsi_push(second);
+ 	}
+ }
+ 
+@@ -357,9 +389,9 @@ void mic_diag(u32 *touch, u32 *diag, u32 *info)
+ 	touch[6] = dbg_have;
+ 	touch[7] = dbg_hi_other;		/* FIFO words whose upper half is not just the sign of the lower half */
+ 	diag[0] = dbg_raw;			/* the last raw FIFO word */
+-	diag[1] = buffer_size;
+-	diag[2] = period_size;
+-	diag[3] = mic_rate;
++	diag[1] = ord_x;			/* sample order test: sum of differences, low half first */
++	diag[2] = ord_y;			/* ... high half first */
++	diag[3] = ord_hi_first | (ord_known << 1);
+ 	diag[4] = mic_format;
+ 	diag[5] = ((u32)(u16)dsi_last << 16) | current_ptr;
+ 	diag[6] = REG_MICCNT | (REG_TM3CNT_H << 16);
+diff --git a/linux-2.6.x/arch/arm/mach-nds/volume.c b/linux-2.6.x/arch/arm/mach-nds/volume.c
+index d273f1177..8c3adfbf3 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/volume.c
++++ b/linux-2.6.x/arch/arm/mach-nds/volume.c
+@@ -45,7 +45,7 @@ static int mic_read_proc(char *page, char **start, off_t off, int count, int *eo
+ 		len = sprintf(page, "ARM7 did not answer\n");
+ 	else
+ 		len = sprintf(page, "mic_on=%u start=%u stop=%u irq=%u fifo_full=%u fifo_empty=%u period_msgs=%u hi_nonsign=%u\n"
+-			      "lastraw=%08x size=%u period=%u rate=%u fmt=%u last=%08x miccnt/tm3=%08x ie=%08x\n"
++			      "lastraw=%08x ordLoFirst=%u ordHiFirst=%u order=%u fmt=%u last=%08x miccnt/tm3=%08x ie=%08x\n"
+ 			      "samples: lowest %d highest %d, fifo restarts: overrun %u stall %u\n",
+ 			      d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7], d[8], d[9], d[10], d[11], d[12], d[13], d[14], d[15],
+ 			      (int)d[16], (int)d[17], d[18] >> 16, d[18] & 0xffff);
+diff --git a/linux-2.6.x/sound/arm/nds-sound.c b/linux-2.6.x/sound/arm/nds-sound.c
+index 4d8bd9e49..232973f78 100644
+--- a/linux-2.6.x/sound/arm/nds-sound.c
++++ b/linux-2.6.x/sound/arm/nds-sound.c
+@@ -86,10 +86,10 @@ static snd_pcm_hardware_t snd_nds_capture_hw = {
+ 				SNDRV_PCM_FMTBIT_U16_LE |
+ 				SNDRV_PCM_FMTBIT_S16_LE,
+ #ifdef CONFIG_NDS_DSI
+-	/* the DSi's microphone FIFO has one sample rate: bus clock / 2048 (see arm7/microphone.c) */
++	/* the DSi's microphone delivers 32728 samples a second (two per FIFO word, bus clock / 1024: see arm7/microphone.c) */
+ 	.rates = SNDRV_PCM_RATE_KNOT,
+-	.rate_min = 16364,
+-	.rate_max = 16364,
++	.rate_min = 32728,
++	.rate_max = 32728,
+ #else
+ 	.rates = SNDRV_PCM_RATE_8000_48000,
+ 	.rate_min = 8000,
+diff --git a/user/microwin/src/demos/nanox/dscam.c b/user/microwin/src/demos/nanox/dscam.c
+index b4080741f..418ed578a 100644
+--- a/user/microwin/src/demos/nanox/dscam.c
++++ b/user/microwin/src/demos/nanox/dscam.c
+@@ -1,12 +1,20 @@
+ /*
+- * dscam - camera test for the DSLinuxDSi desktop: a live preview of the DSi camera in a window, and photos.
++ * dscam - camera and photo viewer for the DSLinuxDSi desktop: a live preview of the DSi camera in a window, photos, and a viewer
++ * for the photos taken. One program on purpose: the 3D engine (which shows the picture) can only serve one program at a time.
+  * The kernel (NDSFB_CAM_CMD / NDSFB_CAM_FRAME, see drivers/video/ndsfb.c) switches the camera on and delivers 256x192 RGB555 frames;
+  * each frame is loaded as a texture and drawn on the 3D layer (dsgx.h), which is far faster than pushing pixels through Nano-X.
+- * Keys: space, Enter or a tap in the window = photo (saved as /home/photos/photoNNN.bmp), c = the other camera, f = flip the
+- * picture upside down, m = mirror it, b = swap red and blue (if the colours look wrong), q or Esc = quit.
+- * The overlay text says what is going on, including the numbers from the set-up if it fails.
++ *   dscam           start with the live preview
++ *   dscam photos    start with the photo viewer (the Start menu's Photos). If dscam is already running, it is told to show the
++ *                   viewer (or the preview) and this one ends.
++ * Camera keys: space, Enter or a tap in the window = photo (saved as /home/photos/photoNNN.bmp), c = the other camera, f = flip the
++ * picture upside down, m = mirror it, b = swap red and blue (if the colours look wrong), v = the photo viewer, q or Esc = quit.
++ * Viewer keys: left/right (or , and . or a tap on the left/right third) = previous/next, d = delete (twice), v = back to the
++ * camera, q or Esc = quit. The camera is switched off (and its LED) while the viewer is shown.
+  */
+ #include <errno.h>
++#include <signal.h>
++#include <stdlib.h>
++#include <dirent.h>
+ #include <sys/stat.h>
+ #include <sys/time.h>
+ #include "dsgx_win.h"
+@@ -14,6 +22,8 @@
+ 
+ #define NDSFB_CAM_CMD	0x4e09
+ #define NDSFB_CAM_FRAME	0x4e0a
++#define PIDFILE		"/tmp/dscam.pid"
++#define MAXPHOTOS	200
+ 
+ struct ndsfb_cam {
+ 	unsigned int cmd, arg;
+@@ -22,9 +32,8 @@ struct ndsfb_cam {
+ 
+ static unsigned short frame[PW * PH] __attribute__((aligned(32)));	/* the full frame (for photos) */
+ 
+-/* The preview is a 128x96 copy (2x2 averaged) loaded as a 128x128 texture: a quarter of the data, so the texture memory is
+- * unavailable to the 3D engine for a fraction of a millisecond instead of several (the full size upload every frame left lines
+- * across the picture), and the window is only 160x120 anyway. */
++/* The picture is a 128x96 copy (2x2 averaged) loaded as a 128x128 texture: a quarter of the data, so the texture memory is
++ * unavailable to the 3D engine for a fraction of a millisecond, and the window is only 160x120 anyway. */
+ #define TW	128
+ #define TH	96
+ static unsigned short small[TW * TH] __attribute__((aligned(32)));
+@@ -77,7 +86,7 @@ static void draw_picture(int flipx, int flipy)
+ 	gx_mode(GX_MODELVIEW);
+ 	gx_identity();
+ 	gx_polyattr(0, GX_CULL_NONE, 31);
+-	gx_texture(0, TW, 128, 0);		/* the preview fills the upper 96 rows of a 128x128 texture */
++	gx_texture(0, TW, 128, 0);		/* the picture fills the upper 96 rows of a 128x128 texture */
+ 	gx_begin(GX_QUADS);
+ 	gx_color(31, 31, 31);
+ 	gx_texcoord(s0, t0); gx_vertex(-hw, hh, -2.0);
+@@ -89,19 +98,112 @@ static void draw_picture(int flipx, int flipy)
+ 	gx_flush();
+ }
+ 
++/* ---- photo list ---- */
++static char names[MAXPHOTOS][24];
++static int nphotos, sel;
++
++static int cmpnames(const void *a, const void *b)
++{
++	return strcmp((const char *)a, (const char *)b);
++}
++
++static void scan_photos(void)
++{
++	DIR *d = opendir(PHOTO_DIR);
++	struct dirent *e;
++
++	nphotos = 0;
++	if (d) {
++		while ((e = readdir(d)) != NULL && nphotos < MAXPHOTOS) {
++			int n = strlen(e->d_name);
++
++			if (n > 8 && n < 24 && !strncmp(e->d_name, "photo", 5) && !strcmp(e->d_name + n - 4, ".bmp"))
++				strcpy(names[nphotos++], e->d_name);
++		}
++		closedir(d);
++	}
++	qsort(names, nphotos, sizeof(names[0]), cmpnames);
++	if (sel >= nphotos)
++		sel = nphotos - 1;
++	if (sel < 0)
++		sel = 0;
++}
++
++/* load photo sel into the texture; 0 = ok */
++static int show_photo(void)
++{
++	char path[64];
++	int r;
++
++	if (!nphotos)
++		return -1;
++	sprintf(path, PHOTO_DIR "/%s", names[sel]);
++	r = bmp_read(path, frame);
++	fprintf(stderr, "dscam: viewer: %s: %s (%d)\n", names[sel], r ? "cannot read" : "loaded", r);
++	if (r)
++		return r;
++	downscale();
++	return gx_texture_load_vbl(0, small, sizeof(small));
++}
++
++/* ---- one running copy, told what to show through signals ---- */
++static volatile int sig_review, sig_camera;
++
++static void on_usr1(int s)
++{
++	sig_review = 1;
++}
++
++static void on_usr2(int s)
++{
++	sig_camera = 1;
++}
++
++/* 1 = another dscam runs and has been told what to show; this one has to end. Otherwise our pid is recorded. */
++static int other_running(int want_review)
++{
++	FILE *f = fopen(PIDFILE, "r");
++	int pid = 0;
++
++	if (f) {
++		if (fscanf(f, "%d", &pid) != 1)
++			pid = 0;
++		fclose(f);
++	}
++	if (pid > 0 && pid != getpid() && kill(pid, 0) == 0) {
++		kill(pid, want_review ? SIGUSR1 : SIGUSR2);
++		return 1;
++	}
++	f = fopen(PIDFILE, "w");
++	if (f) {
++		fprintf(f, "%d\n", getpid());
++		fclose(f);
++	}
++	return 0;
++}
++
+ int main(int argc, char **argv)
+ {
+ 	GR_EVENT ev;
+ 	struct gxw w;
+ 	struct ndsfb_cam c;
+-	int running = 1, cam = 0, flipx = 0, flipy = 0, swap = 0, ready = 0, frames = 0, fails = 0, got_frame = 0;
++	int start_review = argc > 1 && !strcmp(argv[1], "photos");
++	int running = 1, cam = 0, flipx = 0, flipy = 0, swap = 0, ready = 0, inited = 0, frames = 0, fails = 0, got_frame = 0;
++	int review = 0, armed = 0, view_dirty = 0;
+ 	long fps_t = 0, msg_until = 0;
+ 	char txt[48], msg[48];
+ 
+-	if (gx_open() < 0)
++	if (other_running(start_review))
++		return 0;
++	signal(SIGUSR1, on_usr1);
++	signal(SIGUSR2, on_usr2);
++	if (gx_open() < 0) {
++		unlink(PIDFILE);
+ 		return 1;
++	}
+ 	if (GrOpen() < 0) {
+ 		fprintf(stderr, "dscam: cannot connect to Nano-X\n");
++		unlink(PIDFILE);
+ 		return 1;
+ 	}
+ 	gxw_create(&w, "Camera", 30, 8, 160, 120, 1.0, 20.0);
+@@ -109,43 +211,149 @@ int main(int argc, char **argv)
+ 		       GR_EVENT_MASK_BUTTON_DOWN);
+ 	gx_control(GX_CTRL_TEXTURE);
+ 	gx_flush();
+-	gxw_text(&w, 0, "camera: starting...");
++	strcpy(msg, "");
+ 
+-	{
+-		int r0 = cam_cmd(0, 0, &c);
++	/* switch to the viewer / to the camera. The camera is only on while the camera is shown. */
++#define CAMERA_START()							\
++	do {								\
++		int r0;							\
++									\
++		review = 0;						\
++		ready = 0;						\
++		got_frame = 0;						\
++		fails = 0;						\
++		gxw_text(&w, 0, "camera: starting...");			\
++		r0 = cam_cmd(0, 0, &c);					\
++		inited = 1;						\
++		fprintf(stderr, "dscam: init ret %d chip version %04x error mask %x scfg_ext %x\n", r0, c.value & 0xffff, c.err & 0xff, c.err >> 8); \
++		if (c.value != 0x2280) {				\
++			sprintf(txt, "init failed v%04x e%x", c.value & 0xffff, c.err & 0xffff); \
++			gxw_text(&w, 0, txt);				\
++			sprintf(txt, "scfg %x", c.err >> 8);		\
++			gxw_text(&w, 1, txt);				\
++			strcpy(msg, "v: photos  q: quit");		\
++		} else if (cam_cmd(2, cam, &c) < 0) {			\
++			sprintf(txt, "select failed e%x", c.err & 0xffff); \
++			gxw_text(&w, 0, txt);				\
++			strcpy(msg, "v: photos  q: quit");		\
++		} else {						\
++			ready = 1;					\
++			strcpy(msg, "space: photo");			\
++		}							\
++	} while (0)
+ 
+-		fprintf(stderr, "dscam: init ret %d chip version %04x error mask %x scfg_ext %x\n", r0, c.value & 0xffff, c.err & 0xff, c.err >> 8);
+-	}
+-	if (c.value != 0x2280) {
+-		sprintf(txt, "init failed v%04x e%x", c.value & 0xffff, c.err & 0xffff);
+-		gxw_text(&w, 0, txt);
+-		sprintf(txt, "scfg %x", c.err >> 8);
+-		gxw_text(&w, 1, txt);
+-		strcpy(msg, "press q to quit");
+-	} else if (cam_cmd(2, cam, &c) < 0) {
+-		sprintf(txt, "select failed e%x", c.err & 0xffff);
+-		gxw_text(&w, 0, txt);
++#define REVIEW_START()							\
++	do {								\
++		scan_photos();						\
++		if (!nphotos) {						\
++			strcpy(msg, "no photos yet");			\
++			msg_until = usec() + 3000000L;			\
++		} else {						\
++			if (inited) {					\
++				cam_cmd(1, 0, NULL);			\
++				inited = 0;				\
++			}						\
++			ready = 0;					\
++			review = 1;					\
++			armed = 0;					\
++			sel = nphotos - 1;				\
++			view_dirty = 1;					\
++			show_photo();					\
++		}							\
++	} while (0)
++
++	if (start_review) {
++		REVIEW_START();
++		if (!review)
++			CAMERA_START();
+ 	} else {
+-		ready = 1;
+-		strcpy(msg, "space: photo");
++		CAMERA_START();
+ 	}
+ 
+ 	while (running) {
+ 		int changed = 0;
++		int key = 0;
+ 
++		if (sig_review) {
++			sig_review = 0;
++			if (!review)
++				REVIEW_START();
++			GrRaiseWindow(w.win);
++			GrSetFocus(w.win);
++		}
++		if (sig_camera) {
++			sig_camera = 0;
++			if (review)
++				CAMERA_START();
++			GrRaiseWindow(w.win);
++			GrSetFocus(w.win);
++		}
+ 		GrCheckNextEvent(&ev);
+ 		if (gxw_event(&w, &ev))
+ 			running = 0;
+-		if (ev.type == GR_EVENT_TYPE_BUTTON_DOWN && ready) {
+-			ev.type = GR_EVENT_TYPE_KEY_DOWN;
+-			ev.keystroke.ch = ' ';
++		if (ev.type == GR_EVENT_TYPE_BUTTON_DOWN) {
++			if (review) {
++				if (ev.button.x < w.rw / 3)
++					key = MWKEY_LEFT;
++				else if (ev.button.x > w.rw * 2 / 3)
++					key = MWKEY_RIGHT;
++			} else if (ready) {
++				key = ' ';
++			}
++		} else if (ev.type == GR_EVENT_TYPE_KEY_DOWN) {
++			key = ev.keystroke.ch;
++		}
++		if (key == MWKEY_ESCAPE || key == 'q') {
++			running = 0;
++			key = 0;
+ 		}
+-		if (ev.type == GR_EVENT_TYPE_KEY_DOWN) {
+-			switch (ev.keystroke.ch) {
+-			case MWKEY_ESCAPE:
+-			case 'q':
+-				running = 0;
++		if (review) {
++			if (key != 'd' && armed) {
++				armed = 0;
++				changed = 1;
++			}
++			switch (key) {
++			case MWKEY_LEFT:
++			case ',':
++				if (sel > 0) {
++					sel--;
++					show_photo();
++					changed = 1;
++				}
+ 				break;
++			case MWKEY_RIGHT:
++			case '.':
++				if (sel + 1 < nphotos) {
++					sel++;
++					show_photo();
++					changed = 1;
++				}
++				break;
++			case 'd':
++				if (!armed) {
++					armed = 1;
++				} else {
++					char path[64];
++
++					armed = 0;
++					sprintf(path, PHOTO_DIR "/%s", names[sel]);
++					unlink(path);
++					scan_photos();
++					if (nphotos)
++						show_photo();
++					else
++						CAMERA_START();
++				}
++				changed = 1;
++				break;
++			case 'v':
++			case 'c':
++				CAMERA_START();
++				changed = 1;
++				break;
++			}
++		} else {
++			switch (key) {
+ 			case 'c':
+ 				if (ready) {
+ 					int rs;
+@@ -169,6 +377,10 @@ int main(int argc, char **argv)
+ 			case 'b':
+ 				swap = !swap;
+ 				break;
++			case 'v':
++				REVIEW_START();
++				changed = 1;
++				break;
+ 			case ' ':
+ 			case MWKEY_ENTER:
+ 				if (ready && got_frame) {
+@@ -198,6 +410,18 @@ int main(int argc, char **argv)
+ 			w.dirty = 1;
+ 			continue;
+ 		}
++		if (review) {
++			draw_picture(0, 0);	/* again each round: a moved window needs the picture sent again */
++			usleep(60000);
++			view_dirty = 0;
++			sprintf(txt, "%s", names[sel]);
++			gxw_text(&w, 0, txt);
++			sprintf(txt, "%d / %d%s", sel + 1, nphotos, armed ? " delete?" : "");
++			gxw_text(&w, 1, txt);
++			gxw_text(&w, 2, "< >  d:del  v:cam");
++			gxw_text(&w, 3, "q: quit");
++			continue;
++		}
+ 		if (ready) {
+ 			int r = ioctl(gx_fb, NDSFB_CAM_FRAME, frame);
+ 
+@@ -255,15 +479,17 @@ int main(int argc, char **argv)
+ 			}
+ 			if (msg_until && usec() > msg_until) {
+ 				msg_until = 0;
+-				strcpy(msg, "space: photo");
++				strcpy(msg, ready ? "space: photo" : "v: photos  q: quit");
+ 			}
+ 			gxw_text(&w, 1, msg);
+-			gxw_text(&w, 2, "c:cam  f:flip");
++			gxw_text(&w, 2, "c:cam f:flip v:pics");
+ 			gxw_text(&w, 3, "m:mirror  b:rb");
+ 		}
+ 	}
+-	cam_cmd(1, 0, NULL);			/* cameras off (and the LED) */
++	if (inited)
++		cam_cmd(1, 0, NULL);		/* cameras off (and the LED) */
+ 	gx_close();
++	unlink(PIDFILE);
+ 	GrClose();
+ 	return 0;
+ }
+diff --git a/user/microwin/src/demos/nanox/dsdesk.c b/user/microwin/src/demos/nanox/dsdesk.c
+index 9a2e0daf3..df66f4354 100644
+--- a/user/microwin/src/demos/nanox/dsdesk.c
++++ b/user/microwin/src/demos/nanox/dsdesk.c
+@@ -33,7 +33,7 @@ static const struct item accessories[] = {
+ };
+ static const struct item multimedia[] = {
+ 	{ "Camera", "/boot/dscam" },
+-	{ "Photos", "/boot/dsgallery" },
++	{ "Photos", "/boot/dscam", "photos" },
+ 	{ "Voice memos", "/boot/dsmemo" },
+ 	{ "Sound test", "/boot/dsplay" },
+ 	{ "3D gears", "/boot/dsgl3d" },
+diff --git a/user/microwin/src/demos/nanox/dsmemo.c b/user/microwin/src/demos/nanox/dsmemo.c
+index e22c58419..0a3ac361a 100644
+--- a/user/microwin/src/demos/nanox/dsmemo.c
++++ b/user/microwin/src/demos/nanox/dsmemo.c
+@@ -276,18 +276,20 @@ static void redraw_all(void)
+ 
+ /* ------------------------------------------------------------------ voice filter */
+ /*
+- * The microphone has a steady tone at 7.87 kHz in every recording (found in the spectrum of the saved memos: present in silence,
+- * far above speech), a small DC offset and a low rumble. Every recorded sample goes through a high-pass (one pole, about 80 Hz) and a 33 tap
+- * windowed sinc low-pass at 3.5 kHz: voice stays, the tone is gone. Integer maths (Q14).
++ * The microphone delivers 32728 samples a second (two per FIFO word). Every sample goes through a high-pass (one pole, about 80 Hz:
++ * DC offset and rumble) and a 49 tap windowed sinc low-pass at 4 kHz, and only every second filtered sample is kept: a clean 16364
++ * Hz recording (the filter removes everything above 4 kHz first, so nothing folds into the band, and the microphone's own steady
++ * tone near 7.9 kHz is gone too). Integer maths (Q14). If the driver ever reports a low rate, nothing is dropped.
+  */
+-#define NTAP	33
++#define NTAP	49
++static int in_rate = 32728, dec = 2, dphase;
+ static int fir_c[NTAP];
+ static short fir_h[NTAP];
+-static int fir_pos, hp_x1, hp_y1;
++static int fir_pos, hp_x1, hp_y1, hp_shift = 6;
+ 
+ static void filter_init(void)
+ {
+-	double fc = 3500.0 / (double)rec_rate, sum = 0.0, h[NTAP];
++	double fc = (dec > 1 ? 4000.0 : 3500.0) / (double)in_rate, sum = 0.0, h[NTAP];
+ 	int i;
+ 
+ 	for (i = 0; i < NTAP; i++) {
+@@ -299,28 +301,34 @@ static void filter_init(void)
+ 	for (i = 0; i < NTAP; i++)
+ 		fir_c[i] = (int)(h[i] / sum * 16384.0 + (h[i] < 0 ? -0.5 : 0.5));
+ 	memset(fir_h, 0, sizeof(fir_h));
+-	fir_pos = hp_x1 = hp_y1 = 0;
++	fir_pos = hp_x1 = hp_y1 = dphase = 0;
++	hp_shift = in_rate >= 24000 ? 6 : 5;
+ }
+ 
+-static short filter_sample(short x)
++/* one input sample in; returns 1 and sets *out when an output sample is due (every dec-th) */
++static int filter_push(short x, short *out)
+ {
+ 	long acc = 0;
+ 	int k, j, y;
+ 
+-	y = x - hp_x1 + hp_y1 - (hp_y1 >> 5);		/* DC blocker and rumble filter, about 80 Hz */
++	y = x - hp_x1 + hp_y1 - (hp_y1 >> hp_shift);	/* DC blocker and rumble filter */
+ 	hp_x1 = x;
+ 	hp_y1 = y;
+ 	fir_h[fir_pos] = y > 32767 ? 32767 : (y < -32768 ? -32768 : y);
+ 	j = fir_pos;
++	if (++fir_pos >= NTAP)
++		fir_pos = 0;
++	if (++dphase < dec)
++		return 0;
++	dphase = 0;
+ 	for (k = 0; k < NTAP; k++) {
+ 		acc += (long)fir_c[k] * fir_h[j];
+ 		if (--j < 0)
+ 			j = NTAP - 1;
+ 	}
+-	if (++fir_pos >= NTAP)
+-		fir_pos = 0;
+ 	acc >>= 14;
+-	return acc > 32767 ? 32767 : (acc < -32768 ? -32768 : (short)acc);
++	*out = acc > 32767 ? 32767 : (acc < -32768 ? -32768 : (short)acc);
++	return 1;
+ }
+ 
+ /* ------------------------------------------------------------------ scope input */
+@@ -366,7 +374,7 @@ static int dsp_rate;		/* the rate the driver accepted in the last dsp_open */
+ 
+ static int dsp_open(int mode, int rate, int channels)
+ {
+-	int fd = open("/dev/dsp", mode | O_NONBLOCK), frag = (8 << 16) | 10, fmt = AFMT_S16_LE, r = rate, c = channels;
++	int fd = open("/dev/dsp", mode | O_NONBLOCK), frag = ((mode == O_RDONLY ? 32 : 8) << 16) | 10, fmt = AFMT_S16_LE, r = rate, c = channels;
+ 
+ 	int e1, e2, e3, e4;
+ 
+@@ -480,15 +488,18 @@ static void start_record(void)
+ 		strcpy(msg, "out of memory");
+ 		return;
+ 	}
+-	dsp = dsp_open(O_RDONLY, RATE, 1);
++	dsp = dsp_open(O_RDONLY, 32728, 1);
+ 	if (dsp < 0) {
+ 		free(rec_buf);
+ 		rec_buf = NULL;
+ 		strcpy(msg, "cannot open /dev/dsp");
+ 		return;
+ 	}
+-	if (dsp_rate >= 8000 && dsp_rate <= 48000)
+-		rec_rate = dsp_rate;		/* what the driver delivers */
++	if (dsp_rate >= 8000 && dsp_rate <= 48000) {
++		in_rate = dsp_rate;		/* what the driver delivers */
++		dec = in_rate >= 24000 ? 2 : 1;	/* 32728 Hz in: filtered and halved to 16364 Hz */
++		rec_rate = in_rate / dec;
++	}
+ 	{
+ 		int lk = open(REC_LOCK, O_WRONLY | O_CREAT, 0644);	/* tells the test-time log saver to leave the SD card alone */
+ 
+@@ -648,14 +659,16 @@ static void tick(void)
+ 				rec_cap += 256 * 1024;
+ 			}
+ 			{
+-				int q;
++				int q, no = 0;
++				short ob[512];
+ 
+ 				for (q = 0; q < n / 2; q++)
+-					buf[q] = filter_sample(buf[q]);
++					if (filter_push(buf[q], &ob[no]))
++						no++;
++				memcpy(rec_buf + rec_bytes, ob, no * 2);
++				rec_bytes += no * 2;
++				feed(ob, 1, no);
+ 			}
+-			memcpy(rec_buf + rec_bytes, buf, n);
+-			rec_bytes += n;
+-			feed(buf, 1, n / 2);
+ 		}
+ 		if (rec_bytes == 0 && elapsed_us() > 2000000L && !msg[0]) {
+ 			strcpy(msg, "REC  (no microphone data yet)");
+-- 
+2.56.0
+
