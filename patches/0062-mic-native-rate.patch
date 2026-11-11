@@ -1,0 +1,353 @@
+From 4daad61c2d8868459628a995dd9b362e76b7c054 Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 08:19:29 -0600
+Subject: [PATCH] Mic: every FIFO sample stored exactly once at the FIFO's own
+ rate (16364 Hz, offered as the only capture rate); the ARM7 timer ticks at
+ 32.7 kHz only to poll. Fixes the half speed (deep voice) and the whine (each
+ sample was stored twice). Volume poll pauses during a recording;
+ overrun/stall restarts counted separately; dsmemo uses the rate the driver
+ reports
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ linux-2.6.x/arch/arm/mach-nds/arm7/dsivol.c   |   5 +
+ .../arch/arm/mach-nds/arm7/microphone.c       | 132 ++++++++++++------
+ .../arch/arm/mach-nds/arm7/microphone.h       |   3 +
+ linux-2.6.x/arch/arm/mach-nds/volume.c        |   4 +-
+ linux-2.6.x/sound/arm/nds-sound.c             |   7 +
+ user/microwin/src/demos/nanox/dsmemo.c        |  11 +-
+ 6 files changed, 119 insertions(+), 43 deletions(-)
+
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/dsivol.c b/linux-2.6.x/arch/arm/mach-nds/arm7/dsivol.c
+index 494ed8e75..778e64204 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/arm7/dsivol.c
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/dsivol.c
+@@ -23,6 +23,7 @@
+ 
+ #include "dsitouch.h"
+ #include "dsivol.h"
++#include "microphone.h"
+ 
+ #define REG_I2CDATA	(*(volatile u8 *)0x04004500)
+ #define REG_I2CCNT	(*(volatile u8 *)0x04004501)
+@@ -202,6 +203,10 @@ void dsivol_poll(void)
+ 
+ 	if (++count < 12)
+ 		return;
++	if (mic_running()) {		/* a recording is more important than the volume popup: the I2C read takes ms */
++		count = 11;
++		return;
++	}
+ 	count = 0;
+ 	if (!dsitouch_active())
+ 		return;
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/microphone.c b/linux-2.6.x/arch/arm/mach-nds/arm7/microphone.c
+index 71d25b2a8..814f3f7cf 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/arm7/microphone.c
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/microphone.c
+@@ -35,8 +35,9 @@ static s16 dsi_last;
+ 
+ /* diagnostics, fetched by the ARM9 (mic_diag, /proc/dsimic) */
+ static s16 dbg_smin = 0x7fff, dbg_smax = -0x8000;
+-static u32 dbg_restart;
++static u32 dbg_restart_ovr, dbg_restart_stall;
+ static int empty_run;
++static int mic_is_running;
+ static u32 dbg_on, dbg_start, dbg_stop, dbg_irq, dbg_full, dbg_empty, dbg_have, dbg_wraps;
+ 
+ 
+@@ -69,44 +70,18 @@ static void dsi_mic_amp(int on)
+ 	}
+ }
+ 
+-/* Switch the FIFO off and on again, emptied. The FIFO stops for good once it has overrun (the log of w96c showed MICCNT with the
+- * overrun flag set and 8 seconds of one constant sample): the ARM7 was busy in an SD request and missed the timer ticks. */
+-static void dsi_fifo_restart(void)
++/* Switch the FIFO off and on again, emptied. The FIFO stops for good once it has overrun (a recording froze on one sample after
++ * 8 seconds, MICCNT had the overrun flag set): the ARM7 was busy in an SD request or a touch read and missed the ticks. */
++static void dsi_fifo_restart(int overrun)
+ {
+ 	REG_MICCNT &= ~MICCNT_ENABLE;
+ 	REG_MICCNT = MICCNT_CLEAR_FIFO | MICCNT_FORMAT_NORMAL;
+ 	REG_MICCNT |= MICCNT_ENABLE;
+-	dbg_restart++;
+-	empty_run = 0;
+-}
+-
+-/* the newest sample in the FIFO (signed 16 bit), else the previous one */
+-static s16 dsi_sample(void)
+-{
+-	int n = 64;
+-	u16 cnt = REG_MICCNT;
+-
+-	if (cnt & MICCNT_OVERRUN) {
+-		dsi_fifo_restart();
+-	} else if (cnt & MICCNT_EMPTY) {
+-		if (++empty_run > 600)		/* no sample for hundreds of ticks: it has stalled */
+-			dsi_fifo_restart();
+-	} else {
+-		empty_run = 0;
+-	}
+-
+-	if (REG_MICCNT & MICCNT_EMPTY)
+-		dbg_empty++;
++	if (overrun)
++		dbg_restart_ovr++;
+ 	else
+-		dbg_full++;
+-	while (!(REG_MICCNT & MICCNT_EMPTY) && n--) {
+-		dsi_last = (s16)(REG_MICDATA & 0xffff);
+-		if (dsi_last < dbg_smin)
+-			dbg_smin = dsi_last;
+-		if (dsi_last > dbg_smax)
+-			dbg_smax = dsi_last;
+-	}
+-	return dsi_last;
++		dbg_restart_stall++;
++	empty_run = 0;
+ }
+ 
+ //same as SOUND_FREQ(n)
+@@ -208,6 +183,7 @@ void mic_set_period_size(u32 size)
+ void mic_start()
+ {
+ 	dbg_start++;
++	mic_is_running = 1;
+ 	// Setup timer3, since timer0 is used for wifi, 
+ 	// and timers 1 and 2 are for sound.
+ 	if (dsitouch_active()) {		/* DSi: FIFO on, 32.7 kHz, normal format, emptied */
+@@ -217,10 +193,13 @@ void mic_start()
+ 		dsi_last = 0;
+ 		dbg_smin = 0x7fff;
+ 		dbg_smax = -0x8000;
+-		dbg_restart = 0;
++		dbg_restart_ovr = dbg_restart_stall = 0;
+ 		empty_run = 0;
+ 	}
+-	REG_TM3CNT_L = MIC_FREQ(mic_rate);
++	if (dsitouch_active())
++		REG_TM3CNT_L = (u16)(0 - 1024);	/* ticks at the bus clock / 1024 = 32.7 kHz: faster than the FIFO produces samples */
++	else
++		REG_TM3CNT_L = MIC_FREQ(mic_rate);
+ 	REG_TM3CNT_H = NDS_TCR_ENB | NDS_TCR_CLK | NDS_TCR_IRQ;
+ 	NDS_IE |= IRQ_TIMER3;
+ }
+@@ -231,6 +210,7 @@ void mic_start()
+ int mic_stop(void)
+ {
+ 	dbg_stop++;
++	mic_is_running = 0;
+ 	//turn off the timer.
+ 	REG_TM3CNT_H &= ~NDS_TCR_ENB;
+ 	if (dsitouch_active())
+@@ -242,17 +222,86 @@ int mic_stop(void)
+ 	return current_ptr;
+ }
+ 
++/********************
++ *mic_timer_handler()
++ ********************/
++/* store one sample (signed 16 bit) in the ARM9's buffer in the format it asked for, and say so once per period */
++static void dsi_push(s16 sample)
++{
++	if (mic_format & MIC_FORMAT_8BIT) {
++		u8 v;
++
++		if (!mic_buffer8)
++			return;
++		v = (u8)(sample >> 8);			/* signed 8 bit */
++		if (!(mic_format & MIC_FORMAT_SIGNED))
++			v ^= 0x80;
++		mic_buffer8[current_ptr] = v;
++		current_ptr++;
++	} else {
++		if (!mic_buffer16)
++			return;
++		mic_buffer16[current_ptr / 2] = (mic_format & MIC_FORMAT_SIGNED) ? (u16)sample : (u16)sample ^ 0x8000;
++		current_ptr += 2;
++	}
++	if (period_size > 0 && current_ptr % period_size == 0) {
++		dbg_have++;
++		nds_fifo_send(FIFO_MIC | FIFO_MIC_HAVEDATA);
++	}
++	if (current_ptr >= buffer_size) {
++		dbg_wraps++;
++		current_ptr = 0;
++	}
++}
++
++/*
++ * DSi tick: the timer only has to be faster than the FIFO. Every sample the FIFO has is stored exactly once, so the recording
++ * has the FIFO's own sample rate (the I2S clock, bus clock / 1024 = 32.7 kHz, halved in the NORMAL format: 16364 Hz, which
++ * the ARM9 sound driver offers as the capture rate). (The first version took the newest sample once per tick at a rate that
++ * was twice what was asked for: half speed and a whine from every sample being stored twice.)
++ */
++static void dsi_timer_tick(void)
++{
++	u16 cnt = REG_MICCNT;
++	int n = 64;
++
++	if (cnt & MICCNT_OVERRUN) {
++		dsi_fifo_restart(1);
++		return;
++	}
++	if (cnt & MICCNT_EMPTY) {
++		dbg_empty++;
++		if (++empty_run > 600)			/* nothing for 600 ticks (18 ms): it has stalled */
++			dsi_fifo_restart(0);
++		return;
++	}
++	empty_run = 0;
++	dbg_full++;
++	while (!(REG_MICCNT & MICCNT_EMPTY) && n--) {
++		dsi_last = (s16)(REG_MICDATA & 0xffff);
++		if (dsi_last < dbg_smin)
++			dbg_smin = dsi_last;
++		if (dsi_last > dbg_smax)
++			dbg_smax = dsi_last;
++		dsi_push(dsi_last);
++	}
++}
++
+ /********************
+  *mic_timer_handler()
+  ********************/
+ void mic_timer_handler(void)
+ {
+ 	dbg_irq++;
++	if (dsitouch_active()) {
++		dsi_timer_tick();
++		return;
++	}
+ 	if (mic_format & MIC_FORMAT_8BIT)
+ 	{
+ 		if (mic_buffer8) 
+ 		{
+-			mic_buffer8[current_ptr] = dsitouch_active() ? (u8)((dsi_sample() >> 8) ^ 0x80) : mic_read8();
++			mic_buffer8[current_ptr] = mic_read8();
+ 			if (mic_format & MIC_FORMAT_SIGNED)
+ 				mic_buffer8[current_ptr] = mic_buffer8[current_ptr] ^ 0x80;
+ 			current_ptr++;
+@@ -262,7 +311,7 @@ void mic_timer_handler(void)
+ 	{
+ 		if (mic_buffer16)
+ 		{
+-			mic_buffer16[current_ptr/2] = dsitouch_active() ? (u16)(((u16)dsi_sample() ^ 0x8000) >> 4) : mic_read12();
++			mic_buffer16[current_ptr/2] = mic_read12();
+ 			if (mic_format & MIC_FORMAT_SIGNED)
+ 				mic_buffer16[current_ptr/2] = (mic_buffer16[current_ptr/2] - 2048) << 4;
+ 			current_ptr+=2;
+@@ -289,7 +338,7 @@ void mic_diag(u32 *touch, u32 *diag, u32 *info)
+ {
+ 	info[0] = (u32)(s32)dbg_smin;
+ 	info[1] = (u32)(s32)dbg_smax;
+-	info[2] = dbg_restart;
++	info[2] = (dbg_restart_ovr << 16) | (dbg_restart_stall & 0xffff);
+ 	touch[0] = dbg_on;
+ 	touch[1] = dbg_start;
+ 	touch[2] = dbg_stop;
+@@ -307,3 +356,8 @@ void mic_diag(u32 *touch, u32 *diag, u32 *info)
+ 	diag[6] = REG_MICCNT | (REG_TM3CNT_H << 16);
+ 	diag[7] = NDS_IE;
+ }
++
++int mic_running(void)
++{
++	return mic_is_running;
++}
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/microphone.h b/linux-2.6.x/arch/arm/mach-nds/arm7/microphone.h
+index e5398c9b8..c9e5d8b89 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/arm7/microphone.h
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/microphone.h
+@@ -31,5 +31,8 @@ int mic_stop(void);
+ /* Timer handler */
+ void mic_timer_handler(void);
+ 
++/* 1 while a recording is running (the volume poll waits: its I2C reads would make the FIFO overrun) */
++int mic_running(void);
++
+ /* counters for the ARM9 (NDS_SD_CMD_MICDIAG) */
+ void mic_diag(u32 *touch, u32 *diag, u32 *info);
+diff --git a/linux-2.6.x/arch/arm/mach-nds/volume.c b/linux-2.6.x/arch/arm/mach-nds/volume.c
+index e686f4734..84e55c0b4 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/volume.c
++++ b/linux-2.6.x/arch/arm/mach-nds/volume.c
+@@ -46,9 +46,9 @@ static int mic_read_proc(char *page, char **start, off_t off, int count, int *eo
+ 	else
+ 		len = sprintf(page, "mic_on=%u start=%u stop=%u irq=%u fifo_full=%u fifo_empty=%u period_msgs=%u wraps=%u\n"
+ 			      "buf=%08x size=%u period=%u rate=%u fmt=%u last=%08x miccnt/tm3=%08x ie=%08x\n"
+-			      "samples: lowest %d highest %d, fifo restarts %u\n",
++			      "samples: lowest %d highest %d, fifo restarts: overrun %u stall %u\n",
+ 			      d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7], d[8], d[9], d[10], d[11], d[12], d[13], d[14], d[15],
+-			      (int)d[16], (int)d[17], d[18]);
++			      (int)d[16], (int)d[17], d[18] >> 16, d[18] & 0xffff);
+ 	*eof = 1;
+ 	if (off >= len)
+ 		return 0;
+diff --git a/linux-2.6.x/sound/arm/nds-sound.c b/linux-2.6.x/sound/arm/nds-sound.c
+index fa5283d10..a2be4004d 100644
+--- a/linux-2.6.x/sound/arm/nds-sound.c
++++ b/linux-2.6.x/sound/arm/nds-sound.c
+@@ -85,9 +85,16 @@ static snd_pcm_hardware_t snd_nds_capture_hw = {
+ 				SNDRV_PCM_FMTBIT_S8 | 
+ 				SNDRV_PCM_FMTBIT_U16_LE |
+ 				SNDRV_PCM_FMTBIT_S16_LE,
++#ifdef CONFIG_NDS_DSI
++	/* the DSi's microphone FIFO has one sample rate: bus clock / 2048 (see arm7/microphone.c) */
++	.rates = SNDRV_PCM_RATE_KNOT,
++	.rate_min = 16364,
++	.rate_max = 16364,
++#else
+ 	.rates = SNDRV_PCM_RATE_8000_48000,
+ 	.rate_min = 8000,
+ 	.rate_max = 48000,
++#endif
+ 	.channels_min = 1,
+ 	.channels_max = 1,
+ 	.buffer_bytes_max = DMA_BUFFERSIZE_CAPTURE,
+diff --git a/user/microwin/src/demos/nanox/dsmemo.c b/user/microwin/src/demos/nanox/dsmemo.c
+index 312dd0a9b..4ce5168d3 100644
+--- a/user/microwin/src/demos/nanox/dsmemo.c
++++ b/user/microwin/src/demos/nanox/dsmemo.c
+@@ -23,7 +23,9 @@
+ #include "w95.h"
+ 
+ #define MEMO_DIR	"/home/memos"
+-#define RATE		16000
++/* the DSi microphone records at one rate (bus clock / 2048); the driver says so, and the file header carries what it said */
++static int rec_rate = 16364;
++#define RATE		rec_rate
+ #define MAXMEMOS	64
+ #define MAXLOAD		(3 * 1024 * 1024)	/* longest memo that is loaded for playback */
+ 
+@@ -309,6 +311,8 @@ static void level_update(void)
+ 
+ /* ------------------------------------------------------------------ sound device */
+ 
++static int dsp_rate;		/* the rate the driver accepted in the last dsp_open */
++
+ static int dsp_open(int mode, int rate, int channels)
+ {
+ 	int fd = open("/dev/dsp", mode | O_NONBLOCK), frag = (8 << 16) | 10, fmt = AFMT_S16_LE, r = rate, c = channels;
+@@ -327,6 +331,7 @@ static int dsp_open(int mode, int rate, int channels)
+ 	e3 = e3 < 0 ? errno : 0;
+ 	e4 = ioctl(fd, SNDCTL_DSP_SPEED, &r);
+ 	e4 = e4 < 0 ? errno : 0;
++	dsp_rate = r;
+ 	fprintf(stderr, "dsmemo: dsp %s: fragment errno %d, format %#x errno %d, channels %d errno %d, rate %d errno %d\n",
+ 		mode == O_RDONLY ? "capture" : "playback", e1, fmt, e2, c, e3, r, e4);
+ 	if (mode == O_RDONLY) {
+@@ -430,7 +435,9 @@ static void start_record(void)
+ 		strcpy(msg, "cannot open /dev/dsp");
+ 		return;
+ 	}
+-	fprintf(stderr, "dsmemo: recording to %s (dsp fd %d), kept in memory until Stop\n", rec_path, dsp);
++	if (dsp_rate >= 8000 && dsp_rate <= 48000)
++		rec_rate = dsp_rate;		/* what the driver delivers */
++	fprintf(stderr, "dsmemo: recording to %s (dsp fd %d) at %d Hz, kept in memory until Stop\n", rec_path, dsp, rec_rate);
+ 	rec_bytes = 0;
+ 	msg[0] = 0;
+ 	memset(hist_min, 0, sizeof(hist_min));
+-- 
+2.56.0
+
