@@ -1,0 +1,333 @@
+From 2c62f3bb8f7cc750de79276fbc99a28456f9ad55 Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 13:48:57 -0600
+Subject: [PATCH] Camera: kernel captures into two buffers and re-arms the next
+ frame at once (frame rate was two sensor frames per loop), dscam shows a
+ 128x96 preview texture uploaded right after a screen refresh (the 98 KB
+ upload every frame left lines across the picture); voice memos: 80 Hz
+ high-pass, mono playback at twice the rate with interpolation (removes the 16
+ kHz image whine of the DS sound channels)
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ linux-2.6.x/drivers/video/ndsfb.c      | 103 ++++++++++++++++++-------
+ user/microwin/src/demos/nanox/dscam.c  |  35 ++++++++-
+ user/microwin/src/demos/nanox/dsmemo.c |  53 ++++++++++---
+ 3 files changed, 151 insertions(+), 40 deletions(-)
+
+diff --git a/linux-2.6.x/drivers/video/ndsfb.c b/linux-2.6.x/drivers/video/ndsfb.c
+index 13157ea00..9a9acb21c 100644
+--- a/linux-2.6.x/drivers/video/ndsfb.c
++++ b/linux-2.6.x/drivers/video/ndsfb.c
+@@ -17,6 +17,7 @@
+ #include <linux/slab.h>
+ #include <linux/vmalloc.h>
+ #include <linux/delay.h>
++#include <linux/time.h>
+ #include <linux/interrupt.h>
+ #include <linux/wait.h>
+ #include <asm/irq.h>
+@@ -433,7 +434,47 @@ extern int dsisd_camera_cmd(unsigned int sub, unsigned int arg, unsigned int *va
+ #define NDMA_BDELAY(n)	(*(volatile u32 *)(0x04004114 + (n) * 0x1C))
+ #define NDMA_CR(n)	(*(volatile u32 *)(0x0400411C + (n) * 0x1C))
+ 
+-static u16 cam_frame[CAM_FRAME_W * CAM_FRAME_H] __attribute__((aligned(32)));
++/* two frame buffers: while the user program gets one, the next frame is already being captured into the other */
++static u16 cam_frame[2][CAM_FRAME_W * CAM_FRAME_H] __attribute__((aligned(32)));
++static int cam_cur;			/* the buffer being filled by the running capture */
++static int cam_armed;			/* a capture is running (or finished and not yet collected) */
++static unsigned long cam_t_arm_us, cam_t_done_us;
++static unsigned long cam_frame_us = 66000;	/* frame period, measured while the program keeps collecting frames */
++
++static unsigned long cam_now_us(void)
++{
++	struct timeval tv;
++
++	do_gettimeofday(&tv);
++	return tv.tv_sec * 1000000UL + tv.tv_usec;
++}
++
++/* start capturing one frame into buffer b (the sequence libnds uses for every frame) */
++static void cam_arm(int b)
++{
++	REG_CAM_CNT &= ~CAM_CNT_ENABLE;
++	REG_CAM_CNT &= ~0x200F;
++	REG_CAM_CNT |= CAM_CNT_FORMAT_RGB | 3;		/* RGB out, 4 scanlines per block */
++	REG_CAM_CNT |= CAM_CNT_FLUSH;
++	REG_CAM_CNT |= CAM_CNT_ENABLE;
++	dmac_flush_range((unsigned long)cam_frame[b], (unsigned long)cam_frame[b] + sizeof(cam_frame[b]));
++	NDMA_SRC(CAM_NDMA) = 0x04004204;		/* REG_CAM_DATA */
++	NDMA_DEST(CAM_NDMA) = (u32)cam_frame[b];
++	NDMA_LENGTH(CAM_NDMA) = (CAM_FRAME_W * CAM_FRAME_H) >> 1;
++	NDMA_BLENGTH(CAM_NDMA) = 512;
++	NDMA_BDELAY(CAM_NDMA) = 2;
++	NDMA_CR(CAM_NDMA) = (2 << 13) | (4 << 16) | (11 << 24) | (1u << 31);	/* source fixed, block scaler 4, start by camera, on */
++	cam_armed = 1;
++	cam_t_arm_us = cam_now_us();
++}
++
++static void cam_disarm(void)
++{
++	NDMA_CR(CAM_NDMA) = 0;
++	REG_CAM_CNT &= ~CAM_CNT_ENABLE;
++	cam_armed = 0;
++	cam_t_done_us = 0;
++}
+ static DECLARE_MUTEX(cam_mutex);
+ static int cam_preview_set;		/* the sensor has been told to preview since it was last selected */
+ 
+@@ -451,6 +492,7 @@ static void ndsfb_cam_off(void)
+ 	REG_SCFG_CLK &= ~SCFG_CLK_CAMIF;
+ 	udelay(200);
+ 	cam_preview_set = 0;
++	cam_disarm();
+ }
+ 
+ static int ndsfb_cam_cmd(struct ndsfb_cam __user *arg)
+@@ -493,6 +535,7 @@ static int ndsfb_cam_cmd(struct ndsfb_cam __user *arg)
+ 		ndsfb_cam_off();
+ 		break;
+ 	case 2:
++		cam_disarm();
+ 		cam_preview_set = 0;
+ 		ret = dsisd_camera_cmd(2, c.arg, &v, &e);
+ 		break;
+@@ -510,7 +553,8 @@ static int ndsfb_cam_cmd(struct ndsfb_cam __user *arg)
+ static int ndsfb_cam_frame(void __user *dst)
+ {
+ 	unsigned int v, e;
+-	int ret = 0, i;
++	unsigned long now, el;
++	int ret = 0, i, filled;
+ 
+ 	down(&cam_mutex);
+ 	if (!(REG_CAM_MCNT & CAM_MCNT_PWR_18V_IO)) {
+@@ -524,32 +568,37 @@ static int ndsfb_cam_frame(void __user *dst)
+ 		}
+ 		cam_preview_set = 1;
+ 	}
+-	REG_CAM_CNT &= ~CAM_CNT_ENABLE;
+-	REG_CAM_CNT &= ~0x200F;
+-	REG_CAM_CNT |= CAM_CNT_FORMAT_RGB | 3;		/* RGB out, 4 scanlines per block */
+-	REG_CAM_CNT |= CAM_CNT_FLUSH;
+-	REG_CAM_CNT |= CAM_CNT_ENABLE;
+-	dmac_flush_range((unsigned long)cam_frame, (unsigned long)cam_frame + sizeof(cam_frame));
+-	NDMA_SRC(CAM_NDMA) = 0x04004204;		/* REG_CAM_DATA */
+-	NDMA_DEST(CAM_NDMA) = (u32)cam_frame;
+-	NDMA_LENGTH(CAM_NDMA) = (CAM_FRAME_W * CAM_FRAME_H) >> 1;
+-	NDMA_BLENGTH(CAM_NDMA) = 512;
+-	NDMA_BDELAY(CAM_NDMA) = 2;
+-	NDMA_CR(CAM_NDMA) = (2 << 13) | (4 << 16) | (11 << 24) | (1u << 31);	/* source fixed, block scaler 4, start by camera, on */
+-	for (i = 0; i < 300 && (NDMA_CR(CAM_NDMA) & (1u << 31)); i++)	/* up to ~600 ms */
+-		msleep(2);
+-	if (NDMA_CR(CAM_NDMA) & (1u << 31)) {
+-		NDMA_CR(CAM_NDMA) = 0;
+-		ret = -ETIMEDOUT;
+-	}
+-	REG_CAM_CNT &= ~CAM_CNT_ENABLE;
+-	if (!ret) {
+-		dmac_flush_range((unsigned long)cam_frame, (unsigned long)cam_frame + sizeof(cam_frame));
+-		for (i = 0; i < CAM_FRAME_W * CAM_FRAME_H; i++)
+-			cam_frame[i] |= 0x8000;		/* opaque: the frame is used as a texture and as a frame buffer picture */
+-		if (copy_to_user(dst, cam_frame, sizeof(cam_frame)))
+-			ret = -EFAULT;
++	if (!cam_armed)
++		cam_arm(cam_cur);
++	/* wait for the capture. Frames come about every 66 ms; sleep for most of it, then poll closely, so the next capture is
++	 * started right after this one ends (a capture only starts at the beginning of a camera frame: starting late loses a
++	 * whole frame and halves the frame rate) */
++	for (;;) {
++		if (!(NDMA_CR(CAM_NDMA) & (1u << 31)))
++			break;
++		el = cam_now_us() - cam_t_arm_us;
++		if (el > 700000UL) {
++			cam_disarm();
++			ret = -ETIMEDOUT;
++			goto out;
++		}
++		if (el + 15000UL < cam_frame_us || el > cam_frame_us + 30000UL)
++			msleep(2);
++		else
++			udelay(100);
+ 	}
++	now = cam_now_us();
++	if (cam_t_done_us && now - cam_t_done_us < 300000UL)
++		cam_frame_us = (cam_frame_us * 3 + (now - cam_t_done_us)) / 4;
++	cam_t_done_us = now;
++	filled = cam_cur;
++	cam_cur ^= 1;
++	cam_arm(cam_cur);			/* the next frame starts at once, into the other buffer */
++	dmac_flush_range((unsigned long)cam_frame[filled], (unsigned long)cam_frame[filled] + sizeof(cam_frame[filled]));
++	for (i = 0; i < CAM_FRAME_W * CAM_FRAME_H; i++)
++		cam_frame[filled][i] |= 0x8000;		/* opaque: the frame is used as a texture and as a frame buffer picture */
++	if (copy_to_user(dst, cam_frame[filled], sizeof(cam_frame[filled])))
++		ret = -EFAULT;
+ out:
+ 	up(&cam_mutex);
+ 	return ret;
+diff --git a/user/microwin/src/demos/nanox/dscam.c b/user/microwin/src/demos/nanox/dscam.c
+index 2a7837167..d5e5d3dc0 100644
+--- a/user/microwin/src/demos/nanox/dscam.c
++++ b/user/microwin/src/demos/nanox/dscam.c
+@@ -20,7 +20,32 @@ struct ndsfb_cam {
+ 	unsigned int value, err;
+ };
+ 
+-static unsigned short frame[PW * PH] __attribute__((aligned(32)));
++static unsigned short frame[PW * PH] __attribute__((aligned(32)));	/* the full frame (for photos) */
++
++/* The preview is a 128x96 copy (2x2 averaged) loaded as a 128x128 texture: a quarter of the data, so the texture memory is
++ * unavailable to the 3D engine for a fraction of a millisecond instead of several (the full size upload every frame left lines
++ * across the picture), and the window is only 160x120 anyway. */
++#define TW	128
++#define TH	96
++static unsigned short small[TW * TH] __attribute__((aligned(32)));
++
++static void downscale(void)
++{
++	int x, y;
++
++	for (y = 0; y < TH; y++) {
++		const unsigned short *a = frame + (2 * y) * PW, *b = a + PW;
++
++		for (x = 0; x < TW; x++) {
++			unsigned int p0 = a[2 * x], p1 = a[2 * x + 1], p2 = b[2 * x], p3 = b[2 * x + 1];
++			unsigned int r = ((p0 & 31) + (p1 & 31) + (p2 & 31) + (p3 & 31)) >> 2;
++			unsigned int g = (((p0 >> 5) & 31) + ((p1 >> 5) & 31) + ((p2 >> 5) & 31) + ((p3 >> 5) & 31)) >> 2;
++			unsigned int bl = (((p0 >> 10) & 31) + ((p1 >> 10) & 31) + ((p2 >> 10) & 31) + ((p3 >> 10) & 31)) >> 2;
++
++			small[y * TW + x] = 0x8000 | r | (g << 5) | (bl << 10);
++		}
++	}
++}
+ 
+ static long usec(void)
+ {
+@@ -47,12 +72,12 @@ static int cam_cmd(unsigned int cmd, unsigned int arg, struct ndsfb_cam *out)
+ static void draw_picture(int flipx, int flipy)
+ {
+ 	double hw = 2.0, hh = 1.5;		/* a 4:3 quad at z = -2; the window's frustum is 2 wide at distance 1 */
+-	double s0 = flipx ? PW : 0, s1 = flipx ? 0 : PW, t0 = flipy ? PH : 0, t1 = flipy ? 0 : PH;
++	double s0 = flipx ? TW : 0, s1 = flipx ? 0 : TW, t0 = flipy ? TH : 0, t1 = flipy ? 0 : TH;
+ 
+ 	gx_mode(GX_MODELVIEW);
+ 	gx_identity();
+ 	gx_polyattr(0, GX_CULL_NONE, 31);
+-	gx_texture(0, 256, 256, 0);		/* the frame fills the upper 192 rows of a 256x256 texture */
++	gx_texture(0, TW, 128, 0);		/* the preview fills the upper 96 rows of a 128x128 texture */
+ 	gx_begin(GX_QUADS);
+ 	gx_color(31, 31, 31);
+ 	gx_texcoord(s0, t0); gx_vertex(-hw, hh, -2.0);
+@@ -174,7 +199,9 @@ int main(int argc, char **argv)
+ 				fails = 0;
+ 				frames++;
+ 				got_frame = 1;
+-				gx_texture_load(0, frame, sizeof(frame));
++				downscale();
++				gx_vsync();			/* load right after a screen refresh starts */
++				gx_texture_load(0, small, sizeof(small));
+ 				draw_picture(flipx, flipy);
+ 			} else if (++fails == 5) {
+ 				sprintf(txt, "no frames (%d)", errno);
+diff --git a/user/microwin/src/demos/nanox/dsmemo.c b/user/microwin/src/demos/nanox/dsmemo.c
+index e9e3cd021..217565393 100644
+--- a/user/microwin/src/demos/nanox/dsmemo.c
++++ b/user/microwin/src/demos/nanox/dsmemo.c
+@@ -276,7 +276,7 @@ static void redraw_all(void)
+ /* ------------------------------------------------------------------ voice filter */
+ /*
+  * The microphone has a steady tone at 7.87 kHz in every recording (found in the spectrum of the saved memos: present in silence,
+- * far above speech), and a small DC offset. Every recorded sample goes through a DC blocker (one pole, about 10 Hz) and a 33 tap
++ * far above speech), a small DC offset and a low rumble. Every recorded sample goes through a high-pass (one pole, about 80 Hz) and a 33 tap
+  * windowed sinc low-pass at 3.5 kHz: voice stays, the tone is gone. Integer maths (Q14).
+  */
+ #define NTAP	33
+@@ -306,7 +306,7 @@ static short filter_sample(short x)
+ 	long acc = 0;
+ 	int k, j, y;
+ 
+-	y = x - hp_x1 + hp_y1 - (hp_y1 >> 8);		/* DC blocker */
++	y = x - hp_x1 + hp_y1 - (hp_y1 >> 5);		/* DC blocker and rumble filter, about 80 Hz */
+ 	hp_x1 = x;
+ 	hp_y1 = y;
+ 	fir_h[fir_pos] = y > 32767 ? 32767 : (y < -32768 ? -32768 : y);
+@@ -544,6 +544,10 @@ static int load_memo(const char *name)
+ 	return pcm_len > 0 ? 0 : -3;
+ }
+ 
++static int up_mode;
++static short upbuf[1024];		/* 512 input samples become 1024 output samples */
++static int up_len, up_off;		/* bytes in upbuf, bytes of it already written */
++
+ static void start_play(void)
+ {
+ 	int r;
+@@ -558,7 +562,11 @@ static void start_play(void)
+ 		sprintf(msg, "cannot load memo (%d)", r);
+ 		return;
+ 	}
+-	dsp = dsp_open(O_WRONLY, pcm_rate, pcm_ch);
++	/* The DS sound channels repeat each sample (no interpolation), which puts an image of the voice around the sample rate: a whine
++	 * at 16 kHz. Mono memos are played at twice the rate with a linearly interpolated sample in between (image moves to 32 kHz). */
++	up_mode = (pcm_ch == 1 && pcm_rate <= 24000);
++	up_len = up_off = 0;
++	dsp = dsp_open(O_WRONLY, up_mode ? pcm_rate * 2 : pcm_rate, pcm_ch);
+ 	if (dsp < 0) {
+ 		free(pcm);
+ 		pcm = NULL;
+@@ -639,11 +647,37 @@ static void tick(void)
+ 		long pos, bps = pcm_rate * 2L * pcm_ch;
+ 		int n;
+ 
+-		while (pcm_written < pcm_len) {
+-			n = write(dsp, pcm + pcm_written, pcm_len - pcm_written > 4096 ? 4096 : pcm_len - pcm_written);
+-			if (n <= 0)
+-				break;
+-			pcm_written += n;
++		if (up_mode) {
++			for (;;) {
++				if (up_off >= up_len) {		/* the next 512 samples, doubled */
++					const short *in = (const short *)(pcm + pcm_written);
++					long left = (pcm_len - pcm_written) / 2;
++					int i, nin = left > 512 ? 512 : (int)left;
++
++					if (nin <= 0)
++						break;
++					for (i = 0; i < nin; i++) {
++						short a = in[i], b = i + 1 < left ? in[i + 1] : a;
++
++						upbuf[2 * i] = a;
++						upbuf[2 * i + 1] = (short)(((int)a + (int)b) / 2);
++					}
++					up_len = nin * 4;
++					up_off = 0;
++					pcm_written += nin * 2;
++				}
++				n = write(dsp, (char *)upbuf + up_off, up_len - up_off);
++				if (n <= 0)
++					break;
++				up_off += n;
++			}
++		} else {
++			while (pcm_written < pcm_len) {
++				n = write(dsp, pcm + pcm_written, pcm_len - pcm_written > 4096 ? 4096 : pcm_len - pcm_written);
++				if (n <= 0)
++					break;
++				pcm_written += n;
++			}
+ 		}
+ 		pos = (long)((elapsed_us() / 1000L) * bps / 1000L);	/* what has been heard so far, estimated */
+ 		if (pos > pcm_written)
+@@ -653,7 +687,8 @@ static void tick(void)
+ 			feed((const short *)(pcm + pcm_fed), pcm_ch, (pos - pcm_fed) / (2 * pcm_ch));
+ 			pcm_fed = pos;
+ 		}
+-		if (pos >= pcm_len) {
++		/* the end: what was heard reaches the end, plus a little for what is still in the sound buffer */
++		if (pos >= pcm_len && elapsed_us() >= pcm_len * 1000L / bps * 1000L + 500000L) {
+ 			stop_all();
+ 			draw_buttons();
+ 			last_secs = -1;
+-- 
+2.56.0
+
