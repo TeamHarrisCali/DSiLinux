@@ -232,6 +232,14 @@ Built; not run.
 - The photo ends at `Not starting ntpclient: network is down` with no prompt yet: either still booting (rc.common next starts extra terminals and `gpm` from the card) or stuck there. To be reported by the user. No `dsisd:`/I/O error lines were on screen at that moment.
 "n" ROMs: `out/dsi-mode/dslinux-dsimode-n-uc3.nds`, `-uc2`. Built; not run.
 
+## "n" build on the console (user's photo): boot stops after the ntpclient line
+Visible: the RAM-copy log (tar warnings "time stamp ... in the future" are only the DS clock being behind the PC's file dates; `bound var`, `bound home (empty)`), self-test lines, the rc.common banner, then nothing after `Not starting ntpclient: network is down`.
+Reading `rc.common`: after that line it runs `hostname`, writes `/etc/hosts`, then tests `MemTotal > 4000`. With 16 MB this is true for the first time ever (all earlier test boots were 4 MB), so it starts two extra `agetty` login terminals and `gpm`
+in the background. That branch is the prime suspect (not confirmed). Also, `rc.common` ends with `exit 0`, which also ends the sourcing `rc`, so the second self-test call never ran.
+"o" build (`out/dsi-mode/dslinux-dsimode-o-uc3.nds`, `-uc2`): the DSI build ships its own `rc.common` in the built-in filesystem (`/boot/rc.common`); `rc` copies it over the **RAM copy** of `/etc` (the card's copy is untouched, so no re-copy is needed).
+Differences from the original: progress markers (`rc: hostname/hosts`, `rc: extra terminals`, `rc: done`), the extra terminals and gpm are off unless `extra_terminals="YES"` in `/etc/rc.conf`, and the self-test runs once more just before `exit 0`. Built; not run.
+If it still stops, the last `rc:` marker on screen says which step.
+
 ## 3c. Faster ARM9 clock, 3d. Wi-Fi/cameras/DSP
 Not started. 3c is small but needs the SD result first; 3d unchanged from the feasibility finding.
 

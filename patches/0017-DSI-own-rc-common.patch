@@ -1,0 +1,266 @@
+From af4b9fc7ecbad8a2674eac680adc53495d4a8e66 Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <noreply@example.invalid>
+Date: Tue, 10 Nov 2026 21:30:18 -0600
+Subject: [PATCH] DSI: own rc.common in the built-in filesystem (extra
+ terminals/gpm off by default, progress markers, self-test at the end), copied
+ over the RAM /etc
+
+---
+ vendors/Nintendo/DSI/Makefile  |   1 +
+ vendors/Nintendo/DSI/rc        |  10 +-
+ vendors/Nintendo/DSI/rc.common | 206 +++++++++++++++++++++++++++++++++
+ 3 files changed, 215 insertions(+), 2 deletions(-)
+ create mode 100644 vendors/Nintendo/DSI/rc.common
+
+diff --git a/vendors/Nintendo/DSI/Makefile b/vendors/Nintendo/DSI/Makefile
+index 0c47f193a..2633126bd 100644
+--- a/vendors/Nintendo/DSI/Makefile
++++ b/vendors/Nintendo/DSI/Makefile
+@@ -102,6 +102,7 @@ romfs:
+ 	$(ROMFSINST) /boot/rc
+ 	$(ROMFSINST) /boot/inittab
+ 	$(ROMFSINST) -p +x /boot/selftest
++	$(ROMFSINST) /boot/rc.common
+ 	$(ROMFSINST) /$(FATFS)/linux/etc/issue
+ 	# copy some Nintendo specific files to romfs
+ 	$(ROMFSINST) $(NDS_COMMON)/rc.common /$(FATFS)/linux/etc/rc.common
+diff --git a/vendors/Nintendo/DSI/rc b/vendors/Nintendo/DSI/rc
+index 1f35f6bdc..f783ae37e 100644
+--- a/vendors/Nintendo/DSI/rc
++++ b/vendors/Nintendo/DSI/rc
+@@ -75,6 +75,14 @@ do
+ 		fi
+ 	fi
+ done
++# Use the DSI build's own rc.common (kept in the built-in filesystem) over the RAM copy of /etc. The card's copy is not touched.
++if [ -f /boot/rc.common ]
++then
++	if ls /tmp/etc | grep -q .
++	then
++		/usr/bin/cp /boot/rc.common /etc/rc.common
++	fi
++fi
+ mount -t ramfs none /var/run
+ mount -t sysfs none /sys
+ 
+@@ -99,5 +107,3 @@ mknod /var/run/ttypf c 3 15
+ # the missing rc.common aborts this script.
+ [ -x /boot/selftest ] && /boot/selftest
+ . /etc/rc.common
+-# the self-test again, after rc.common's long output, so it is on screen when boot ends
+-[ -x /boot/selftest ] && /boot/selftest
+diff --git a/vendors/Nintendo/DSI/rc.common b/vendors/Nintendo/DSI/rc.common
+new file mode 100644
+index 000000000..b31881e77
+--- /dev/null
++++ b/vendors/Nintendo/DSI/rc.common
+@@ -0,0 +1,206 @@
++
++# set defaults
++[ -e /etc/rc.defaults ] && . /etc/rc.defaults
++
++# include overrides
++if [ -e /etc/rc.conf ]
++then
++	. /etc/rc.conf
++else
++	echo "************************************************************"
++	echo "********************   WARNING   ***************************"
++	echo "************************************************************"
++	echo "The file /etc/rc.conf does not exist on your system,"
++	echo "so the default configuration will be used."
++	echo "Type 'cfg_rc' at a command prompt"
++	echo "to create /etc/rc.conf to customise your dslinux installation."
++	echo "************************************************************"
++	echo "************************************************************"
++	echo "************************************************************"
++fi
++
++if [ ! "$font" = "" ]
++then
++	if [ -e "$font" ]
++	then
++		echo "Changing font size to $font" 
++		echo "Type 'consolechars -R' to revert" 
++		/usr/bin/consolechars -f $font
++	else
++		echo "$font does not exist!"
++	fi
++fi
++
++# /opt is BEFORE /usr/bin to speed up some applications
++PATH=/bin:/sbin:/opt:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin
++export PATH
++
++# create /etc/passwd if it doesn't exist
++if [ ! -f /etc/passwd ]
++then
++	echo "Creating default /etc/passwd"
++	echo "root:xxSVJVBe8UDn2:0:0:Tim Bisley:/home:/bin/sh" > /etc/passwd
++	echo "bin:x:1:1:bin:/bin:" >> /etc/passwd
++	echo "daemon:x:2:2:daemon:/sbin:" >> /etc/passwd
++	echo "nobody:x:99:99:Nobody:/:" >> /etc/passwd
++fi
++
++if [ "$start_syslogd" = "YES" ]
++then
++		/etc/rc.d/syslogd start
++	else
++		echo "Not starting syslogd"
++fi
++
++if [ "$start_hinged" = "YES" ]
++then
++		/etc/rc.d/hinged start
++	else
++		echo "Not starting hinged"
++fi
++
++# setup networking
++if [ "$enable_network_on_boot" = "YES" ]
++then
++	if /etc/rc.d/network start
++	then
++		__network_up="YES"
++	else
++		__network_up="NO"
++	fi
++else
++	echo "Not configuring network:"
++	echo "enable_network_on_boot is set to \"$enable_network_on_boot\""
++	echo "To configure wireless edit /etc/rc.conf or run 'wnc'."
++	__network_up="NO"
++fi
++#Start iptables before other services
++if [ "$start_iptables" = "YES" ]
++then
++	if [ "$__network_up" = "YES" ]
++	then
++		/etc/rc.d/iptables start
++	else
++		echo "Not starting iptables: network is down"
++	fi
++fi
++# Start ntpclient
++if [ "$start_ntpclient" = "YES" ]
++then
++	if [ "$__network_up" = "YES" ]
++	then
++		/etc/rc.d/ntpclient start
++	else
++		echo "Not starting ntpclient: network is down"
++	fi
++fi
++# start inetd if configured
++if [ "$start_inetd" = "YES" ]
++then
++	if [ "$__network_up" = "YES" ]
++	then
++		/etc/rc.d/inetd start
++	else
++		echo "Not starting inetd: network is down"
++	fi
++fi
++
++if [ "$start_openvpn" = "YES" ]
++then
++	if [ "$__network_up" = "YES" ]
++	then
++		/etc/rc.d/openvpn start
++	else
++		echo "Not starting openvpn: network is down"
++	fi
++fi
++
++if [ "$start_boa" = "YES" ]
++then
++	if [ "$__network_up" = "YES" ]
++	then
++		/etc/rc.d/boa start
++	else
++		echo "Not starting boa: network is down"
++	fi
++fi
++
++if [ "$start_inadyn" = "YES" ]
++then
++	if [ "$__network_up" = "YES" ]
++	then
++		/etc/rc.d/inadyn start
++	else
++		echo "Not starting inadyn: network is down"
++	fi
++fi
++
++if [ "$start_esd" = "YES" ]
++then
++	if [ "$__network_up" = "YES" ]
++	then
++		/etc/rc.d/esd start
++	else
++		echo "Not starting esd: network is down"
++	fi
++fi
++
++# Check for update if specified
++if [ "$check_update" = "YES" ]
++then
++	if [ "$__network_up" = "YES" ]
++	then
++		echo "Checking for update"
++		/etc/rc.d/update check
++	else
++		echo "Not checking for update: network is down"
++	fi
++fi
++# set hostname
++hostname $hostname
++
++# set up /etc/hosts so networking tools will work
++echo "rc: hostname/hosts"
++echo "127.0.0.1 $hostname" > /etc/hosts
++
++# DSLinuxDSi: the original starts two extra login terminals and gpm here when it sees more than 4 MB of RAM. With
++# 16 MB that branch had never run and the boot stalled after the ntpclient message, so it is off by default.
++# Set extra_terminals="YES" in /etc/rc.conf to get them back.
++echo "rc: extra terminals"
++if [ "$extra_terminals" = "YES" ]
++then
++	/usr/bin/agetty -n -l /bin/autologin 38400 tty2 linux &
++	/usr/bin/agetty -n -l /bin/autologin 38400 tty3 linux &
++	if [ -x /usr/bin/gpm ]
++	then
++	/usr/bin/gpm -m /dev/mouse0 -t ps2 &
++	fi
++else
++	echo "Extra terminals and gpm: off (extra_terminals is not YES)"
++fi
++
++# show firmware version if configured
++[ "$show_firmware_version" = "YES" ] && fwver
++
++# run local startup script if it exists
++[ -e /etc/rc.local ] && . /etc/rc.local
++
++# setup nano-X
++if [ "$start_nanox" = "YES" ]
++then
++	fbset -depth 16 -n
++	ifconfig lo up
++fi
++
++# setup PIXIL
++if [ "$start_pixil" = "YES" ]
++then
++	/usr/pixil/nxstart.sh&
++fi
++
++# the DSLinuxDSi self-test once more, so its result is on screen when boot ends
++echo "rc: done"
++[ -x /boot/selftest ] && /boot/selftest
++
++# this is here so that we will get a login prompt in any case
++exit 0
+-- 
+2.56.0
+
