@@ -1,0 +1,81 @@
+From e2013349da3834e11219555cffa686e3bd96c6a6 Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <noreply@example.invalid>
+Date: Tue, 10 Nov 2026 20:37:30 -0600
+Subject: [PATCH] DSI: touch calibration from 0x02FFFC80 (real in DSi mode),
+ identity fallback; run the self-test before rc.common
+
+On a DSi in DSi mode 0x027FFC80 is plain RAM, so the calibration read garbage (and could divide by zero). The self-test
+sat after '. /etc/rc.common', which aborts the script when the card has no linux/ folder, so it never ran.
+---
+ linux-2.6.x/arch/arm/mach-nds/arm7/arm7.h |  8 ++++++++
+ linux-2.6.x/arch/arm/mach-nds/arm7/main.c | 18 +++++++++++++-----
+ vendors/Nintendo/DSI/rc                   |  6 +++---
+ 3 files changed, 24 insertions(+), 8 deletions(-)
+
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/arm7.h b/linux-2.6.x/arch/arm/mach-nds/arm7/arm7.h
+index c05972e6a..1b8cb69db 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/arm7/arm7.h
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/arm7.h
+@@ -129,7 +129,15 @@ typedef struct tPERSONAL_DATA {
+     unsigned RESERVED4   : 1; //            ??
+ } __attribute__ ((__packed__)) PERSONAL_DATA ;
+ 
++#include "linux/config.h"
++/* The firmware's user settings (touch calibration...) are copied to the top of main RAM by the loader.
++ * 0x02FFFC80 is the same RAM as 0x027FFC80 on a DS (4 MB mirrored), but on a DSi in DSi mode 0x027FFC80 is
++ * ordinary RAM and only the top copy is real. The DSI kernel keeps RAM below 0x02FF0000, so it survives. */
++#ifdef CONFIG_NDS_DSI
++#define PersonalData ((PERSONAL_DATA*)0x2FFFC80)
++#else
+ #define PersonalData ((PERSONAL_DATA*)0x27FFC80)
++#endif
+ 
+ #define SERIAL_CR	(*(volatile u16*)0x040001C0)
+ #define SERIAL_DATA	(*(volatile u16*)0x040001C2)
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/main.c b/linux-2.6.x/arch/arm/mach-nds/arm7/main.c
+index 923e93b8f..b1e61db0f 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/arm7/main.c
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/main.c
+@@ -406,11 +406,19 @@ int main(void)
+ 
+ 	/* Read calibration values, the arm9 will probably overwrite the originals later */
+ 	// Code from devkitpro/libnds/source/arm7/touch.c
+-	xscale = ((PersonalData->calX2px - PersonalData->calX1px) << 19) / ((PersonalData->calX2) - (PersonalData->calX1));
+-	yscale = ((PersonalData->calY2px - PersonalData->calY1px) << 19) / ((PersonalData->calY2) - (PersonalData->calY1));
+-                
+-	xoffset = ((PersonalData->calX1 + PersonalData->calX2) * xscale  - ((PersonalData->calX1px + PersonalData->calX2px) << 19) ) / 2;
+-	yoffset = ((PersonalData->calY1 + PersonalData->calY2) * yscale  - ((PersonalData->calY1px + PersonalData->calY2px) << 19) ) / 2;
++	if (PersonalData->calX2 != PersonalData->calX1 && PersonalData->calY2 != PersonalData->calY1) {
++		xscale = ((PersonalData->calX2px - PersonalData->calX1px) << 19) / ((PersonalData->calX2) - (PersonalData->calX1));
++		yscale = ((PersonalData->calY2px - PersonalData->calY1px) << 19) / ((PersonalData->calY2) - (PersonalData->calY1));
++
++		xoffset = ((PersonalData->calX1 + PersonalData->calX2) * xscale  - ((PersonalData->calX1px + PersonalData->calX2px) << 19) ) / 2;
++		yoffset = ((PersonalData->calY1 + PersonalData->calY2) * yscale  - ((PersonalData->calY1px + PersonalData->calY2px) << 19) ) / 2;
++	} else {
++		/* no usable calibration copy in RAM: map the 12 bit raw range straight onto the 256x192 screen */
++		xscale = (256 << 19) / 4096;
++		yscale = (192 << 19) / 4096;
++		xoffset = 0;
++		yoffset = 0;
++	}
+ 
+ 	/* DSi mode: set up the codec touch reader; otherwise do the DS dummy read that enables the touchpad PENIRQ */
+ 	if (!dsitouch_init())
+diff --git a/vendors/Nintendo/DSI/rc b/vendors/Nintendo/DSI/rc
+index 03cc1a5bf..2b7482d84 100644
+--- a/vendors/Nintendo/DSI/rc
++++ b/vendors/Nintendo/DSI/rc
+@@ -30,7 +30,7 @@ mknod /var/run/ttypc c 3 12
+ mknod /var/run/ttypd c 3 13
+ mknod /var/run/ttype c 3 14
+ mknod /var/run/ttypf c 3 15
+-. /etc/rc.common
+-
+-# boot self-test (see /boot/selftest)
++# boot self-test (see /boot/selftest). It must come BEFORE rc.common: when the card has no linux/ folder, sourcing
++# the missing rc.common aborts this script.
+ [ -x /boot/selftest ] && /boot/selftest
++. /etc/rc.common
+-- 
+2.56.0
+

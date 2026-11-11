@@ -128,6 +128,17 @@ No data on why. Possible causes: my `SCFG_EXT` bit-31 gate kept the reader off; 
   `rd` low half = valid reads, high half = invalid (garbage) reads; `xy` = last raw position.
 Builds clean; not run anywhere.
 
+## First readings from the "e" diagnostics build (user's photo, DSi mode, uc3)
+`dsitouch: a/p/st/pn ad400301 scfg 93fffb06 adc 040d8b18 calls 738 pen 25 rd 00020017 noisy 0 xy 095a0403`:
+- `scfg 93fffb06`: the ARM7 is in real DSi mode (SCFG unlocked, RAM-limit bits at "extended"). The DSi-header ROM works as intended. (RAM is still to be confirmed by the self-test.)
+- Low byte `01`, probe `03`: the codec reader is on and the chip answered the page-register readback. `calls 738`: the ARM7 loop runs. `pen 25`: pen-down was detected 25 times.
+  `rd 00020017`: 23 valid reads, 2 invalid. `xy 095a0403`: last raw X = 0x403, Y = 0x95a, plausible 12-bit values. So the touch hardware path works.
+- Likely remaining bug (fixed in "f"): the ARM7 computed its calibration from `0x027FFC80`, which is only the DS-mode copy. In DSi mode that address is plain RAM, so the calibration
+  was garbage (a zero divisor was possible), mapping every touch to the wrong place. `0x02FFFC80` is correct in both modes. A fallback now maps the raw 12-bit range to the screen if no calibration is present.
+- The console also showed `dsisd: read sector 0 x1 failed: result 5` and `FAT: unable to read boot sector`: the SD card init failed earlier (the init line had scrolled off), and later reads report "not initialised".
+- The self-test never printed: `rc` ended with `. /etc/rc.common`, and sourcing the missing file aborts the script. Fixed in "f": the self-test now runs before it.
+"f" ROMs: `out/dsi-mode/dslinux-dsimode-f-uc3.nds` (and `-uc2`). Built; not run.
+
 ## 3c. Faster ARM9 clock, 3d. Wi-Fi/cameras/DSP
 Not started. 3c is small but needs the SD result first; 3d unchanged from the feasibility finding.
 
