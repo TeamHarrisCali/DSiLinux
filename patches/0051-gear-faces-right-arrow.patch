@@ -1,0 +1,89 @@
+From a5454b5b488090c1a3a30b9ab13f71c21eaa568f Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 06:45:43 -0600
+Subject: [PATCH] Fix: right arrow button pointed left; gears were hollow (the
+ demo gear lacked the back face and the front/back sides of the teeth)
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ .../drivers/input/touchscreen/nds_ts.c        |  2 +-
+ user/microwin/src/demos/nanox/dsgx_demo.h     | 39 ++++++++++++++++++-
+ 2 files changed, 38 insertions(+), 3 deletions(-)
+
+diff --git a/linux-2.6.x/drivers/input/touchscreen/nds_ts.c b/linux-2.6.x/drivers/input/touchscreen/nds_ts.c
+index 65df24dc4..c3d568c53 100644
+--- a/linux-2.6.x/drivers/input/touchscreen/nds_ts.c
++++ b/linux-2.6.x/drivers/input/touchscreen/nds_ts.c
+@@ -490,7 +490,7 @@ static void draw_arrows(void)
+ 				case KEY_UP:	on = arrow_up_px(rr, cc); break;
+ 				case KEY_DOWN:	on = arrow_up_px(15 - rr, cc); break;
+ 				case KEY_LEFT:	on = arrow_up_px(cc, rr); break;
+-				default:	on = arrow_up_px(cc, 15 - rr); break;
++				default:	on = arrow_up_px(15 - cc, rr); break;
+ 				}
+ 				big[r][c] = on ? 1 : 4;			/* 1 symbol, 4 face */
+ 				if (r == 0 || c == 0)
+diff --git a/user/microwin/src/demos/nanox/dsgx_demo.h b/user/microwin/src/demos/nanox/dsgx_demo.h
+index 783f9168b..ab499e2be 100644
+--- a/user/microwin/src/demos/nanox/dsgx_demo.h
++++ b/user/microwin/src/demos/nanox/dsgx_demo.h
+@@ -13,7 +13,7 @@ static void gear(struct gx_mesh *m, double inner_radius, double outer_radius, do
+ 	int i;
+ 	double r0, r1, r2, angle, da, u, v, len;
+ 
+-	gx_mesh_init(m, 400);
++	gx_mesh_init(m, 700);
+ 	r0 = inner_radius;
+ 	r1 = outer_radius - tooth_depth / 2.0;
+ 	r2 = outer_radius + tooth_depth / 2.0;
+@@ -25,11 +25,46 @@ static void gear(struct gx_mesh *m, double inner_radius, double outer_radius, do
+ 		angle = i * 2.0 * M_PI / teeth;
+ 		gx_mesh_vertex(m, r0 * cos(angle), r0 * sin(angle), width * 0.5);
+ 		gx_mesh_vertex(m, r1 * cos(angle), r1 * sin(angle), width * 0.5);
+-		gx_mesh_vertex(m, r0 * cos(angle), r0 * sin(angle), width * 0.5);
++		if (i < teeth) {
++			gx_mesh_vertex(m, r0 * cos(angle), r0 * sin(angle), width * 0.5);
++			gx_mesh_vertex(m, r1 * cos(angle + 3 * da), r1 * sin(angle + 3 * da), width * 0.5);
++		}
++	}
++	gx_mesh_end(m);
++
++	gx_mesh_begin(m, GX_QUADS);			/* front sides of the teeth */
++	for (i = 0; i < teeth; i++) {
++		angle = i * 2.0 * M_PI / teeth;
++		gx_mesh_vertex(m, r1 * cos(angle), r1 * sin(angle), width * 0.5);
++		gx_mesh_vertex(m, r2 * cos(angle + da), r2 * sin(angle + da), width * 0.5);
++		gx_mesh_vertex(m, r2 * cos(angle + 2 * da), r2 * sin(angle + 2 * da), width * 0.5);
+ 		gx_mesh_vertex(m, r1 * cos(angle + 3 * da), r1 * sin(angle + 3 * da), width * 0.5);
+ 	}
+ 	gx_mesh_end(m);
+ 
++	gx_mesh_normal(m, 0.0, 0.0, -1.0);
++	gx_mesh_begin(m, GX_QUAD_STRIP);		/* back face */
++	for (i = 0; i <= teeth; i++) {
++		angle = i * 2.0 * M_PI / teeth;
++		gx_mesh_vertex(m, r1 * cos(angle), r1 * sin(angle), -width * 0.5);
++		gx_mesh_vertex(m, r0 * cos(angle), r0 * sin(angle), -width * 0.5);
++		if (i < teeth) {
++			gx_mesh_vertex(m, r1 * cos(angle + 3 * da), r1 * sin(angle + 3 * da), -width * 0.5);
++			gx_mesh_vertex(m, r0 * cos(angle), r0 * sin(angle), -width * 0.5);
++		}
++	}
++	gx_mesh_end(m);
++
++	gx_mesh_begin(m, GX_QUADS);			/* back sides of the teeth */
++	for (i = 0; i < teeth; i++) {
++		angle = i * 2.0 * M_PI / teeth;
++		gx_mesh_vertex(m, r1 * cos(angle + 3 * da), r1 * sin(angle + 3 * da), -width * 0.5);
++		gx_mesh_vertex(m, r2 * cos(angle + 2 * da), r2 * sin(angle + 2 * da), -width * 0.5);
++		gx_mesh_vertex(m, r2 * cos(angle + da), r2 * sin(angle + da), -width * 0.5);
++		gx_mesh_vertex(m, r1 * cos(angle), r1 * sin(angle), -width * 0.5);
++	}
++	gx_mesh_end(m);
++
+ 	gx_mesh_begin(m, GX_QUAD_STRIP);		/* outward faces of the teeth */
+ 	for (i = 0; i < teeth; i++) {
+ 		angle = i * 2.0 * M_PI / teeth;
+-- 
+2.56.0
+
