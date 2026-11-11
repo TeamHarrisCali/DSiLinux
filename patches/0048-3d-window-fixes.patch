@@ -1,0 +1,323 @@
+From d97f8370515ea8c89f53c7e932760f9f7333ec78 Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 06:19:48 -0600
+Subject: [PATCH] 3D window fixes: XOR/raster operations keep the transparency
+ bit (outline drags left black lines in a 3D window's see-through area),
+ clipped windows get the matching frustum slice (no squashing at the screen
+ edge), vsync ioctl and a real fps counter, a/c keys for edge smoothing and
+ culling, rectangle self-heal
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ linux-2.6.x/drivers/video/ndsfb.c      | 36 ++++++++---
+ user/microwin/src/demos/nanox/dsgl3d.c | 82 ++++++++++++++++++++------
+ user/microwin/src/drivers/fblin16.c    | 22 +++++--
+ 3 files changed, 111 insertions(+), 29 deletions(-)
+
+diff --git a/linux-2.6.x/drivers/video/ndsfb.c b/linux-2.6.x/drivers/video/ndsfb.c
+index eff73376b..d72f82eee 100644
+--- a/linux-2.6.x/drivers/video/ndsfb.c
++++ b/linux-2.6.x/drivers/video/ndsfb.c
+@@ -244,35 +244,47 @@ static int ndsfb_blank(int blank_mode, struct fb_info *info);
+ #define NDSFB_CURSOR	0x4e04
+ #define NDSFB_GX_SETUP	0x4e05
+ #define NDSFB_GX_SUBMIT	0x4e06
++#define NDSFB_VSYNC	0x4e07	/* wait for the next vertical blank */
+ static DECLARE_WAIT_QUEUE_HEAD(ndsfb_flip_wq);
+ static volatile int ndsfb_flip_pending;
+ static int ndsfb_flip_y;
+ static int ndsfb_irq_ready;
+ static int ndsfb_flip_token;	/* dev_id of the shared interrupt */
+ 
++static volatile unsigned int ndsfb_vblank_count;
++
+ static irqreturn_t ndsfb_vblank_irq(int irq, void *dev_id, struct pt_regs *regs)
+ {
++	ndsfb_vblank_count++;
+ 	if (ndsfb_flip_pending) {
+ 		BG2_CY = ndsfb_flip_y << 8;
+ 		BG3_CY = (ndsfb_flip_y - 256) << 8;
+ 		ndsfb_flip_pending = 0;
+-		wake_up(&ndsfb_flip_wq);
+ 	}
++	wake_up(&ndsfb_flip_wq);	/* flip waiters and vsync waiters check their own condition */
+ 	return IRQ_HANDLED;
+ }
+ 
++/* the shared vertical blank interrupt is claimed on first use */
++static int ndsfb_irq_setup(void)
++{
++	if (ndsfb_irq_ready)
++		return 0;
++	if (request_irq(IRQ_VBLANK, ndsfb_vblank_irq, SA_SHIRQ, "ndsfb-flip", &ndsfb_flip_token))
++		return -EBUSY;
++	*(volatile u16 *)0x04000004 |= 1 << 3;	/* vblank interrupt enable in DISPSTAT */
++	ndsfb_irq_ready = 1;
++	return 0;
++}
++
+ static int ndsfb_flip_request(struct fb_info *info, int y)
+ {
+ 	if (info->par != 0 || info->var.yres_virtual < 512 || info->var.bits_per_pixel != 16)
+ 		return -EINVAL;
+ 	if (y != 0 && y != 256)
+ 		return -EINVAL;
+-	if (!ndsfb_irq_ready) {
+-		if (request_irq(IRQ_VBLANK, ndsfb_vblank_irq, SA_SHIRQ, "ndsfb-flip", &ndsfb_flip_token))
+-			return -EBUSY;
+-		*(volatile u16 *)0x04000004 |= 1 << 3;	/* vblank interrupt enable in DISPSTAT */
+-		ndsfb_irq_ready = 1;
+-	}
++	if (ndsfb_irq_setup())
++		return -EBUSY;
+ 	ndsfb_flip_y = y;
+ 	info->var.yoffset = y;
+ 	ndsfb_flip_pending = 1;
+@@ -700,6 +712,16 @@ static int ndsfb_ioctl(struct inode *inode, struct file *file,
+ 		case NDSFB_FLIP_WAIT:
+ 			ndsfb_flip_wait();
+ 			return 0;
++		case NDSFB_VSYNC:
++			{
++				unsigned int start;
++
++				if (ndsfb_irq_setup())
++					return -EBUSY;
++				start = ndsfb_vblank_count;
++				wait_event_timeout(ndsfb_flip_wq, ndsfb_vblank_count != start, HZ / 10);
++				return 0;
++			}
+ 		case NDSFB_CURSOR:
+ 			if (info->par != 0)
+ 				return -EINVAL;
+diff --git a/user/microwin/src/demos/nanox/dsgl3d.c b/user/microwin/src/demos/nanox/dsgl3d.c
+index f7697d6f2..01e32f905 100644
+--- a/user/microwin/src/demos/nanox/dsgl3d.c
++++ b/user/microwin/src/demos/nanox/dsgl3d.c
+@@ -4,7 +4,9 @@
+  * The window's client area is painted with the colour key magenta, which the DS frame buffer turns into transparent
+  * pixels; the 3D engine draws behind the frame buffer, so the gears show through exactly there, and any window above
+  * this one covers them. The 3D viewport is set to the window's rectangle (and follows when it is moved).
+- * Arrow keys turn the view, Esc or q or the close box end it. One 3D program at a time.
++ * Arrow keys turn the view, Esc or q or the close box end it. a = edge smoothing on/off, c = hidden face culling
++ * on/off. Each frame waits for the vertical blank, so the number in the corner is the rate really shown (60 at most).
++ * One 3D program at a time.
+  */
+ #include <stdio.h>
+ #include <stdlib.h>
+@@ -18,6 +20,7 @@
+ 
+ #define NDSFB_GX_SETUP	0x4e05
+ #define NDSFB_GX_SUBMIT	0x4e06
++#define NDSFB_VSYNC	0x4e07
+ 
+ #ifndef M_PI
+ #define M_PI 3.14159265
+@@ -301,23 +304,32 @@ static void read_rect(void)
+ 	visible = ci.mapped && pi.mapped;
+ }
+ 
+-/* viewport and projection for the current rectangle (the engine's y axis starts at the bottom) */
++/*
++ * Viewport and projection for the current rectangle. The engine's viewport cannot go off the screen, so a window
++ * that is partly outside gets the visible part as its viewport and the matching slice of the full window's frustum:
++ * the picture is clipped, not squashed. (The engine's y axis starts at the bottom.)
++ */
+ static void set_view(void)
+ {
+-	int x1 = rx, x2 = rx + rw - 1, y1 = 191 - (ry + rh - 1), y2 = 191 - ry;
+-	double h;
+-
+-	if (x1 < 0) x1 = 0;
+-	if (x2 > 255) x2 = 255;
+-	if (y1 < 0) y1 = 0;
+-	if (y2 > 191) y2 = 191;
+-	if (x2 <= x1 || y2 <= y1)
++	int cx1 = rx, cx2 = rx + rw - 1, cy1 = ry, cy2 = ry + rh - 1;
++	double h, s, l, r, t, b;
++
++	if (cx1 < 0) cx1 = 0;
++	if (cx2 > 255) cx2 = 255;
++	if (cy1 < 0) cy1 = 0;
++	if (cy2 > 191) cy2 = 191;
++	if (cx2 <= cx1 || cy2 <= cy1)
+ 		return;
+-	h = (double)rh / (double)rw;
+-	W(GX_VIEWPORT, x1 | (y1 << 8) | (x2 << 16) | (y2 << 24));
++	h = (double)rh / (double)rw;		/* full window: x from -1 to 1, y from -h to h */
++	s = 2.0 / (double)rw;			/* world units per pixel at the near plane */
++	l = -1.0 + (cx1 - rx) * s;
++	r = -1.0 + (cx2 + 1 - rx) * s;
++	t = h - (cy1 - ry) * s;
++	b = h - (cy2 + 1 - ry) * s;
++	W(GX_VIEWPORT, cx1 | ((191 - cy2) << 8) | (cx2 << 16) | ((191 - cy1) << 24));
+ 	W(MTX_MODE, 0);
+ 	W(MTX_IDENTITY, 0);
+-	frustum(-1.0, 1.0, -h, h, 5.0, 60.0);
++	frustum(l, r, b, t, 5.0, 60.0);
+ 	flush_cmds();
+ }
+ 
+@@ -325,7 +337,9 @@ int main(int argc, char **argv)
+ {
+ 	GR_EVENT ev;
+ 	static struct gearmesh g[3];
+-	int running = 1, dirty = 1;
++	int running = 1, dirty = 1, aa = 1, cull = 0, frames = 0, shown_fps = 0, heal = 0;
++	long fps_t = 0;
++	GR_GC_ID tgc;
+ 	double angle = 0.0, view_rotx = 20.0, view_roty = 30.0;
+ 
+ 	fb = open("/dev/fb0", O_RDWR);
+@@ -354,7 +368,8 @@ int main(int argc, char **argv)
+ 	GrSelectEvents(GR_ROOT_WINDOW_ID, GR_EVENT_MASK_CHLD_UPDATE);	/* the window manager moved it */
+ 	GrMapWindow(win);
+ 
+-	W(GX_CONTROL, 0);
++	tgc = GrNewGC();
++	W(GX_CONTROL, aa ? 0x10 : 0);	/* bit 4: anti-aliasing of polygon edges */
+ 	W(GX_CLEARCOLOR, 0);		/* transparent rear plane */
+ 	W(GX_CLEARDEPTH, 0x7fff);
+ 	flush_cmds();
+@@ -372,6 +387,13 @@ int main(int argc, char **argv)
+ 			case 'q':
+ 				running = 0;
+ 				break;
++			case 'a':
++				aa = !aa;
++				W(GX_CONTROL, aa ? 0x10 : 0);
++				break;
++			case 'c':
++				cull = !cull;
++				break;
+ 			case MWKEY_LEFT:
+ 				view_roty += 5.0;
+ 				break;
+@@ -391,9 +413,16 @@ int main(int argc, char **argv)
+ 			dirty = 1;
+ 			break;
+ 		}
++		if (++heal >= 30) {	/* twice a second: look at the rectangle again, in case a move was missed */
++			heal = 0;
++			dirty = 1;
++		}
+ 		if (dirty) {
++			int ox = rx, oy = ry, ow = rw, oh = rh;
++
+ 			read_rect();
+-			set_view();
++			if (rx != ox || ry != oy || rw != ow || rh != oh || visible != 1 || fps_t == 0)
++				set_view();
+ 			dirty = 0;
+ 		}
+ 		if (!visible) {		/* minimised: do not keep the engine busy */
+@@ -402,11 +431,13 @@ int main(int argc, char **argv)
+ 			continue;
+ 		}
+ 
++		ioctl(fb, NDSFB_VSYNC, 0);	/* one frame per screen refresh */
+ 		W(MTX_MODE, 2);
+ 		W(MTX_IDENTITY, 0);
+ 		W(GX_LIGHTCOL, (0 << 30) | RGB15(31, 31, 31));
+ 		W(GX_LIGHTVEC, (0u << 30) | pack_dir(-5.0, -5.0, -10.0));
+-		W(GX_POLYATTR, 1 | (3 << 6) | (31 << 16));
++		/* light 0, culling (2 = render front faces only) or none (3), opaque */
++		W(GX_POLYATTR, 1 | ((cull ? 2 : 3) << 6) | (31 << 16));
+ 		translate(0.0, 0.0, -45.0);
+ 		rotate(1, view_rotx);
+ 		rotate(2, view_roty);
+@@ -432,6 +463,23 @@ int main(int argc, char **argv)
+ 		W(GX_SWAP, 0);
+ 		flush_cmds();
+ 		angle += 2.0;
++
++		/* once a second: the rate, drawn into the window's corner (opaque text over the 3D picture) */
++		frames++;
++		if (fps_t == 0)
++			fps_t = usec();
++		else if (usec() - fps_t >= 1000000L) {
++			char txt[24];
++
++			shown_fps = frames;
++			frames = 0;
++			fps_t = usec();
++			sprintf(txt, "%d fps%s%s", shown_fps, aa ? " aa" : "", cull ? " cull" : "");
++			GrSetGCForeground(tgc, KEYCOLOR);
++			GrFillRect(win, tgc, 0, 0, 80, 10);
++			GrSetGCForeground(tgc, GR_RGB(255, 255, 255));
++			GrText(win, tgc, 2, 1, txt, -1, GR_TFASCII | GR_TFTOP);
++		}
+ 	}
+ 	ioctl(fb, NDSFB_GX_SETUP, 0);
+ 	GrClose();
+diff --git a/user/microwin/src/drivers/fblin16.c b/user/microwin/src/drivers/fblin16.c
+index be107df0a..bedb5bc27 100644
+--- a/user/microwin/src/drivers/fblin16.c
++++ b/user/microwin/src/drivers/fblin16.c
+@@ -16,6 +16,18 @@
+ #define ALPHA_1B (0)
+ #endif
+ 
++/*
++ * Raster operations (XOR for the window manager's drag outline, blits with an operation) must keep each pixel's own
++ * transparency bit: a see-through pixel (0, the colour key of a 3D window) XORed twice has to come back as 0, not
++ * as an opaque black 0x8000 that would leave black lines behind. Ordinary drawing (copy mode) still writes opaque
++ * pixels.
++ */
++#if NDSDRIVER
++#define APPLYOP_KEEP(m, c, old)	((applyOpR((m), (c), (old)) & 0x7fff) | ((old) & ALPHA_1B))
++#else
++#define APPLYOP_KEEP(m, c, old)	(applyOpR((m), (c), (old)))
++#endif
++
+ /* We want to do string copying fast, so inline assembly if possible */
+ #ifndef __OPTIMIZE__
+ #define __OPTIMIZE__
+@@ -68,7 +80,7 @@ linear16_drawpixel(PSD psd, MWCOORD x, MWCOORD y, MWPIXELVAL c)
+ 	if(gr_mode == MWMODE_COPY)
+ 		*addr = c;
+ 	else
+-		*addr = applyOpR(gr_mode, c, *addr) | ALPHA_1B;
++		*addr = APPLYOP_KEEP(gr_mode, c, *addr);
+ 	DRAWOFF;
+ }
+ 
+@@ -126,7 +138,7 @@ linear16_drawhorzline(PSD psd, MWCOORD x1, MWCOORD x2, MWCOORD y, MWPIXELVAL c)
+ #endif
+ 	} else {
+ 		while (x1++ <= x2) {
+-			*addr = applyOpR(gr_mode, c, *addr) | ALPHA_1B;
++			*addr = APPLYOP_KEEP(gr_mode, c, *addr);
+ 			addr++;
+ 		}
+ 	}
+@@ -171,7 +183,7 @@ linear16_drawvertline(PSD psd, MWCOORD x, MWCOORD y1, MWCOORD y2, MWPIXELVAL c)
+ #endif
+ 	} else {
+ 		while (y1++ <= y2) {
+-			*addr = applyOpR(gr_mode, c, *addr) | ALPHA_1B;
++			*addr = APPLYOP_KEEP(gr_mode, c, *addr);
+ 			addr += linelen;
+ 		}
+ 	}
+@@ -273,7 +285,7 @@ stdblit:
+ 	} else {
+ 		while (--h >= 0) {
+ 			for (i=0; i<w; i++) {
+-				*dst = applyOpR(MWROP_TO_MODE(op), *src, *dst) | ALPHA_1B;
++				*dst = APPLYOP_KEEP(MWROP_TO_MODE(op), *src, *dst);
+ 				++src;
+ 				++dst;
+ 			}
+@@ -587,7 +599,7 @@ linear16_stretchblitex(PSD dstpsd,
+ 
+ 			x_count = width;
+ 			while (x_count-- > 0) {
+-				*dest_ptr = applyOpR(MWROP_TO_MODE(op), *src_ptr, *dest_ptr) | ALPHA_1B;
++				*dest_ptr = APPLYOP_KEEP(MWROP_TO_MODE(op), *src_ptr, *dest_ptr);
+ 				dest_ptr++;
+ 
+ 				src_ptr += src_x_step_normal;
+-- 
+2.56.0
+
