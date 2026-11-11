@@ -5,7 +5,7 @@
 # So the ARM9 ELF gets a 4-byte dummy ARM9i segment at 0x02400000, which the loader copies before the kernel starts.
 set -e
 cd "$(dirname "$0")/.."
-scripts/in-container.sh 'mkdir -p /out/dsi-mode/elf && cd /out/dsi-mode/elf &&
+scripts/in-container.sh 'mkdir -p /out/dsi-mode/.build/elf && cd /out/dsi-mode/.build/elf &&
 printf ".section .dsi,\"a\"\n.long 0\n" > dsi9.s && arm-linux-elf-as -o dsi9.o dsi9.s &&
 arm-linux-elf-objcopy -I binary -O elf32-littlearm -B arm ../tmp/arm9.bin arm9.o &&
 printf "ENTRY(_start)\nPHDRS { main PT_LOAD FLAGS(7); dsi PT_LOAD FLAGS(0x100007); }\nSECTIONS { . = 0x02000000; .text : { *(.data) } :main . = 0x02400000; .dsi : { *(.dsi) } :dsi }\n" > arm9.ld &&

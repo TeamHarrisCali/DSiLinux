@@ -11,10 +11,10 @@ NT=/opt/wonderful/thirdparty/blocksds/core/tools/ndstool/ndstool
 OUT=out/dsi-mode
 T=$(mktemp -d)
 mkdir -p $OUT
-scripts/in-container.sh "mkdir -p /out/dsi-mode/tmp && cd /out/dsi-mode/tmp && ndstool -x /work/images/dslinux.nds -9 arm9.bin -7 arm7.bin >/dev/null"
+scripts/in-container.sh "mkdir -p /out/dsi-mode/.build/tmp && cd /out/dsi-mode/.build/tmp && ndstool -x /work/images/dslinux.nds -9 arm9.bin -7 arm7.bin >/dev/null"
 scripts/dsi-elf.sh >/dev/null
 for UC in 3 2; do
-  $NT -c $OUT/dslinux-dsimode-${TAG:-b}-uc$UC.nds -9 $OUT/elf/arm9.elf -7 $OUT/elf/arm7.elf \
+  $NT -c $OUT/dslinux-dsimode-${TAG:-b}-uc$UC.nds -9 $OUT/.build/elf/arm9.elf -7 $OUT/.build/elf/arm7.elf \
       -b work/dslinux/vendors/Nintendo/common/tux.bmp "DSLinux;Port of Linux;to the DSi" -uc $UC -p ${APPFLAGS:-1}
 done
 for f in $OUT/*.nds; do echo $f; $NT -i $f | grep -E 'Unit code|TWL flags|ROM header size|DSi9|title ID'; done
