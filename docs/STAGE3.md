@@ -168,6 +168,10 @@ Not yet verified: reading actual sectors/mounting. The photo cut off the mount l
 (`mount none /var/run failed`, `rc.common: cannot open`); that is expected and not an SD error. Next test: copy the `linux` folder to the card root and boot again.
 Writes are still compiled out (`CONFIG_NDS_DSISD_WRITE` off).
 
+## Quiet build "i"
+The live `dsitouch:` console lines printed a new line on every touch and made the shell unusable. They are now behind `CONFIG_NDS_DSISD_TOUCHDIAG` (default off, not set in the DSI product).
+The boot-time self-test and the two `dsisd:` lines stay (they appear once at boot). ROMs: `out/dsi-mode/dslinux-dsimode-i-uc3.nds` and `-uc2`. Built; not run.
+
 ## 3c. Faster ARM9 clock, 3d. Wi-Fi/cameras/DSP
 Not started. 3c is small but needs the SD result first; 3d unchanged from the feasibility finding.
 
