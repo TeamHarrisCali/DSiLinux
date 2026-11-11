@@ -1,0 +1,117 @@
+From 4302479ca31783638650c19748003d4487f8e0c3 Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 03:09:14 -0600
+Subject: [PATCH] DSi: power off through the I2C power chip (DS SPI power bit
+ does nothing in DSi mode); sync disks before power off
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ linux-2.6.x/arch/arm/mach-nds/arch.c      |  3 ++
+ linux-2.6.x/arch/arm/mach-nds/arm7/main.c | 63 +++++++++++++++++++++++
+ 2 files changed, 66 insertions(+)
+
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arch.c b/linux-2.6.x/arch/arm/mach-nds/arch.c
+index 2bb0bd592..75a8fea28 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/arch.c
++++ b/linux-2.6.x/arch/arm/mach-nds/arch.c
+@@ -45,6 +45,7 @@
+ #include <asm/arch/fifo.h>
+ #include <asm/arch/gbaram.h>
+ #include <asm/cacheflush.h>
++#include <linux/syscalls.h>
+ 
+ #define WAIT_CR 	0x04000204
+ 
+@@ -54,6 +55,8 @@ extern void __init nds_init_irq(void);
+ 
+ static void poweroff(void)
+ {
++	/* nothing else writes the disk cache out before the power goes */
++	sys_sync();
+ 	nds_fifo_send(FIFO_POWER_CMD(FIFO_POWER_CMD_SYSTEM_POWER, 0));
+ }
+ 
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/main.c b/linux-2.6.x/arch/arm/mach-nds/arm7/main.c
+index b1e61db0f..224a1bfa3 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/arm7/main.c
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/main.c
+@@ -24,6 +24,64 @@ static s32 xoffset, yoffset;
+ static struct nds_firmware_block *firmware_block;
+ static struct nds_sd_block *sd_block;
+ 
++/*
++ * DSi mode power off: the DS power register (SPI) does nothing there; the DSi's
++ * power management chip (I2C device 0x4A) shuts the console down when register
++ * 0x11 gets 0x40. Same byte sequence as libnds' i2cWriteRegister()/systemShutDown().
++ */
++#define REG_I2CDATA	(*(volatile u8 *)0x04004500)
++#define REG_I2CCNT	(*(volatile u8 *)0x04004501)
++
++static void i2c_delay(void)
++{
++	volatile int n = 3000;
++	while (n--)
++		;
++}
++
++static int i2c_wait(void)
++{
++	int n = 200000;
++	while ((REG_I2CCNT & 0x80) && --n)
++		;
++	return n;
++}
++
++static int i2c_ack(void)
++{
++	i2c_wait();
++	return (REG_I2CCNT >> 4) & 1;
++}
++
++static void i2c_pm_write(u8 reg, u8 data)
++{
++	int tries;
++	for (tries = 0; tries < 8; tries++) {
++		i2c_wait();
++		i2c_delay();
++		REG_I2CDATA = 0x4A;
++		REG_I2CCNT = 0xC2;
++		if (!i2c_ack()) {
++			REG_I2CCNT = 0xC5;
++			continue;
++		}
++		i2c_delay();
++		REG_I2CDATA = reg;
++		REG_I2CCNT = 0xC0;
++		if (!i2c_ack()) {
++			REG_I2CCNT = 0xC5;
++			continue;
++		}
++		i2c_delay();
++		REG_I2CDATA = data;
++		REG_I2CCNT = 0xC0;
++		i2c_delay();
++		REG_I2CCNT = 0xC5;
++		if (i2c_ack())
++			return;
++	}
++}
++
+ int isDSPhat(void)
+ {
+ 	return !((power_read(POWER_BACKLIGHT)) & (1<<6));
+@@ -119,6 +177,11 @@ static void recieveFIFOCommand(void)
+ 					}
+ 			break;
+ 			case FIFO_POWER_CMD_SYSTEM_POWER:
++					if (dsitouch_active()) {	/* DSi mode */
++						int k;
++						for (k = 0; k < 4; k++)
++							i2c_pm_write(0x11, 0x40);
++					}
+ 					power_write(POWER_CONTROL, POWER0_SYSTEM_POWER);
+ 				break;
+ 				}
+-- 
+2.56.0
+

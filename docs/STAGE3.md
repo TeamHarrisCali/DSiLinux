@@ -301,6 +301,13 @@ then a persistence test (`echo x > /home/t; sync; poweroff`, boot again, `cat /h
 Known limits/risks: ext2 has no journal (use `sync; poweroff`; `e2fsck -fp` on the PC repairs); a heavily fragmented image (over 255 pieces) is refused; the old FAT copy of the userland in `sd:/linux/etc usr ...` becomes unreachable in this mode and can be deleted on the PC;
 writes are single 2 KiB requests to a polling ARM7 driver, so they are slow.
 
+### v on the console, then the power-off fix ("w" build)
+User report: the v build boots and files can be written and read on the ext2 root. `poweroff` did not power the DSi off.
+Cause: the kernel's power-off sends the ARM7 a DS-style command that sets the DS power register's system-power bit over SPI; in DSi mode that bit does nothing, the DSi shuts down through its power-management chip on I2C.
+Fix (w): in DSi mode the ARM7 writes I2C device 0x4A register 0x11 = 0x40, the byte sequence libnds uses (`systemShutDown`, read from the libnds7 object code; `i2cWriteRegister` does the same address/register/data steps with ACK checks and retries), up to four times, then the old DS write as a fallback.
+Also `poweroff()` on the ARM9 now calls `sys_sync()` first, because nothing in this system's shutdown path flushed the disk cache. Not changed: the ext2 root is not remounted read-only at power off, so `e2fsck` on a PC will report it as not cleanly unmounted (`-fp` fixes that silently).
+Status: compiled and the I2C register address is in the ARM7 image; **not run on the console**. Where it fails, the console stays on and the kernel prints "Power down" before it hangs.
+
 ## 3c. Faster ARM9 clock: nothing to do (measured on the console)
 `CONFIG_NDS_DSI_FASTCPU` writes `SCFG_CLK` (0x04004004) bit 0 early in boot. On the console the t-fast ROM printed `NDS: ARM9 SCFG_CLK 0001 -> 0001: 134 MHz requested and accepted`: the register already held `0001` before the write, so the loader had
 already put the ARM9 at 134 MHz and the option changes nothing. All DSi-mode boots show `66.76 BogoMIPS (lpj=333824)`: with the ARM946E's delay loop taking about 4 cycles per iteration (sub plus a taken branch), 33.4 M iterations per second means roughly 134 MHz.
