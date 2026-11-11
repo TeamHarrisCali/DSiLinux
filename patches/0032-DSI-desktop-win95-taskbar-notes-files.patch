@@ -1,0 +1,1048 @@
+From e69a9a9ba752bcaa1aac0cc55cd0933237a7402d Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 04:05:52 -0600
+Subject: [PATCH] DSI desktop, Windows 95 look: taskbar with Start menu and
+ clock (dsdesk), Notes (dsnotes), Files (dsfiles); navy/grey server colour
+ scheme; nxterm ignores ANSI colour codes; trackpad panel colour fixed
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ .../drivers/input/touchscreen/nds_ts.c        |   2 +-
+ user/microwin/Makefile                        |   3 +
+ user/microwin/src/demos/nanox/Makefile        |  18 +-
+ user/microwin/src/demos/nanox/dsdesk.c        | 239 +++++++++++++++
+ user/microwin/src/demos/nanox/dsfiles.c       | 219 ++++++++++++++
+ user/microwin/src/demos/nanox/dsnotes.c       | 285 ++++++++++++++++++
+ user/microwin/src/demos/nanox/nxterm.c        |   9 +
+ user/microwin/src/demos/nanox/w95.h           |  98 ++++++
+ user/microwin/src/nanox/srvfunc.c             |   8 +-
+ vendors/Nintendo/DSI/Makefile                 |   3 +
+ vendors/Nintendo/DSI/desktop-apps             |   4 +-
+ 11 files changed, 881 insertions(+), 7 deletions(-)
+ create mode 100644 user/microwin/src/demos/nanox/dsdesk.c
+ create mode 100644 user/microwin/src/demos/nanox/dsfiles.c
+ create mode 100644 user/microwin/src/demos/nanox/dsnotes.c
+ create mode 100644 user/microwin/src/demos/nanox/w95.h
+
+diff --git a/linux-2.6.x/drivers/input/touchscreen/nds_ts.c b/linux-2.6.x/drivers/input/touchscreen/nds_ts.c
+index 4016c9255..157f69518 100644
+--- a/linux-2.6.x/drivers/input/touchscreen/nds_ts.c
++++ b/linux-2.6.x/drivers/input/touchscreen/nds_ts.c
+@@ -265,7 +265,7 @@ static void draw_pad(void)
+ {
+ 	int x, y;
+ 
+-	PALETTE_SUB[16 + 6] = 0x580c;	/* RGB555 blue-grey */
++	PALETTE_SUB[16 + 6] = 0x5a0c;	/* RGB555 blue-grey (r 12, g 16, b 22) */
+ 	for (y = 0; y < PAD_ROWS; y++) {
+ 		for (x = 0; x < 32; x++) {
+ 			if (y < 2 && x >= 30)
+diff --git a/user/microwin/Makefile b/user/microwin/Makefile
+index 5d7fac6e2..091d354aa 100644
+--- a/user/microwin/Makefile
++++ b/user/microwin/Makefile
+@@ -10,6 +10,9 @@ romfs:
+ 	$(MAKE) -C src/bin -f ../../Makefile real_romfs || exit 1
+ 
+ real_romfs:
++	$(ROMFSINST) /bin/dsdesk
++	$(ROMFSINST) /bin/dsnotes
++	$(ROMFSINST) /bin/dsfiles
+ 	$(ROMFSINST) -e CONFIG_USER_MICROWIN_BIN_LANDMINE    /bin/landmine
+ 	$(ROMFSINST) -e CONFIG_USER_MICROWIN_BIN_LAUNCHER    /bin/launcher
+ 	$(ROMFSINST) -e CONFIG_USER_MICROWIN_BIN_MOVE        /bin/move
+diff --git a/user/microwin/src/demos/nanox/Makefile b/user/microwin/src/demos/nanox/Makefile
+index 2524dd2df..03d645d5c 100644
+--- a/user/microwin/src/demos/nanox/Makefile
++++ b/user/microwin/src/demos/nanox/Makefile
+@@ -77,9 +77,13 @@ OBJS =	demo.o \
+ 	nxeyes.o \
+ 	tux.o \
+ 	nxcal.o \
+-	grabdemo.o
++	grabdemo.o \
++	dsdesk.o \
++	dsnotes.o \
++	dsfiles.o
+ 
+ TARGETS = \
++	$(TOP)/bin/dsdesk $(TOP)/bin/dsnotes $(TOP)/bin/dsfiles \
+ 	$(TOP)/bin/demo $(TOP)/bin/move $(TOP)/bin/landmine \
+ 	$(TOP)/bin/world $(TOP)/bin/nxclock \
+ 	$(TOP)/bin/nxlsclients $(TOP)/bin/nxev \
+@@ -166,6 +170,18 @@ $(TOP)/bin/world: world.o $(NANOXCLIENTLIBS) $(TOP)/config
+ 	@echo "Linking $@ ..."
+ 	$(CC) $(CFLAGS) $(LDFLAGS) $< -o $@ $(LD_NANOXCLIENTLIBS)
+ 
++$(TOP)/bin/dsdesk: dsdesk.o $(NANOXCLIENTLIBS) $(TOP)/config
++	@echo "Linking $@ ..."
++	$(CC) $(CFLAGS) $(LDFLAGS) $< -o $@ $(LD_NANOXCLIENTLIBS)
++
++$(TOP)/bin/dsnotes: dsnotes.o $(NANOXCLIENTLIBS) $(TOP)/config
++	@echo "Linking $@ ..."
++	$(CC) $(CFLAGS) $(LDFLAGS) $< -o $@ $(LD_NANOXCLIENTLIBS)
++
++$(TOP)/bin/dsfiles: dsfiles.o $(NANOXCLIENTLIBS) $(TOP)/config
++	@echo "Linking $@ ..."
++	$(CC) $(CFLAGS) $(LDFLAGS) $< -o $@ $(LD_NANOXCLIENTLIBS)
++
+ $(TOP)/bin/nxclock: nxclock.o $(NANOXCLIENTLIBS) $(TOP)/config
+ 	@echo "Linking $@ ..."
+ 	$(CC) $(CFLAGS) $(LDFLAGS) $< -o $@ $(LD_NANOXCLIENTLIBS)
+diff --git a/user/microwin/src/demos/nanox/dsdesk.c b/user/microwin/src/demos/nanox/dsdesk.c
+new file mode 100644
+index 000000000..4196d644f
+--- /dev/null
++++ b/user/microwin/src/demos/nanox/dsdesk.c
+@@ -0,0 +1,239 @@
++/*
++ * dsdesk - the DSLinuxDSi desktop panel: a Windows 95 style taskbar with a Start button, a Start menu and a clock.
++ * Programs are started from the menu; "Shut down" stops the desktop.
++ */
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <unistd.h>
++#include <signal.h>
++#include <time.h>
++#include <sys/types.h>
++#include <sys/wait.h>
++#include "nano-X.h"
++#include "w95.h"
++
++struct item {
++	const char *name;
++	const char *prog;
++	const char *arg;
++};
++
++static struct item items[] = {
++	{ "Terminal", "/boot/nxterm", NULL },
++	{ "Notes", "/boot/dsnotes", NULL },
++	{ "Files", "/boot/dsfiles", NULL },
++	{ "Clock", "/usr/bin/nxclock", NULL },
++	{ "Shut down", "/boot/desktop", "stop" },
++};
++#define NITEMS	(sizeof(items) / sizeof(items[0]))
++
++#define MENU_SECONDS	8	/* the menu closes itself after this long */
++
++static GR_WINDOW_ID bar, menu;
++static GR_GC_ID gc;
++static GR_SCREEN_INFO si;
++static int th, barh, startw, itemh, menuw, menuh;
++static int menu_open, hot = -1, start_down;
++static time_t menu_since;
++
++static void reap(int sig)
++{
++	while (waitpid(-1, NULL, WNOHANG) > 0)
++		;
++}
++
++static void launch(const char *prog, const char *arg)
++{
++	pid_t pid = vfork();
++
++	if (pid == 0) {
++		if (arg)
++			execl(prog, prog, arg, (char *)NULL);
++		else
++			execl(prog, prog, (char *)NULL);
++		_exit(127);
++	}
++}
++
++static void draw_bar(void)
++{
++	char clk[16];
++	time_t now = time(NULL);
++	struct tm *tm = localtime(&now);
++	int cw, x;
++
++	w95_fill(bar, gc, W95_FACE, 0, 0, si.cols, barh);
++	w95_hline(bar, gc, W95_LIGHT, 0, si.cols - 1, 0);
++
++	/* Start button: flag and bold text */
++	w95_box(bar, gc, 2, 3, startw, barh - 5, start_down, 1);
++	w95_flag(bar, gc, 6 + start_down, 3 + (barh - 5 - 7) / 2 + start_down);
++	w95_text(bar, gc, W95_DARK, 17 + start_down, 3 + (barh - 5 - th) / 2 + start_down, "Start");
++	w95_text(bar, gc, W95_DARK, 18 + start_down, 3 + (barh - 5 - th) / 2 + start_down, "Start");
++
++	/* clock in a sunken field */
++	if (tm)
++		sprintf(clk, "%02d:%02d", tm->tm_hour, tm->tm_min);
++	else
++		strcpy(clk, "--:--");
++	cw = w95_textw(gc, clk) + 12;
++	x = si.cols - cw - 3;
++	w95_box(bar, gc, x, 3, cw, barh - 5, 1, 0);
++	w95_text(bar, gc, W95_DARK, x + 6, 3 + (barh - 5 - th) / 2, clk);
++}
++
++static void draw_menu(void)
++{
++	unsigned i;
++
++	w95_box(menu, gc, 0, 0, menuw, menuh, 0, 1);
++	for (i = 0; i < NITEMS; i++) {
++		int y = 3 + i * itemh;
++
++		if (i == NITEMS - 1) {	/* separator above Shut down */
++			w95_hline(menu, gc, W95_SHADOW, 3, menuw - 4, y);
++			w95_hline(menu, gc, W95_LIGHT, 3, menuw - 4, y + 1);
++			y += 3;
++		}
++		if ((int)i == hot) {
++			w95_fill(menu, gc, W95_NAVY, 3, y, menuw - 6, itemh);
++			w95_text(menu, gc, W95_LIGHT, 22, y + (itemh - th) / 2, items[i].name);
++		} else {
++			w95_text(menu, gc, W95_DARK, 22, y + (itemh - th) / 2, items[i].name);
++		}
++		/* a small icon square per entry */
++		w95_fill(menu, gc, (int)i == NITEMS - 1 ? GR_RGB(255, 0, 0) : GR_RGB(0, 128, 128), 7, y + (itemh - 8) / 2, 8, 8);
++	}
++}
++
++static int menu_item_at(int y)
++{
++	unsigned i;
++
++	for (i = 0; i < NITEMS; i++) {
++		int top = 3 + i * itemh + (i == NITEMS - 1 ? 3 : 0);
++
++		if (y >= top && y < top + itemh)
++			return i;
++	}
++	return -1;
++}
++
++static void open_menu(void)
++{
++	if (menu_open)
++		return;
++	menu = GrNewWindowEx(GR_WM_PROPS_NODECORATE | GR_WM_PROPS_NOFOCUS | GR_WM_PROPS_NOMOVE,
++			     "menu", GR_ROOT_WINDOW_ID, 2, si.rows - barh - menuh, menuw, menuh, W95_FACE);
++	GrSelectEvents(menu, GR_EVENT_MASK_EXPOSURE | GR_EVENT_MASK_BUTTON_UP | GR_EVENT_MASK_BUTTON_DOWN |
++		       GR_EVENT_MASK_MOUSE_POSITION | GR_EVENT_MASK_MOUSE_EXIT);
++	GrMapWindow(menu);
++	menu_open = 1;
++	hot = -1;
++	menu_since = time(NULL);
++}
++
++static void close_menu(void)
++{
++	if (!menu_open)
++		return;
++	GrDestroyWindow(menu);
++	menu_open = 0;
++	start_down = 0;
++	draw_bar();
++}
++
++int main(int argc, char **argv)
++{
++	GR_EVENT ev;
++	GR_FONT_ID font;
++	unsigned i;
++	int maxw = 0, w;
++
++	signal(SIGCHLD, reap);
++	if (GrOpen() < 0) {
++		fprintf(stderr, "dsdesk: cannot connect to Nano-X\n");
++		return 1;
++	}
++	GrGetScreenInfo(&si);
++	gc = GrNewGC();
++	font = GrCreateFont(GR_FONT_SYSTEM_VAR, 0, NULL);
++	GrSetGCFont(gc, font);
++	th = w95_texth(gc);
++	barh = th + 8;
++	startw = w95_textw(gc, "Start") + 24;
++	itemh = th + 6;
++	for (i = 0; i < NITEMS; i++) {
++		w = w95_textw(gc, items[i].name);
++		if (w > maxw)
++			maxw = w;
++	}
++	menuw = maxw + 30;
++	menuh = NITEMS * itemh + 6 + 3;
++
++	bar = GrNewWindowEx(GR_WM_PROPS_NODECORATE | GR_WM_PROPS_NOFOCUS | GR_WM_PROPS_NOMOVE | GR_WM_PROPS_NORAISE,
++			    "taskbar", GR_ROOT_WINDOW_ID, 0, si.rows - barh, si.cols, barh, W95_FACE);
++	GrSelectEvents(bar, GR_EVENT_MASK_EXPOSURE | GR_EVENT_MASK_BUTTON_DOWN | GR_EVENT_MASK_BUTTON_UP);
++	GrMapWindow(bar);
++
++	for (;;) {
++		GrGetNextEventTimeout(&ev, 5000);
++		switch (ev.type) {
++		case GR_EVENT_TYPE_EXPOSURE:
++			if (ev.exposure.wid == bar)
++				draw_bar();
++			else if (menu_open && ev.exposure.wid == menu)
++				draw_menu();
++			break;
++		case GR_EVENT_TYPE_BUTTON_DOWN:
++			if (ev.button.wid == bar && ev.button.x < startw + 2) {
++				if (menu_open) {
++					close_menu();
++				} else {
++					start_down = 1;
++					draw_bar();
++					open_menu();
++				}
++			}
++			break;
++		case GR_EVENT_TYPE_MOUSE_POSITION:
++			if (menu_open && ev.mouse.wid == menu) {
++				int h = menu_item_at(ev.mouse.y);
++
++				if (h != hot) {
++					hot = h;
++					draw_menu();
++				}
++			}
++			break;
++		case GR_EVENT_TYPE_BUTTON_UP:
++			if (menu_open && ev.button.wid == menu) {
++				int h = menu_item_at(ev.button.y);
++
++				if (h >= 0) {
++					const char *p = items[h].prog, *a = items[h].arg;
++
++					close_menu();
++					launch(p, a);
++				}
++			}
++			break;
++		case GR_EVENT_TYPE_MOUSE_EXIT:
++			if (menu_open && ev.general.wid == menu && hot != -1) {
++				hot = -1;
++				draw_menu();
++			}
++			break;
++		case GR_EVENT_TYPE_TIMEOUT:
++			break;
++		}
++		if (menu_open && time(NULL) - menu_since > MENU_SECONDS && hot == -1)
++			close_menu();
++		else if (menu_open && hot != -1)
++			menu_since = time(NULL);
++		if (ev.type == GR_EVENT_TYPE_TIMEOUT)
++			draw_bar();	/* the clock */
++	}
++	return 0;
++}
+diff --git a/user/microwin/src/demos/nanox/dsfiles.c b/user/microwin/src/demos/nanox/dsfiles.c
+new file mode 100644
+index 000000000..b0f4459bf
+--- /dev/null
++++ b/user/microwin/src/demos/nanox/dsfiles.c
+@@ -0,0 +1,219 @@
++/*
++ * dsfiles - a small file browser for the DSLinuxDSi desktop (Windows 95 look).
++ * dsfiles [directory]   tap a folder to open it, tap a file to open it in Notes.
++ */
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <unistd.h>
++#include <dirent.h>
++#include <sys/types.h>
++#include <sys/stat.h>
++#include "nano-X.h"
++#include "w95.h"
++
++#define WIN_W	236
++#define WIN_H	150
++#define MAXENT	256
++#define NAMELEN	64
++
++struct ent {
++	char name[NAMELEN];
++	int isdir;
++	long size;
++};
++
++static struct ent ents[MAXENT];
++static int nent, top;
++static char cwd[256] = "/home";
++
++static GR_WINDOW_ID win;
++static GR_GC_ID gc;
++static int fw, fh, headh, rowh, rows;
++
++static int cmp(const void *a, const void *b)
++{
++	const struct ent *x = a, *y = b;
++
++	if (x->isdir != y->isdir)
++		return y->isdir - x->isdir;
++	return strcmp(x->name, y->name);
++}
++
++static void read_dir(void)
++{
++	DIR *d = opendir(cwd);
++	struct dirent *de;
++	char full[320];
++	struct stat st;
++
++	nent = 0;
++	top = 0;
++	if (!d)
++		return;
++	while ((de = readdir(d)) != NULL && nent < MAXENT) {
++		if (!strcmp(de->d_name, "."))
++			continue;
++		snprintf(ents[nent].name, NAMELEN, "%s", de->d_name);
++		snprintf(full, sizeof(full), "%s/%s", cwd, de->d_name);
++		ents[nent].isdir = 0;
++		ents[nent].size = 0;
++		if (stat(full, &st) == 0) {
++			ents[nent].isdir = S_ISDIR(st.st_mode) ? 1 : 0;
++			ents[nent].size = (long)st.st_size;
++		}
++		nent++;
++	}
++	closedir(d);
++	qsort(ents, nent, sizeof(ents[0]), cmp);
++}
++
++static void go_up(void)
++{
++	char *p = strrchr(cwd, '/');
++
++	if (!p || p == cwd)
++		strcpy(cwd, "/");
++	else
++		*p = 0;
++	read_dir();
++}
++
++static void draw(void)
++{
++	int i, y;
++	char sz[16];
++
++	w95_fill(win, gc, W95_FACE, 0, 0, WIN_W, WIN_H);
++
++	/* header: Up button, path field, scroll buttons */
++	w95_button(win, gc, 3, 3, 28, headh - 6, "Up", 0);
++	w95_box(win, gc, 34, 3, WIN_W - 34 - 40, headh - 6, 1, 0);
++	w95_text(win, gc, W95_DARK, 38, 3 + (headh - 6 - fh) / 2, cwd);
++	w95_button(win, gc, WIN_W - 37, 3, 17, headh - 6, "^", 0);
++	w95_button(win, gc, WIN_W - 19, 3, 17, headh - 6, "v", 0);
++
++	/* list */
++	w95_fill(win, gc, W95_LIGHT, 3, headh, WIN_W - 6, WIN_H - headh - 3);
++	w95_box(win, gc, 2, headh - 1, WIN_W - 4, WIN_H - headh + 1, 1, 0);
++	for (i = 0; i < rows && top + i < nent; i++) {
++		struct ent *e = &ents[top + i];
++		char name[NAMELEN + 2];
++
++		y = headh + 1 + i * rowh;
++		if (e->isdir) {
++			snprintf(name, sizeof(name), "%s/", e->name);
++			w95_text(win, gc, W95_NAVY, 6, y, name);
++		} else {
++			w95_text(win, gc, W95_DARK, 6, y, e->name);
++			if (e->size >= 1024)
++				snprintf(sz, sizeof(sz), "%ldK", e->size / 1024);
++			else
++				snprintf(sz, sizeof(sz), "%ld", e->size);
++			w95_text(win, gc, W95_SHADOW, WIN_W - 8 - w95_textw(gc, sz), y, sz);
++		}
++	}
++	if (nent == 0)
++		w95_text(win, gc, W95_SHADOW, 6, headh + 1, "(empty or unreadable)");
++}
++
++static void open_entry(int i)
++{
++	struct ent *e;
++
++	if (i < 0 || i >= nent)
++		return;
++	e = &ents[i];
++	if (!strcmp(e->name, "..")) {
++		go_up();
++	} else if (e->isdir) {
++		if (strlen(cwd) + strlen(e->name) + 2 < sizeof(cwd)) {
++			if (strcmp(cwd, "/"))
++				strcat(cwd, "/");
++			strcat(cwd, e->name);
++			read_dir();
++		}
++	} else if (e->size < 4000) {
++		char full[320];
++		pid_t pid;
++
++		snprintf(full, sizeof(full), "%s/%s", cwd, e->name);
++		pid = vfork();
++		if (pid == 0) {
++			execl("/boot/dsnotes", "/boot/dsnotes", full, (char *)NULL);
++			_exit(127);
++		}
++	}
++}
++
++int main(int argc, char **argv)
++{
++	GR_EVENT ev;
++	GR_FONT_ID font;
++	GR_FONT_INFO fi;
++
++	if (argc > 1)
++		snprintf(cwd, sizeof(cwd), "%s", argv[1]);
++	if (access(cwd, R_OK) != 0)
++		strcpy(cwd, "/");
++	if (GrOpen() < 0) {
++		fprintf(stderr, "dsfiles: cannot connect to Nano-X\n");
++		return 1;
++	}
++	gc = GrNewGC();
++	font = GrCreateFont(GR_FONT_SYSTEM_FIXED, 0, NULL);
++	GrSetGCFont(gc, font);
++	GrGetFontInfo(font, &fi);
++	fw = fi.maxwidth;
++	fh = fi.height;
++	headh = fh + 10;
++	rowh = fh + 1;
++	rows = (WIN_H - headh - 3) / rowh;
++	read_dir();
++
++	win = GrNewWindowEx(GR_WM_PROPS_APPFRAME | GR_WM_PROPS_CAPTION | GR_WM_PROPS_CLOSEBOX, "Files",
++			    GR_ROOT_WINDOW_ID, 12, 8, WIN_W, WIN_H, W95_FACE);
++	GrSelectEvents(win, GR_EVENT_MASK_EXPOSURE | GR_EVENT_MASK_BUTTON_DOWN | GR_EVENT_MASK_KEY_DOWN |
++		       GR_EVENT_MASK_CLOSE_REQ);
++	GrMapWindow(win);
++
++	for (;;) {
++		GrGetNextEvent(&ev);
++		switch (ev.type) {
++		case GR_EVENT_TYPE_EXPOSURE:
++			draw();
++			break;
++		case GR_EVENT_TYPE_CLOSE_REQ:
++			GrClose();
++			return 0;
++		case GR_EVENT_TYPE_BUTTON_DOWN: {
++			int x = ev.button.x, y = ev.button.y;
++
++			if (y < headh) {
++				if (x >= 3 && x < 31)
++					go_up();
++				else if (x >= WIN_W - 37 && x < WIN_W - 20 && top > 0)
++					top -= rows > 1 ? rows - 1 : 1;
++				else if (x >= WIN_W - 19 && top + rows < nent)
++					top += rows > 1 ? rows - 1 : 1;
++				if (top < 0)
++					top = 0;
++			} else {
++				open_entry(top + (y - headh - 1) / rowh);
++			}
++			draw();
++			break;
++		}
++		case GR_EVENT_TYPE_KEY_DOWN:
++			if (ev.keystroke.ch == MWKEY_BACKSPACE)
++				go_up();
++			else if (ev.keystroke.ch == MWKEY_DOWN && top + rows < nent)
++				top++;
++			else if (ev.keystroke.ch == MWKEY_UP && top > 0)
++				top--;
++			draw();
++			break;
++		}
++	}
++	return 0;
++}
+diff --git a/user/microwin/src/demos/nanox/dsnotes.c b/user/microwin/src/demos/nanox/dsnotes.c
+new file mode 100644
+index 000000000..43ac74f0a
+--- /dev/null
++++ b/user/microwin/src/demos/nanox/dsnotes.c
+@@ -0,0 +1,285 @@
++/*
++ * dsnotes - a small text editor for the DSLinuxDSi desktop (Windows 95 look).
++ * dsnotes [file]   default file /home/notes.txt. Buttons: New, Save, Load.
++ */
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <unistd.h>
++#include "nano-X.h"
++#include "w95.h"
++
++#define BUFSZ	4096
++#define WIN_W	236
++#define WIN_H	150
++
++static char buf[BUFSZ];
++static int len, cur, topline, modified;
++static const char *path = "/home/notes.txt";
++static char status[40];
++
++static GR_WINDOW_ID win;
++static GR_GC_ID gc;
++static int fw, fh, cols, rows, areah, barh;
++
++/* layout: where does character index i (0..len) sit once lines are wrapped at `cols` columns */
++static void pos_to_rc(int idx, int *row, int *col)
++{
++	int r = 0, c = 0, i;
++
++	for (i = 0; i < idx && i < len; i++) {
++		if (buf[i] == '\n') {
++			r++;
++			c = 0;
++		} else if (++c >= cols) {
++			r++;
++			c = 0;
++		}
++	}
++	*row = r;
++	*col = c;
++}
++
++/* the index closest to (row, col) */
++static int rc_to_pos(int row, int col)
++{
++	int r = 0, c = 0, i;
++
++	for (i = 0; i < len; i++) {
++		if (r == row && c >= col)
++			return i;
++		if (r > row)
++			return i - 1 < 0 ? 0 : i - 1;
++		if (buf[i] == '\n') {
++			if (r == row)
++				return i;
++			r++;
++			c = 0;
++		} else if (++c >= cols) {
++			if (r == row && c >= col)
++				return i + 1;
++			r++;
++			c = 0;
++		}
++	}
++	return len;
++}
++
++static void draw_buttons(void)
++{
++	int y = WIN_H - barh;
++	char name[40];
++	const char *p = strrchr(path, '/');
++
++	w95_fill(win, gc, W95_FACE, 0, y, WIN_W, barh);
++	w95_button(win, gc, 3, y + 3, 32, barh - 6, "New", 0);
++	w95_button(win, gc, 38, y + 3, 36, barh - 6, "Save", 0);
++	w95_button(win, gc, 77, y + 3, 36, barh - 6, "Load", 0);
++	snprintf(name, sizeof(name), "%s%s", p ? p + 1 : path, modified ? " *" : "");
++	w95_box(win, gc, 118, y + 3, WIN_W - 121, barh - 6, 1, 0);
++	w95_text(win, gc, W95_DARK, 122, y + 3 + (barh - 6 - fh) / 2, name);
++	if (status[0])
++		w95_text(win, gc, W95_SHADOW, 122 + w95_textw(gc, name) + 6, y + 3 + (barh - 6 - fh) / 2, status);
++}
++
++/* draw one wrapped line */
++static void put_line(int r, char *line, int n)
++{
++	if (r < topline || r >= topline + rows)
++		return;
++	line[n] = 0;
++	w95_text(win, gc, W95_DARK, 3, 3 + (r - topline) * fh, line);
++}
++
++static void draw_text(void)
++{
++	int row, col, i, r = 0, c = 0;
++	char line[128];
++
++	pos_to_rc(cur, &row, &col);
++	if (row < topline)
++		topline = row;
++	if (row >= topline + rows)
++		topline = row - rows + 1;
++
++	w95_fill(win, gc, W95_LIGHT, 2, 2, WIN_W - 4, areah - 4);
++	w95_box(win, gc, 0, 0, WIN_W, areah, 1, 0);	/* sunken frame */
++
++	/* same wrapping as pos_to_rc(): a line breaks right after its cols-th character */
++	for (i = 0; i < len; i++) {
++		if (buf[i] == '\n') {
++			put_line(r, line, c);
++			r++;
++			c = 0;
++			continue;
++		}
++		line[c++] = buf[i];
++		if (c >= cols) {
++			put_line(r, line, c);
++			r++;
++			c = 0;
++		}
++	}
++	put_line(r, line, c);
++
++	/* caret */
++	if (row >= topline && row < topline + rows)
++		w95_fill(win, gc, W95_DARK, 3 + col * fw, 3 + (row - topline) * fh, 2, fh);
++}
++
++static void redraw(void)
++{
++	draw_text();
++	draw_buttons();
++}
++
++static void load_file(void)
++{
++	FILE *f = fopen(path, "r");
++
++	len = 0;
++	cur = 0;
++	topline = 0;
++	if (f) {
++		len = fread(buf, 1, BUFSZ - 1, f);
++		fclose(f);
++		snprintf(status, sizeof(status), "loaded");
++	} else {
++		snprintf(status, sizeof(status), "new");
++	}
++	modified = 0;
++}
++
++static void save_file(void)
++{
++	FILE *f = fopen(path, "w");
++
++	if (f && fwrite(buf, 1, len, f) == (size_t)len) {
++		fclose(f);
++		modified = 0;
++		snprintf(status, sizeof(status), "saved");
++	} else {
++		if (f)
++			fclose(f);
++		snprintf(status, sizeof(status), "save failed");
++	}
++}
++
++static void insert(char ch)
++{
++	if (len >= BUFSZ - 1)
++		return;
++	memmove(buf + cur + 1, buf + cur, len - cur);
++	buf[cur++] = ch;
++	len++;
++	modified = 1;
++	status[0] = 0;
++}
++
++static void erase(int at)
++{
++	if (at < 0 || at >= len)
++		return;
++	memmove(buf + at, buf + at + 1, len - at - 1);
++	len--;
++	if (cur > at)
++		cur--;
++	modified = 1;
++	status[0] = 0;
++}
++
++int main(int argc, char **argv)
++{
++	GR_EVENT ev;
++	GR_FONT_ID font;
++	GR_FONT_INFO fi;
++	int row, col;
++
++	if (argc > 1)
++		path = argv[1];
++	if (GrOpen() < 0) {
++		fprintf(stderr, "dsnotes: cannot connect to Nano-X\n");
++		return 1;
++	}
++	gc = GrNewGC();
++	font = GrCreateFont(GR_FONT_SYSTEM_FIXED, 0, NULL);
++	GrSetGCFont(gc, font);
++	GrGetFontInfo(font, &fi);
++	fw = fi.maxwidth;
++	fh = fi.height;
++	barh = fh + 10;
++	areah = WIN_H - barh;
++	cols = (WIN_W - 6) / fw;
++	rows = (areah - 6) / fh;
++
++	load_file();
++	win = GrNewWindowEx(GR_WM_PROPS_APPFRAME | GR_WM_PROPS_CAPTION | GR_WM_PROPS_CLOSEBOX, "Notes",
++			    GR_ROOT_WINDOW_ID, 8, 4, WIN_W, WIN_H, W95_FACE);
++	GrSelectEvents(win, GR_EVENT_MASK_EXPOSURE | GR_EVENT_MASK_BUTTON_DOWN | GR_EVENT_MASK_BUTTON_UP |
++		       GR_EVENT_MASK_KEY_DOWN | GR_EVENT_MASK_CLOSE_REQ);
++	GrMapWindow(win);
++
++	for (;;) {
++		GrGetNextEvent(&ev);
++		switch (ev.type) {
++		case GR_EVENT_TYPE_EXPOSURE:
++			redraw();
++			break;
++		case GR_EVENT_TYPE_CLOSE_REQ:
++			GrClose();
++			return 0;
++		case GR_EVENT_TYPE_BUTTON_DOWN:
++			if (ev.button.y >= WIN_H - barh) {
++				int x = ev.button.x;
++
++				if (x >= 3 && x < 35) {
++					len = cur = topline = 0;
++					modified = 0;
++					snprintf(status, sizeof(status), "new");
++				} else if (x >= 38 && x < 74) {
++					save_file();
++				} else if (x >= 77 && x < 113) {
++					load_file();
++				}
++				redraw();
++			}
++			break;
++		case GR_EVENT_TYPE_KEY_DOWN:
++			switch (ev.keystroke.ch) {
++			case MWKEY_BACKSPACE:
++				erase(cur - 1);
++				break;
++			case MWKEY_DELETE:
++				erase(cur);
++				break;
++			case MWKEY_ENTER:
++				insert('\n');
++				break;
++			case MWKEY_LEFT:
++				if (cur > 0)
++					cur--;
++				break;
++			case MWKEY_RIGHT:
++				if (cur < len)
++					cur++;
++				break;
++			case MWKEY_UP:
++				pos_to_rc(cur, &row, &col);
++				if (row > 0)
++					cur = rc_to_pos(row - 1, col);
++				break;
++			case MWKEY_DOWN:
++				pos_to_rc(cur, &row, &col);
++				cur = rc_to_pos(row + 1, col);
++				break;
++			default:
++				if (ev.keystroke.ch >= 32 && ev.keystroke.ch < 127)
++					insert((char)ev.keystroke.ch);
++				break;
++			}
++			redraw();
++			break;
++		}
++	}
++	return 0;
++}
+diff --git a/user/microwin/src/demos/nanox/nxterm.c b/user/microwin/src/demos/nanox/nxterm.c
+index eb2b7042a..cb51200ff 100644
+--- a/user/microwin/src/demos/nanox/nxterm.c
++++ b/user/microwin/src/demos/nanox/nxterm.c
+@@ -525,6 +525,10 @@ void esc1(unsigned char c)	/* various control codes */
+     case 't': /* exit ligth mode */
+ 	break;
+ 
++    case '[': /* ANSI CSI sequence (colours from ls and friends): swallow it up to its final byte */
++	escstate = 6;
++	break;
++
+     default: /* unknown escape sequence */
+ 	break;
+     }
+@@ -673,6 +677,11 @@ void printc(unsigned char c)
+ 	esc5(c);
+ 	break;
+ 
++    case 6: /* inside an ANSI CSI sequence: parameters 0x30-0x3f, intermediates 0x20-0x2f, final 0x40-0x7e */
++	if (c >= 0x40 && c <= 0x7e)
++	    escstate = 0;
++	break;
++
+     default: 
+ 	escstate = 0;
+ 	break;
+diff --git a/user/microwin/src/demos/nanox/w95.h b/user/microwin/src/demos/nanox/w95.h
+new file mode 100644
+index 000000000..f61a3e96c
+--- /dev/null
++++ b/user/microwin/src/demos/nanox/w95.h
+@@ -0,0 +1,98 @@
++/*
++ * w95.h - a Windows 95 look for the DSLinuxDSi desktop programs (dsdesk, dsnotes, dsfiles).
++ * 3D bevels in the classic grey, navy highlights, teal desktop.
++ */
++#ifndef W95_H
++#define W95_H
++
++#include "nano-X.h"
++
++#define W95_FACE	GR_RGB(192, 192, 192)
++#define W95_LIGHT	GR_RGB(255, 255, 255)
++#define W95_SHADOW	GR_RGB(128, 128, 128)
++#define W95_DARK	GR_RGB(0, 0, 0)
++#define W95_NAVY	GR_RGB(0, 0, 128)
++#define W95_TEAL	GR_RGB(0, 128, 128)
++
++static void w95_fill(GR_WINDOW_ID w, GR_GC_ID g, GR_COLOR c, int x, int y, int wd, int h)
++{
++	GrSetGCForeground(g, c);
++	GrFillRect(w, g, x, y, wd, h);
++}
++
++static void w95_hline(GR_WINDOW_ID w, GR_GC_ID g, GR_COLOR c, int x1, int x2, int y)
++{
++	GrSetGCForeground(g, c);
++	GrLine(w, g, x1, y, x2, y);
++}
++
++static void w95_vline(GR_WINDOW_ID w, GR_GC_ID g, GR_COLOR c, int x, int y1, int y2)
++{
++	GrSetGCForeground(g, c);
++	GrLine(w, g, x, y1, x, y2);
++}
++
++/* a raised (sunken = 0) or sunken (sunken = 1) box with a two pixel bevel, filled with the grey face */
++static void w95_box(GR_WINDOW_ID w, GR_GC_ID g, int x, int y, int wd, int h, int sunken, int fill)
++{
++	GR_COLOR tl_out = sunken ? W95_SHADOW : W95_LIGHT;
++	GR_COLOR br_out = sunken ? W95_LIGHT : W95_DARK;
++	GR_COLOR tl_in = sunken ? W95_DARK : W95_FACE;
++	GR_COLOR br_in = sunken ? W95_FACE : W95_SHADOW;
++	int r = x + wd - 1, b = y + h - 1;
++
++	if (fill)
++		w95_fill(w, g, W95_FACE, x, y, wd, h);
++	w95_hline(w, g, tl_out, x, r - 1, y);
++	w95_vline(w, g, tl_out, x, y, b - 1);
++	w95_hline(w, g, br_out, x, r, b);
++	w95_vline(w, g, br_out, r, y, b);
++	w95_hline(w, g, tl_in, x + 1, r - 2, y + 1);
++	w95_vline(w, g, tl_in, x + 1, y + 1, b - 2);
++	w95_hline(w, g, br_in, x + 1, r - 1, b - 1);
++	w95_vline(w, g, br_in, r - 1, y + 1, b - 1);
++}
++
++/* text without a background box; (x, y) is the top left of the text */
++static void w95_text(GR_WINDOW_ID w, GR_GC_ID g, GR_COLOR c, int x, int y, const char *s)
++{
++	GrSetGCForeground(g, c);
++	GrSetGCUseBackground(g, GR_FALSE);
++	GrText(w, g, x, y, (void *)s, -1, GR_TFASCII | GR_TFTOP);
++}
++
++static int w95_textw(GR_GC_ID g, const char *s)
++{
++	GR_SIZE wd, h, base;
++
++	GrGetGCTextSize(g, (void *)s, -1, GR_TFASCII | GR_TFTOP, &wd, &h, &base);
++	return wd;
++}
++
++static int w95_texth(GR_GC_ID g)
++{
++	GR_SIZE wd, h, base;
++
++	GrGetGCTextSize(g, (void *)"Mg", -1, GR_TFASCII | GR_TFTOP, &wd, &h, &base);
++	return h;
++}
++
++/* a push button with a centred label */
++static void w95_button(GR_WINDOW_ID w, GR_GC_ID g, int x, int y, int wd, int h, const char *label, int down)
++{
++	int tw = w95_textw(g, label), th = w95_texth(g);
++
++	w95_box(w, g, x, y, wd, h, down, 1);
++	w95_text(w, g, W95_DARK, x + (wd - tw) / 2 + (down ? 1 : 0), y + (h - th) / 2 + (down ? 1 : 0), label);
++}
++
++/* the four colour flag of the Start button, 8x7 pixels */
++static void w95_flag(GR_WINDOW_ID w, GR_GC_ID g, int x, int y)
++{
++	w95_fill(w, g, GR_RGB(255, 0, 0), x, y, 4, 3);
++	w95_fill(w, g, GR_RGB(0, 160, 0), x + 4, y, 4, 3);
++	w95_fill(w, g, GR_RGB(0, 0, 255), x, y + 4, 4, 3);
++	w95_fill(w, g, GR_RGB(255, 255, 0), x + 4, y + 4, 4, 3);
++}
++
++#endif
+diff --git a/user/microwin/src/nanox/srvfunc.c b/user/microwin/src/nanox/srvfunc.c
+index f913cf716..4d5ceb0ed 100644
+--- a/user/microwin/src/nanox/srvfunc.c
++++ b/user/microwin/src/nanox/srvfunc.c
+@@ -3500,8 +3500,8 @@ GrKillWindow(GR_WINDOW_ID wid)
+ /*
+  * GrGetSystemColor color scheme definitions
+  */ 
+-/* define color scheme: A (tan), B (winstd) or C (old)*/
+-#define A
++/* define color scheme: A (tan), B (winstd) or C (old); DSLinuxDSi uses B with the Windows 95 navy */
++#define B
+ 
+ #define A_RGB(r,g,b)
+ #define B_RGB(r,g,b)
+@@ -3528,7 +3528,7 @@ static GR_COLOR sysColors[MAXSYSCOLORS] = {
+ 
+ 	/* caption colors*/
+ 	A_RGB(128,   0,   0)	/* GR_COLOR_ACTIVECAPTION       */
+-	B_RGB(128,   0, 128)	/* GR_COLOR_ACTIVECAPTION       */
++	B_RGB(  0,   0, 128)	/* GR_COLOR_ACTIVECAPTION       */
+ 	C_RGB(128,   0, 128)	/* GR_COLOR_ACTIVECAPTION       */
+ 	GR_RGB(255, 255, 255),  /* GR_COLOR_ACTIVECAPTIONTEXT   */
+ 	A_RGB(162, 141, 104)	/* GR_COLOR_INACTIVECAPTION     */
+@@ -3563,7 +3563,7 @@ static GR_COLOR sysColors[MAXSYSCOLORS] = {
+ 	/* edit/listbox control backgrounds/text, selected highlights*/
+ 	GR_RGB(255, 255, 255),  /* GR_COLOR_WINDOW              */
+ 	GR_RGB(  0,   0,   0),  /* GR_COLOR_WINDOWTEXT          */
+-	GR_RGB(128,   0,   0),  /* GR_COLOR_HIGHLIGHT           */
++	GR_RGB(  0,   0, 128),  /* GR_COLOR_HIGHLIGHT           */
+ 	GR_RGB(255, 255, 255),  /* GR_COLOR_HIGHLIGHTTEXT       */
+ 	GR_RGB( 64,  64,  64),  /* GR_COLOR_GRAYTEXT            */
+ 
+diff --git a/vendors/Nintendo/DSI/Makefile b/vendors/Nintendo/DSI/Makefile
+index 378ec7865..dd295bcb9 100644
+--- a/vendors/Nintendo/DSI/Makefile
++++ b/vendors/Nintendo/DSI/Makefile
+@@ -153,6 +153,9 @@ finishrom:
+ 	# The desktop programs also live in the ROM (/boot), so a newer desktop works without replacing ROOTFS.IMG
+ 	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/nano-X $(ROMFSDIR)/boot/nano-X
+ 	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/nxterm $(ROMFSDIR)/boot/nxterm
++	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/dsdesk $(ROMFSDIR)/boot/dsdesk
++	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/dsnotes $(ROMFSDIR)/boot/dsnotes
++	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/dsfiles $(ROMFSDIR)/boot/dsfiles
+ 	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/madplay $(ROMFSDIR)/$(OPTDIR)
+ 	# Compress the data area of these programs
+ 	$(CROSS)flthdr -d $(ROMFSDIR)/$(OPTDIR)/*
+diff --git a/vendors/Nintendo/DSI/desktop-apps b/vendors/Nintendo/DSI/desktop-apps
+index fa625e6c4..a8ec00717 100644
+--- a/vendors/Nintendo/DSI/desktop-apps
++++ b/vendors/Nintendo/DSI/desktop-apps
+@@ -8,7 +8,9 @@ if [ -z "`pidof nano-X`" ]; then
+ fi
+ nanowm >> $LOG 2>&1 &
+ sleep 1
++/boot/dsdesk >> $LOG 2>&1 &
++sleep 1
+ /boot/nxterm >> $LOG 2>&1 &
+ sleep 3
+-echo "desktop: running: `pidof nano-X nanowm nxterm`" >> $LOG
++echo "desktop: running: `pidof nano-X nanowm dsdesk nxterm`" >> $LOG
+ ls -l /dev/ttyp0 /var/run/ttyp0 /dev/ptyp0 /bin/sh /dev/input/mice /dev/tty >> $LOG 2>&1
+-- 
+2.56.0
+
