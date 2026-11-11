@@ -1,0 +1,809 @@
+From a7735d704705d3ff15a1508be17afe7e422a68d1 Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 07:00:27 -0600
+Subject: [PATCH] Sound step 1: DSi speaker path (power chip amp/mute bits +
+ SNDEXTCNT I2S) when the sound engine powers on, dsplay (scale test / WAV
+ player on /dev/dsp, Start menu 'Sound test'); volume: ARM7 reads the DSi
+ volume level over I2C (bounded), applies it as codec DAC volume, sends it in
+ a FIFO_BUTTONS message, /proc/dsivolume, desktop popup with percent
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ linux-2.6.x/arch/arm/mach-nds/Makefile        |   5 +-
+ linux-2.6.x/arch/arm/mach-nds/arm7/dsitouch.c |   5 +
+ linux-2.6.x/arch/arm/mach-nds/arm7/dsitouch.h |   2 +
+ linux-2.6.x/arch/arm/mach-nds/arm7/dsivol.c   | 199 ++++++++++++++++++
+ linux-2.6.x/arch/arm/mach-nds/arm7/dsivol.h   |   7 +
+ linux-2.6.x/arch/arm/mach-nds/arm7/main.c     |   8 +-
+ linux-2.6.x/arch/arm/mach-nds/arm7/sound.c    |   3 +
+ linux-2.6.x/arch/arm/mach-nds/button.c        |   7 +
+ linux-2.6.x/arch/arm/mach-nds/fifo.c          |   2 +-
+ linux-2.6.x/arch/arm/mach-nds/volume.c        |  42 ++++
+ user/microwin/Makefile                        |   1 +
+ user/microwin/src/demos/nanox/Makefile        |   9 +-
+ user/microwin/src/demos/nanox/dsdesk.c        |  95 +++++++++
+ user/microwin/src/demos/nanox/dsplay.c        | 169 +++++++++++++++
+ vendors/Nintendo/DSI/Makefile                 |   1 +
+ 15 files changed, 547 insertions(+), 8 deletions(-)
+ create mode 100644 linux-2.6.x/arch/arm/mach-nds/arm7/dsivol.c
+ create mode 100644 linux-2.6.x/arch/arm/mach-nds/arm7/dsivol.h
+ create mode 100644 linux-2.6.x/arch/arm/mach-nds/volume.c
+ create mode 100644 user/microwin/src/demos/nanox/dsplay.c
+
+diff --git a/linux-2.6.x/arch/arm/mach-nds/Makefile b/linux-2.6.x/arch/arm/mach-nds/Makefile
+index 61ae158a9..1a02ac520 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/Makefile
++++ b/linux-2.6.x/arch/arm/mach-nds/Makefile
+@@ -4,7 +4,7 @@
+ 
+ # Object file lists.
+ 
+-obj-y                += arch.o irq.o time.o button.o fifo.o rtc.o disable-itcm-writes.o
++obj-y                += arch.o irq.o time.o button.o fifo.o rtc.o volume.o disable-itcm-writes.o
+ 
+ obj-$(CONFIG_NDS_TEXT_CONSOLE) += console.o
+ obj-$(CONFIG_NDS_SOUNDTEST) += soundtest.o
+@@ -25,6 +25,7 @@ extra-y += arm7/wifi.o
+ extra-y += arm7/divide.o
+ extra-y += arm7/sdmmc.o
+ extra-y += arm7/dsitouch.o
++extra-y += arm7/dsivol.o
+ extra-y += arm7.bin
+ 
+ # this does not seem to have any effect (why?):
+@@ -36,7 +37,7 @@ $(obj)/arm7.bin: $(obj)/arm7.elf
+ 	$(OBJCOPY) -O binary $(obj)/arm7.elf $(obj)/arm7.bin
+ 	rm -f $(obj)/head.o
+ 
+-arm7obj = $(obj)/arm7/head.o $(obj)/arm7/main.o $(obj)/arm7/time.o $(obj)/arm7/spi.o $(obj)/arm7/sound.o $(obj)/arm7/microphone.o $(obj)/arm7/wifi.o $(obj)/arm7/divide.o $(obj)/arm7/sdmmc.o $(obj)/arm7/dsitouch.o
++arm7obj = $(obj)/arm7/head.o $(obj)/arm7/main.o $(obj)/arm7/time.o $(obj)/arm7/spi.o $(obj)/arm7/sound.o $(obj)/arm7/microphone.o $(obj)/arm7/wifi.o $(obj)/arm7/divide.o $(obj)/arm7/sdmmc.o $(obj)/arm7/dsitouch.o $(obj)/arm7/dsivol.o
+ 
+ $(obj)/arm7.elf: $(arm7obj) $(src)/arm7/arm7.lds
+ 	$(LD) -nostartfiles -nostdlib -o $(obj)/arm7.elf $(arm7obj) -T $(src)/arm7/arm7.lds
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/dsitouch.c b/linux-2.6.x/arch/arm/mach-nds/arm7/dsitouch.c
+index 8470808da..98f5351c6 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/arm7/dsitouch.c
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/dsitouch.c
+@@ -123,6 +123,11 @@ static void cdc_read_array(u8 bank, u8 reg, u8 *out, u8 size)
+ 	*out++ = xchg(0);
+ }
+ 
++void dsitouch_cdc_write(u8 bank, u8 reg, u8 value)
++{
++	cdc_write(bank, reg, value);
++}
++
+ /* diagnostics, fetched by the ARM9 (dsitouch_diag) */
+ static u32 st_probe, st_scfg, st_status, st_penreg, st_adc1, st_adc2;
+ static u32 st_pen_calls, st_pen_true, st_rd_ok, st_rd_bad, st_rd_noisy;
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/dsitouch.h b/linux-2.6.x/arch/arm/mach-nds/arm7/dsitouch.h
+index 50fce78d5..008c04d48 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/arm7/dsitouch.h
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/dsitouch.h
+@@ -9,5 +9,7 @@ void dsitouch_diag(unsigned int *out);
+ int dsitouch_pen_down(void);
+ /* Raw 12 bit position like the DS path; 1 = valid sample. (DSi mode only) */
+ int dsitouch_read_xy(s16 *rawx, s16 *rawy);
++/* write a codec register (page = bank), used for the output volume */
++void dsitouch_cdc_write(u8 bank, u8 reg, u8 value);
+ 
+ #endif
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/dsivol.c b/linux-2.6.x/arch/arm/mach-nds/arm7/dsivol.c
+new file mode 100644
+index 000000000..5be3f9097
+--- /dev/null
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/dsivol.c
+@@ -0,0 +1,199 @@
++/*
++ * DSi audio output and volume for the DSLinux ARM7.
++ *
++ * - dsivol_sound_power(): DSi mode needs more than the DS sound channels: the power chip's amplifier bit and mute
++ *   bit (as libnds enableSound() does through the SPI power chip), and the DSi I2S output (SNDEXTCNT, 100% ARM mix,
++ *   32 kHz), which carries the DS mixer's output to the TSC2117 codec.
++ * - dsivol_poll(): the DSi's volume buttons only change a number in the power management chip (MCU, I2C device
++ *   0x4A register 0x40, 0..31); on a stock system a program applies it. Here the ARM7 reads it a few times a
++ *   second, applies it as the codec's DAC volume, and tells the ARM9 (FIFO_BUTTONS message with bit 8 set) so the
++ *   desktop can show it.
++ *
++ * The I2C sequence is derived from BlocksDS libnds (source/arm7/i2c.twl.c, Copyright (C) 2011 Dave Murphy
++ * (WinterMute), zlib licence). This version is altered: bounded waits, no BIOS delay calls (they hang the ARM7 in
++ * DSi mode), no interrupts. zlib notice: This software is provided 'as-is', without any express or implied warranty;
++ * the origin must not be misrepresented; altered source versions must be plainly marked as such; this notice may
++ * not be removed or altered.
++ */
++#define __DSLINUX_ARM7__
++
++#include "linux/config.h"
++#include "asm/types.h"
++#include "asm/arch/fifo.h"
++
++#include "dsitouch.h"
++#include "dsivol.h"
++
++#define REG_I2CDATA	(*(volatile u8 *)0x04004500)
++#define REG_I2CCNT	(*(volatile u8 *)0x04004501)
++#define REG_SNDEXTCNT	(*(volatile u16 *)0x04004700)
++
++#define I2C_STOP	(1 << 0)
++#define I2C_START	(1 << 1)
++#define I2C_ERROR	(1 << 2)
++#define I2C_ACK		(1 << 4)
++#define I2C_READ	(1 << 5)
++#define I2C_IRQEN	(1 << 6)
++#define I2C_ENABLE	(1 << 7)	/* writing; reading it back = busy */
++
++#define I2C_PM		0x4A
++#define PM_REG_VOL	0x40
++
++extern int pm_xfer(u8 cmd, u8 data, u8 *out);	/* main.c: SPI power chip, bounded */
++
++/* diagnostics step of the last volume read: 0 ok, 1 no answer from the device, 2 register select refused,
++ * 3 read select refused, 4 bus stuck */
++static u8 vol_step;
++static int vol_last = -1;
++static int vol_applied = -1;
++
++static void spin(int n)
++{
++	while (n-- > 0)
++		asm volatile("" ::: "memory");
++}
++
++static int i2c_wait(void)
++{
++	int n = 100000;
++
++	while ((REG_I2CCNT & I2C_ENABLE) && --n)
++		;
++	return n;
++}
++
++static void i2c_delay(void)
++{
++	i2c_wait();
++	spin(600);		/* about 45 us: the power chip needs time between bytes */
++}
++
++static int i2c_result(void)
++{
++	if (!i2c_wait())
++		return -1;
++	return (REG_I2CCNT >> 4) & 1;
++}
++
++static int i2c_select_device(u8 dev)
++{
++	if (!i2c_wait())
++		return -1;
++	REG_I2CDATA = dev;
++	REG_I2CCNT = I2C_ENABLE | I2C_IRQEN | I2C_START;
++	return i2c_result();
++}
++
++static int i2c_select_register(u8 reg)
++{
++	i2c_delay();
++	REG_I2CDATA = reg;
++	REG_I2CCNT = I2C_ENABLE | I2C_IRQEN;
++	return i2c_result();
++}
++
++/* returns the register value, or -1 (vol_step tells why) */
++static int i2c_read_reg(u8 dev, u8 reg)
++{
++	int i, r;
++
++	vol_step = 0;
++	for (i = 0; i < 4; i++) {
++		r = i2c_select_device(dev);
++		if (r < 0) {
++			vol_step = 4;
++			return -1;
++		}
++		if (r == 0) {
++			vol_step = 1;
++		} else if (i2c_select_register(reg) != 1) {
++			vol_step = 2;
++		} else {
++			i2c_delay();
++			if (i2c_select_device(dev | 1) != 1) {
++				vol_step = 3;
++			} else {
++				u8 v;
++
++				i2c_delay();
++				REG_I2CCNT = I2C_READ | I2C_ENABLE | I2C_IRQEN;
++				i2c_delay();
++				REG_I2CCNT = I2C_ENABLE | I2C_IRQEN | I2C_ERROR | I2C_STOP;
++				if (!i2c_wait()) {
++					vol_step = 4;
++					return -1;
++				}
++				v = REG_I2CDATA;
++				vol_step = 0;
++				return v;
++			}
++		}
++		REG_I2CCNT = I2C_ENABLE | I2C_IRQEN | I2C_STOP | I2C_ERROR;
++	}
++	return -1;
++}
++
++/* the sound engine is switched on (on) or off */
++void dsivol_sound_power(int on)
++{
++	u8 v = 0;
++
++	if (!dsitouch_active())		/* DS mode: nothing to do here */
++		return;
++	if (pm_xfer(0x80, 0, &v)) {	/* read power chip control register, change only the sound bits */
++		if (on)
++			v = (v & ~0x02) | 0x01;		/* amplifier on, mute off */
++		else
++			v &= ~0x01;
++		pm_xfer(0x00, v, 0);
++	}
++	if (on)
++		REG_SNDEXTCNT = (REG_SNDEXTCNT & ~0x000f) | (1 << 15) | 8;	/* I2S on, 100% ARM output, 32 kHz */
++	else
++		REG_SNDEXTCNT &= ~(1 << 15);
++}
++
++/* MCU level 0..31 -> DAC volume, 1.5 dB per step, 0 dB at 31; 0 is as quiet as the codec goes */
++static void apply_volume(int level)
++{
++	int units;			/* in 0.5 dB, 0 down to -63.5 dB */
++	u8 reg;
++
++	if (level <= 0) {
++		reg = 0x81;
++	} else {
++		units = -(31 - level) * 3;
++		if (units < -127)
++			units = -127;
++		reg = (u8)units;
++	}
++	dsitouch_cdc_write(0, 0x41, reg);	/* DAC left digital volume */
++	dsitouch_cdc_write(0, 0x42, reg);	/* DAC right */
++}
++
++/* called from the vblank interrupt: about 5 times a second reads the volume, tells the ARM9 on every change */
++void dsivol_poll(void)
++{
++	static int count;
++	int v;
++
++	if (++count < 12)
++		return;
++	count = 0;
++	if (!dsitouch_active())
++		return;
++	v = i2c_read_reg(I2C_PM, PM_REG_VOL);
++	if (v < 0) {
++		v = 0xff;
++	} else {
++		v &= 0x1f;
++		if (v != vol_applied) {
++			apply_volume(v);
++			vol_applied = v;
++		}
++	}
++	if (v != vol_last) {
++		vol_last = v;
++		nds_fifo_send(FIFO_BUTTONS | 0x100 | ((vol_step & 7) << 9) | v);
++	}
++}
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/dsivol.h b/linux-2.6.x/arch/arm/mach-nds/arm7/dsivol.h
+new file mode 100644
+index 000000000..9722c1edf
+--- /dev/null
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/dsivol.h
+@@ -0,0 +1,7 @@
++#ifndef _mach_nds_arm7_dsivol_h_
++#define _mach_nds_arm7_dsivol_h_
++
++void dsivol_sound_power(int on);
++void dsivol_poll(void);
++
++#endif
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/main.c b/linux-2.6.x/arch/arm/mach-nds/arm7/main.c
+index c22bef37c..c68e087e7 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/arm7/main.c
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/main.c
+@@ -16,6 +16,7 @@
+ #include "wifi.h"
+ #include "sdmmc.h"
+ #include "dsitouch.h"
++#include "dsivol.h"
+ #include "time.h"
+ 
+ static s32 xscale, yscale;
+@@ -43,7 +44,7 @@ static int pm_wait(void)
+ }
+ 
+ /* one power-chip register access: cmd = register (| 0x80 to read); returns 1 if the bus never stuck */
+-static int pm_xfer(u8 cmd, u8 data, u8 *out)
++int pm_xfer(u8 cmd, u8 data, u8 *out)
+ {
+ 	if (!pm_wait())
+ 		return 0;
+@@ -409,13 +410,14 @@ void InterruptHandler(void)
+ 		/* read X and Y, lid and touchscreen buttons */
+ 		buttons = XKEYS;
+ 
+-		/* send button state to ARM9 */
++		/* send button state to ARM9 (low 8 bits: bit 8 marks the volume messages) */
+ 		if (buttons != oldbuttons) {
+-			nds_fifo_send(FIFO_BUTTONS | buttons);
++			nds_fifo_send(FIFO_BUTTONS | (buttons & 0xff));
+ 			oldbuttons = buttons;
+ 		}
+ 
+ 		sendTouchState(buttons);
++		dsivol_poll();
+ 
+ 		/* clear FIFO errors (just in case) */
+ 		if (NDS_REG_IPCFIFOCNT & (1 << 14))
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/sound.c b/linux-2.6.x/arch/arm/mach-nds/arm7/sound.c
+index cf82a66b0..e11bf93a4 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/arm7/sound.c
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/sound.c
+@@ -2,6 +2,7 @@
+ #include "asm/io.h"
+ 
+ #include "sound.h"
++#include "dsivol.h"
+ 
+ /* send MONO as a stereo signal, to get the same output power to the speakers */
+ #define MONO_AS_STEREO
+@@ -118,8 +119,10 @@ void sound_set_power(u8 state)
+ 	if (state) {
+ 		POWER_CR |= 1;
+ 		SOUND_CR = SOUND_ENABLE;
++		dsivol_sound_power(1);
+ 	} else {
+ 		//POWER_CR &= ~1;
+ 		SOUND_CR = 0;
++		dsivol_sound_power(0);
+ 	}
+ }
+diff --git a/linux-2.6.x/arch/arm/mach-nds/button.c b/linux-2.6.x/arch/arm/mach-nds/button.c
+index 86228ed59..2c44adbd4 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/button.c
++++ b/linux-2.6.x/arch/arm/mach-nds/button.c
+@@ -64,9 +64,16 @@ static irqreturn_t ndsbutton_interrupt(int irq, void *dev_id, struct pt_regs *re
+ 	return IRQ_HANDLED ;
+ }
+ 
++extern void nds_volume_msg(u32 state);
++
+ static void ndsbutton_xkeys(u32 state)
+ {
+ 	int i;
++
++	if (state & 0x100) {		/* a volume message from the ARM7, not keys */
++		nds_volume_msg(state);
++		return;
++	}
+ 	for (i = 0 ; i < (sizeof(ndsbuttons2)/sizeof(ndsbuttons2[0])) ; i++)
+ 	{
+ 		input_report_key(&ndsbutton_dev, ndsbuttons2[i], !((state >> i) & 1));
+diff --git a/linux-2.6.x/arch/arm/mach-nds/fifo.c b/linux-2.6.x/arch/arm/mach-nds/fifo.c
+index 8619e7ab8..9bfa34195 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/fifo.c
++++ b/linux-2.6.x/arch/arm/mach-nds/fifo.c
+@@ -45,7 +45,7 @@ static irqreturn_t ndsfifo_interrupt(int irq, void *dev_id,
+ 					    FIFO_FIRMWARE_GET_CMD(data));
+ 					break;
+ 				case FIFO_BUTTONS:
+-					cb->handler.button_handler(data & 0xff);
++					cb->handler.button_handler(data & 0x1fff);
+ 					break;
+ 				case FIFO_TOUCH:
+ 					cb->handler.touch_handler(
+diff --git a/linux-2.6.x/arch/arm/mach-nds/volume.c b/linux-2.6.x/arch/arm/mach-nds/volume.c
+new file mode 100644
+index 000000000..63144e4c4
+--- /dev/null
++++ b/linux-2.6.x/arch/arm/mach-nds/volume.c
+@@ -0,0 +1,42 @@
++/*
++ * DSi volume as seen by the ARM7 (see arm7/dsivol.c): /proc/dsivolume says
++ *   level=20 max=31 percent=64 status=0
++ * level is the DSi's own volume step (the power management chip's register), percent = level * 100 / 31, status 0 =
++ * read fine, 1..4 = the I2C read failed at that step (level is then -1), 5 = no message from the ARM7 yet (DS mode).
++ * The desktop shows a bar when it changes.
++ */
++#include <linux/kernel.h>
++#include <linux/init.h>
++#include <linux/proc_fs.h>
++
++static int vol_level = -1;
++static int vol_status = 5;
++
++/* called from the button FIFO handler with the whole message (bit 8 set) */
++void nds_volume_msg(u32 state)
++{
++	int lvl = state & 0xff;
++
++	vol_status = (state >> 9) & 7;
++	vol_level = lvl == 0xff ? -1 : lvl;
++}
++
++static int vol_read_proc(char *page, char **start, off_t off, int count, int *eof, void *data)
++{
++	int len = sprintf(page, "level=%d max=31 percent=%d status=%d\n", vol_level,
++			  vol_level < 0 ? 0 : vol_level * 100 / 31, vol_status);
++
++	*eof = 1;
++	if (off >= len)
++		return 0;
++	*start = page + off;
++	return len - off;
++}
++
++static int __init nds_volume_init(void)
++{
++	create_proc_read_entry("dsivolume", 0444, NULL, vol_read_proc, NULL);
++	return 0;
++}
++
++module_init(nds_volume_init);
+diff --git a/user/microwin/Makefile b/user/microwin/Makefile
+index 090dbea56..bd9d2b61c 100644
+--- a/user/microwin/Makefile
++++ b/user/microwin/Makefile
+@@ -16,6 +16,7 @@ real_romfs:
+ 	$(ROMFSINST) /bin/dsbench
+ 	$(ROMFSINST) /bin/dsgl3d
+ 	$(ROMFSINST) /bin/dsgx
++	$(ROMFSINST) /bin/dsplay
+ 	$(ROMFSINST) -e CONFIG_USER_MICROWIN_BIN_LANDMINE    /bin/landmine
+ 	$(ROMFSINST) -e CONFIG_USER_MICROWIN_BIN_LAUNCHER    /bin/launcher
+ 	$(ROMFSINST) -e CONFIG_USER_MICROWIN_BIN_MOVE        /bin/move
+diff --git a/user/microwin/src/demos/nanox/Makefile b/user/microwin/src/demos/nanox/Makefile
+index f58642c4a..cef93ff75 100644
+--- a/user/microwin/src/demos/nanox/Makefile
++++ b/user/microwin/src/demos/nanox/Makefile
+@@ -83,10 +83,11 @@ OBJS =	demo.o \
+ 	dsfiles.o \
+ 	dsbench.o \
+ 	dsgl3d.o \
+-	dsgx.o
++	dsgx.o \
++	dsplay.o
+ 
+ TARGETS = \
+-	$(TOP)/bin/dsdesk $(TOP)/bin/dsnotes $(TOP)/bin/dsfiles $(TOP)/bin/dsbench $(TOP)/bin/dsgl3d $(TOP)/bin/dsgx \
++	$(TOP)/bin/dsdesk $(TOP)/bin/dsnotes $(TOP)/bin/dsfiles $(TOP)/bin/dsbench $(TOP)/bin/dsgl3d $(TOP)/bin/dsgx $(TOP)/bin/dsplay \
+ 	$(TOP)/bin/demo $(TOP)/bin/move $(TOP)/bin/landmine \
+ 	$(TOP)/bin/world $(TOP)/bin/nxclock \
+ 	$(TOP)/bin/nxlsclients $(TOP)/bin/nxev \
+@@ -185,6 +186,10 @@ $(TOP)/bin/dsfiles: dsfiles.o $(NANOXCLIENTLIBS) $(TOP)/config
+ 	@echo "Linking $@ ..."
+ 	$(CC) $(CFLAGS) $(LDFLAGS) $< -o $@ $(LD_NANOXCLIENTLIBS)
+ 
++$(TOP)/bin/dsplay: dsplay.o $(TOP)/config
++	@echo "Linking $@ ..."
++	$(CC) $(CFLAGS) $(LDFLAGS) dsplay.o -o $@ $(LIBM)
++
+ $(TOP)/bin/dsgx: dsgx.o dsgx.h dsgx_demo.h $(NANOXCLIENTLIBS) $(TOP)/config
+ 	@echo "Linking $@ ..."
+ 	$(CC) $(CFLAGS) $(LDFLAGS) dsgx.o -o $@ $(LD_NANOXCLIENTLIBS) $(LIBM)
+diff --git a/user/microwin/src/demos/nanox/dsdesk.c b/user/microwin/src/demos/nanox/dsdesk.c
+index e245c2564..8bc51af79 100644
+--- a/user/microwin/src/demos/nanox/dsdesk.c
++++ b/user/microwin/src/demos/nanox/dsdesk.c
+@@ -29,6 +29,7 @@ static struct item items[] = {
+ 	{ "Files", "/boot/dsfiles", NULL },
+ 	{ "Clock", "/usr/bin/nxclock", NULL },
+ 	{ "3D gears", "/boot/dsgl3d", NULL },
++	{ "Sound test", "/boot/dsplay", NULL },
+ 	{ "Bench", "/boot/dsbench", NULL },
+ 	{ "Save log", "/boot/savelog", NULL },
+ 	{ "Exit desktop", "/boot/desktop", "stop" },
+@@ -129,6 +130,97 @@ static void launch(const char *prog, const char *arg)
+ 	}
+ }
+ 
++/*
++ * Volume popup: /proc/dsivolume (written by the kernel from the ARM7's reading of the DSi's volume level) is read
++ * every 0.3 s; when the level changes a small window with the percentage and a bar is shown for 2 seconds.
++ */
++#define VOLW	130
++#define VOL_SECONDS	2
++static GR_WINDOW_ID volwin;
++static time_t vol_since;
++static int vol_last = -2, vol_pct, vol_status;
++static char vol_msg[40];
++
++static int read_volume(int *level, int *pct, int *status)
++{
++	FILE *f = fopen("/proc/dsivolume", "r");
++	int ok;
++
++	if (!f)
++		return 0;
++	ok = fscanf(f, "level=%d max=%*d percent=%d status=%d", level, pct, status) == 3;
++	fclose(f);
++	return ok;
++}
++
++static void draw_vol(void)
++{
++	char t[40];
++	int bw;
++
++	if (!volwin)
++		return;
++	w95_box(volwin, gc, 0, 0, VOLW, th + 20, 0, W95_FACEFILL);
++	if (vol_msg[0]) {
++		strcpy(t, vol_msg);
++	} else if (vol_pct == 0) {
++		strcpy(t, "Volume: muted");
++	} else {
++		sprintf(t, "Volume %d%%", vol_pct);
++	}
++	w95_text(volwin, gc, W95_DARK, 6, 4, t);
++	w95_box(volwin, gc, 6, th + 7, VOLW - 12, 8, 1, W95_WHITEFILL);
++	bw = (VOLW - 12 - 4) * vol_pct / 100;
++	if (bw > 0)
++		w95_fill(volwin, gc, W95_NAVY, 8, th + 9, bw, 4);
++}
++
++static void show_vol(void)
++{
++	if (!volwin) {
++		volwin = GrNewWindowEx(GR_WM_PROPS_NODECORATE | GR_WM_PROPS_NOFOCUS | GR_WM_PROPS_NOMOVE,
++				       "volume", GR_ROOT_WINDOW_ID, (si.cols - VOLW) / 2, 4, VOLW, th + 20, W95_FACE);
++		GrSelectEvents(volwin, GR_EVENT_MASK_EXPOSURE);
++		GrMapWindow(volwin);
++	} else {
++		GrRaiseWindow(volwin);
++		draw_vol();
++	}
++	vol_since = time(NULL);
++}
++
++static void poll_volume(void)
++{
++	int level, pct, status;
++
++	if (volwin && time(NULL) - vol_since >= VOL_SECONDS) {
++		GrDestroyWindow(volwin);
++		volwin = 0;
++	}
++	if (!read_volume(&level, &pct, &status) || status == 5)
++		return;
++	if (level < 0) {			/* the ARM7 could not read the volume: say so once */
++		if (vol_last != -1) {
++			vol_last = -1;
++			vol_pct = 0;
++			sprintf(vol_msg, "Volume: read failed (%d)", status);
++			show_vol();
++		}
++		return;
++	}
++	vol_msg[0] = 0;
++	vol_status = status;
++	if (vol_last == -2) {			/* first reading: remember it, show nothing */
++		vol_last = level;
++		return;
++	}
++	if (level != vol_last) {
++		vol_last = level;
++		vol_pct = pct;
++		show_vol();
++	}
++}
++
+ static void draw_bar(void)
+ {
+ 	char clk[16];
+@@ -326,6 +418,8 @@ int main(int argc, char **argv)
+ 		case GR_EVENT_TYPE_EXPOSURE:
+ 			if (ev.exposure.wid == bar)
+ 				draw_bar();
++			else if (volwin && ev.exposure.wid == volwin)
++				draw_vol();
+ 			else if (menu_open && ev.exposure.wid == menu)
+ 				draw_menu();
+ 			break;
+@@ -388,6 +482,7 @@ int main(int argc, char **argv)
+ 		case GR_EVENT_TYPE_TIMEOUT:
+ 			/* quiet for 0.3 s: do the slow things that need an answer from the server */
+ 			ticks++;
++			poll_volume();
+ 			if (want_refresh) {
+ 				refresh_windows();
+ 				changed = 1;
+diff --git a/user/microwin/src/demos/nanox/dsplay.c b/user/microwin/src/demos/nanox/dsplay.c
+new file mode 100644
+index 000000000..a2a55b072
+--- /dev/null
++++ b/user/microwin/src/demos/nanox/dsplay.c
+@@ -0,0 +1,169 @@
++/*
++ * dsplay - sound output test and WAV player for DSLinuxDSi, through the OSS device /dev/dsp (the kernel's NDS ALSA
++ * driver with OSS emulation; the ARM7 plays the samples).
++ *   dsplay           a C major scale (the sound test: if you hear it, the speaker path works)
++ *   dsplay file.wav  play a PCM WAV (8 or 16 bit, mono or stereo, any rate the driver takes, 8000..48000)
++ * It prints what it did, so a silent run can be told apart from a failed one.
++ */
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <math.h>
++#include <fcntl.h>
++#include <unistd.h>
++#include <sys/ioctl.h>
++
++/* OSS ioctl numbers (linux/soundcard.h): the same on ARM */
++#define SNDCTL_DSP_SYNC		0x5001
++#define SNDCTL_DSP_SPEED	0xC0045002
++#define SNDCTL_DSP_SETFMT	0xC0045005
++#define SNDCTL_DSP_CHANNELS	0xC0045006
++#define AFMT_S16_LE		0x10
++
++static int dsp_open(int rate, int channels)
++{
++	int fd = open("/dev/dsp", O_WRONLY), fmt = AFMT_S16_LE, r = rate, c = channels;
++
++	if (fd < 0) {
++		perror("dsplay: /dev/dsp");
++		return -1;
++	}
++	if (ioctl(fd, SNDCTL_DSP_SETFMT, &fmt) < 0 || fmt != AFMT_S16_LE)
++		fprintf(stderr, "dsplay: 16 bit samples not accepted (format %d)\n", fmt);
++	if (ioctl(fd, SNDCTL_DSP_CHANNELS, &c) < 0 || c != channels)
++		fprintf(stderr, "dsplay: %d channel(s) not accepted (got %d)\n", channels, c);
++	if (ioctl(fd, SNDCTL_DSP_SPEED, &r) < 0)
++		perror("dsplay: speed");
++	printf("dsplay: /dev/dsp open, %d Hz, %d channel(s), 16 bit\n", r, c);
++	return fd;
++}
++
++static int put(int fd, const void *p, int n)
++{
++	const char *b = p;
++
++	while (n > 0) {
++		int w = write(fd, b, n > 4096 ? 4096 : n);
++
++		if (w <= 0) {
++			perror("dsplay: write");
++			return -1;
++		}
++		b += w;
++		n -= w;
++	}
++	return 0;
++}
++
++static int tones(void)
++{
++	static const int note[8] = { 262, 294, 330, 349, 392, 440, 494, 523 };
++	enum { RATE = 22050, LEN = RATE * 35 / 100 };
++	static short sine[256], buf[LEN];
++	int fd, i, k, phase, step;
++
++	for (i = 0; i < 256; i++)
++		sine[i] = (short)(8000.0 * sin(i * 2.0 * M_PI / 256.0));
++	fd = dsp_open(RATE, 1);
++	if (fd < 0)
++		return 1;
++	printf("dsplay: playing the scale C D E F G A B C (about 3 seconds)\n");
++	for (k = 0; k < 8; k++) {
++		phase = 0;
++		step = note[k] * 256 * 256 / RATE;		/* 8.8 fixed point phase step */
++		for (i = 0; i < LEN; i++) {
++			int s = sine[(phase >> 8) & 255];
++			int edge = i < 400 ? i : (LEN - 1 - i < 400 ? LEN - 1 - i : 400);
++
++			buf[i] = (short)(s * edge / 400);	/* short fade in and out: no clicks */
++			phase += step;
++		}
++		if (put(fd, buf, sizeof(buf)))
++			break;
++	}
++	ioctl(fd, SNDCTL_DSP_SYNC, 0);
++	close(fd);
++	printf("dsplay: done\n");
++	return 0;
++}
++
++static unsigned int le32(const unsigned char *p)
++{
++	return p[0] | (p[1] << 8) | (p[2] << 16) | ((unsigned int)p[3] << 24);
++}
++
++static int wav(const char *name)
++{
++	unsigned char h[12], ck[8], fmtb[16], in[2048];
++	short out[2048];
++	unsigned int len, rate = 0, bits = 0, chans = 0, datalen = 0;
++	int f = open(name, O_RDONLY), fd, got = 0, i, n;
++
++	if (f < 0) {
++		perror(name);
++		return 1;
++	}
++	if (read(f, h, 12) != 12 || memcmp(h, "RIFF", 4) || memcmp(h + 8, "WAVE", 4)) {
++		fprintf(stderr, "dsplay: %s is not a WAV file\n", name);
++		return 1;
++	}
++	while (read(f, ck, 8) == 8) {
++		len = le32(ck + 4);
++		if (!memcmp(ck, "fmt ", 4) && len >= 16) {
++			if (read(f, fmtb, 16) != 16)
++				break;
++			if (fmtb[0] != 1) {
++				fprintf(stderr, "dsplay: only plain PCM WAV files (format %d)\n", fmtb[0]);
++				return 1;
++			}
++			chans = fmtb[2];
++			rate = le32(fmtb + 4);
++			bits = fmtb[14];
++			lseek(f, len - 16 + (len & 1), SEEK_CUR);
++			got = 1;
++		} else if (!memcmp(ck, "data", 4)) {
++			datalen = len;
++			break;
++		} else {
++			lseek(f, len + (len & 1), SEEK_CUR);
++		}
++	}
++	if (!got || !datalen || (bits != 8 && bits != 16) || chans < 1 || chans > 2) {
++		fprintf(stderr, "dsplay: unsupported WAV (%u bit, %u channels)\n", bits, chans);
++		return 1;
++	}
++	printf("dsplay: %s: %u Hz, %u bit, %u channel(s), %u bytes\n", name, rate, bits, chans, datalen);
++	fd = dsp_open(rate, chans);
++	if (fd < 0)
++		return 1;
++	while (datalen > 0) {
++		int want = bits == 16 ? 2048 : 1024;
++
++		if ((unsigned int)want > datalen)
++			want = datalen;
++		n = read(f, in, want);
++		if (n <= 0)
++			break;
++		datalen -= n;
++		if (bits == 16) {
++			if (put(fd, in, n))
++				break;
++		} else {
++			for (i = 0; i < n; i++)
++				out[i] = (short)((in[i] - 128) << 8);	/* unsigned 8 bit -> signed 16 bit */
++			if (put(fd, out, n * 2))
++				break;
++		}
++	}
++	ioctl(fd, SNDCTL_DSP_SYNC, 0);
++	close(fd);
++	close(f);
++	printf("dsplay: done\n");
++	return 0;
++}
++
++int main(int argc, char **argv)
++{
++	setvbuf(stdout, NULL, _IOLBF, 0);
++	return argc > 1 ? wav(argv[1]) : tones();
++}
+diff --git a/vendors/Nintendo/DSI/Makefile b/vendors/Nintendo/DSI/Makefile
+index c6ba772f8..7ff298ef0 100644
+--- a/vendors/Nintendo/DSI/Makefile
++++ b/vendors/Nintendo/DSI/Makefile
+@@ -163,6 +163,7 @@ finishrom:
+ 	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/dsgl3d $(ROMFSDIR)/boot/dsgl3d
+ 	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/dsgears $(ROMFSDIR)/boot/dsgears
+ 	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/dsgx $(ROMFSDIR)/boot/dsgx
++	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/dsplay $(ROMFSDIR)/boot/dsplay
+ 	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/madplay $(ROMFSDIR)/$(OPTDIR)
+ 	# Compress the data area of these programs
+ 	$(CROSS)flthdr -d $(ROMFSDIR)/$(OPTDIR)/*
+-- 
+2.56.0
+
