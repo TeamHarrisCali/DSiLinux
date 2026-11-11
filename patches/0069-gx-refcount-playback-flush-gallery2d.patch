@@ -1,0 +1,409 @@
+From 6461b539a281c0879a7db52ea25feed947d3ae5f Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 14:16:30 -0600
+Subject: [PATCH] 3D engine reference counted (one program closing no longer
+ switches it off under another: dsgx submit errno 22 when Photos and Camera
+ were open together); Photos draws with plain Nano-X, not the 3D engine;
+ playback buffer written back from the ARM9 write-back cache every period and
+ at start (stale samples reached the sound hardware at random times:
+ intermittent whine); mic counters show the raw FIFO words
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ .../arch/arm/mach-nds/arm7/microphone.c       |  12 +-
+ linux-2.6.x/arch/arm/mach-nds/volume.c        |   4 +-
+ linux-2.6.x/drivers/video/ndsfb.c             |  14 ++
+ linux-2.6.x/sound/arm/nds-sound.c             |   9 +
+ user/microwin/src/demos/nanox/dsgallery.c     | 194 ++++++++++--------
+ 5 files changed, 143 insertions(+), 90 deletions(-)
+
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/microphone.c b/linux-2.6.x/arch/arm/mach-nds/arm7/microphone.c
+index a211b1dbc..7815c869b 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/arm7/microphone.c
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/microphone.c
+@@ -37,6 +37,7 @@ static s16 dsi_last;
+ static s16 dbg_smin = 0x7fff, dbg_smax = -0x8000;
+ static u32 dbg_restart_ovr, dbg_restart_stall;
+ static int empty_run;
++static u32 dbg_raw, dbg_hi_other;
+ static int mic_is_running;
+ static u32 dbg_on, dbg_start, dbg_stop, dbg_irq, dbg_full, dbg_empty, dbg_have, dbg_wraps;
+ 
+@@ -278,7 +279,12 @@ static void dsi_timer_tick(void)
+ 	empty_run = 0;
+ 	dbg_full++;
+ 	while (!(REG_MICCNT & MICCNT_EMPTY) && n--) {
+-		dsi_last = (s16)(REG_MICDATA & 0xffff);
++		u32 raw = REG_MICDATA;
++
++		dbg_raw = raw;
++		if ((raw >> 16) != ((raw & 0x8000) ? 0xffff : 0))	/* more than a sign extension in the upper half? */
++			dbg_hi_other++;
++		dsi_last = (s16)(raw & 0xffff);
+ 		if (dsi_last < dbg_smin)
+ 			dbg_smin = dsi_last;
+ 		if (dsi_last > dbg_smax)
+@@ -346,8 +352,8 @@ void mic_diag(u32 *touch, u32 *diag, u32 *info)
+ 	touch[4] = dbg_full;
+ 	touch[5] = dbg_empty;
+ 	touch[6] = dbg_have;
+-	touch[7] = dbg_wraps;
+-	diag[0] = (u32)(mic_buffer16 ? mic_buffer16 : (u16 *)mic_buffer8);
++	touch[7] = dbg_hi_other;		/* FIFO words whose upper half is not just the sign of the lower half */
++	diag[0] = dbg_raw;			/* the last raw FIFO word */
+ 	diag[1] = buffer_size;
+ 	diag[2] = period_size;
+ 	diag[3] = mic_rate;
+diff --git a/linux-2.6.x/arch/arm/mach-nds/volume.c b/linux-2.6.x/arch/arm/mach-nds/volume.c
+index 84e55c0b4..d273f1177 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/volume.c
++++ b/linux-2.6.x/arch/arm/mach-nds/volume.c
+@@ -44,8 +44,8 @@ static int mic_read_proc(char *page, char **start, off_t off, int count, int *eo
+ 	if (dsisd_micdiag(d) != 0)
+ 		len = sprintf(page, "ARM7 did not answer\n");
+ 	else
+-		len = sprintf(page, "mic_on=%u start=%u stop=%u irq=%u fifo_full=%u fifo_empty=%u period_msgs=%u wraps=%u\n"
+-			      "buf=%08x size=%u period=%u rate=%u fmt=%u last=%08x miccnt/tm3=%08x ie=%08x\n"
++		len = sprintf(page, "mic_on=%u start=%u stop=%u irq=%u fifo_full=%u fifo_empty=%u period_msgs=%u hi_nonsign=%u\n"
++			      "lastraw=%08x size=%u period=%u rate=%u fmt=%u last=%08x miccnt/tm3=%08x ie=%08x\n"
+ 			      "samples: lowest %d highest %d, fifo restarts: overrun %u stall %u\n",
+ 			      d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7], d[8], d[9], d[10], d[11], d[12], d[13], d[14], d[15],
+ 			      (int)d[16], (int)d[17], d[18] >> 16, d[18] & 0xffff);
+diff --git a/linux-2.6.x/drivers/video/ndsfb.c b/linux-2.6.x/drivers/video/ndsfb.c
+index 539585938..78afe53d6 100644
+--- a/linux-2.6.x/drivers/video/ndsfb.c
++++ b/linux-2.6.x/drivers/video/ndsfb.c
+@@ -368,8 +368,22 @@ struct ndsfb_gx_submit {
+ };
+ static int ndsfb_gx_on;
+ 
++static int ndsfb_gx_users;		/* programs that switched the 3D engine on and not off again */
++
+ static void ndsfb_gx_setup(int on)
+ {
++	/* more than one program may use the engine (the camera and the 3D gears, say): it goes off when the last one is done, not when
++	 * the first one quits (the others' commands then all failed with errno 22) */
++	if (on) {
++		ndsfb_gx_users++;
++		if (ndsfb_gx_users > 1 && ndsfb_gx_on)
++			return;
++	} else {
++		if (ndsfb_gx_users > 0)
++			ndsfb_gx_users--;
++		if (ndsfb_gx_users > 0)
++			return;
++	}
+ 	if (on) {
+ 		POWER_CR |= POWER_MATRIX | POWER_3D_CORE;
+ 		*(volatile u32 *)0x04000060 = 0;		/* DISP3DCNT: plain */
+diff --git a/linux-2.6.x/sound/arm/nds-sound.c b/linux-2.6.x/sound/arm/nds-sound.c
+index 16950e7b5..4d8bd9e49 100644
+--- a/linux-2.6.x/sound/arm/nds-sound.c
++++ b/linux-2.6.x/sound/arm/nds-sound.c
+@@ -330,6 +330,9 @@ static int snd_nds_playback_trigger(snd_pcm_substream_t * substream, int cmd)
+ 	switch (cmd) 
+ 	{
+ 	case SNDRV_PCM_TRIGGER_START:
++		// what was written so far must be in main memory before the hardware reads it
++		if (runtime->dma_area && runtime->dma_bytes)
++			dmac_flush_range((unsigned long)runtime->dma_area, (unsigned long)runtime->dma_area + runtime->dma_bytes);
+ 		// start the PCM engine
+ 		nds_fifo_send(FIFO_SOUND | FIFO_SOUND_TRIGGER | 1);
+ 
+@@ -535,6 +538,12 @@ static irqreturn_t snd_nds_interrupt(int irq, void *dev_id,
+ 	snd_pcm_runtime_t *runtime = substream->runtime;
+     	u8 period ;
+ 
++	/* The ARM9 data cache is write back: samples a program just wrote may still sit in it while the sound hardware (reading main
++	 * memory) is about to play them, and it plays the old contents of the buffer instead (an intermittent whine or buzz). Write the
++	 * buffer back every period; the program is always more than a period ahead of the hardware. */
++	if (runtime->dma_area && runtime->dma_bytes)
++		dmac_flush_range((unsigned long)runtime->dma_area, (unsigned long)runtime->dma_area + runtime->dma_bytes);
++
+ 	spin_lock(&chip->lock);
+ 
+ 	period = chip->period + 1;
+diff --git a/user/microwin/src/demos/nanox/dsgallery.c b/user/microwin/src/demos/nanox/dsgallery.c
+index 01ce2cb8f..a7b995521 100644
+--- a/user/microwin/src/demos/nanox/dsgallery.c
++++ b/user/microwin/src/demos/nanox/dsgallery.c
+@@ -1,19 +1,33 @@
+ /*
+  * dsgallery - photo viewer for the DSLinuxDSi desktop: shows the photos of dscam (/home/photos/photoNNN.bmp, 256x192 BMP).
+- * Each photo is loaded as a texture and drawn on the 3D layer (dsgx.h), like the camera preview.
++ * It draws with plain Nano-X (a 192x144 picture, nearest neighbour from the 256x192 photo), NOT with the 3D engine: the engine
++ * can only serve one program at a time, and the camera is the one that needs it. A photo takes a moment to appear (about half a
++ * second), it is drawn once, not every frame.
+  * Keys: left/right (or , and .) = previous/next, d = delete (press twice), c = open the camera, q or Esc = quit.
+- * A tap on the left third of the window goes to the previous photo, on the right third to the next one.
++ * A tap on the left third of the picture goes to the previous photo, on the right third to the next one.
+  */
++#include <stdio.h>
+ #include <stdlib.h>
++#include <string.h>
+ #include <dirent.h>
+-#include "dsgx_win.h"
++#include <unistd.h>
++#include "nano-X.h"
++#include "w95.h"
+ #include "dsbmp.h"
+ 
+-#define MAXPHOTOS 200
++#define MAXPHOTOS	200
++#define VW		192		/* the picture on the screen */
++#define VH		144
++#define WIN_W		(VW + 4)
++#define WIN_H		(VH + 4 + 24)
+ 
+ static char names[MAXPHOTOS][24];
+-static int nphotos, sel;
+-static unsigned short frame[PW * PH] __attribute__((aligned(32)));
++static int nphotos, sel, armed, have;
++static unsigned short frame[PW * PH];
++static unsigned short strip[VW * 16];
++static GR_WINDOW_ID win;
++static GR_GC_ID gc;
++static int th;
+ 
+ static int cmpnames(const void *a, const void *b)
+ {
+@@ -49,121 +63,140 @@ static int load(void)
+ 	if (!nphotos)
+ 		return -1;
+ 	sprintf(path, PHOTO_DIR "/%s", names[sel]);
+-	if (bmp_read(path, frame))
+-		return -2;
+-	return gx_texture_load(0, frame, sizeof(frame));
++	return bmp_read(path, frame);
+ }
+ 
+-static void draw(int have)
++/* the photo, in strips of 16 rows (one big request would be too much for the connection) */
++static void draw_photo(void)
+ {
+-	double hw = 2.0, hh = 1.5;
+-
+-	gx_mode(GX_MODELVIEW);
+-	gx_identity();
+-	gx_polyattr(0, GX_CULL_NONE, 31);
+-	if (have) {
+-		gx_texture(0, 256, 256, 0);
+-		gx_begin(GX_QUADS);
+-		gx_color(31, 31, 31);
+-		gx_texcoord(0, 0); gx_vertex(-hw, hh, -2.0);
+-		gx_texcoord(0, PH); gx_vertex(-hw, -hh, -2.0);
+-		gx_texcoord(PW, PH); gx_vertex(hw, -hh, -2.0);
+-		gx_texcoord(PW, 0); gx_vertex(hw, hh, -2.0);
+-		gx_end();
+-	} else {				/* nothing to show: a dark grey panel */
+-		gx_cmd(GXR_TEXIMAGE, 0);
+-		gx_begin(GX_QUADS);
+-		gx_color(4, 4, 4);
+-		gx_vertex(-hw, hh, -2.0);
+-		gx_vertex(-hw, -hh, -2.0);
+-		gx_vertex(hw, -hh, -2.0);
+-		gx_vertex(hw, hh, -2.0);
+-		gx_end();
++	int y0, y, x;
++
++	if (!have) {
++		w95_fill(win, gc, W95_DARK, 2, 2, VW, VH);
++		w95_text(win, gc, W95_LIGHT, 8, 8, nphotos ? "cannot read this photo" : "no photos yet");
++		return;
++	}
++	for (y0 = 0; y0 < VH; y0 += 16) {
++		for (y = 0; y < 16; y++) {
++			const unsigned short *row = frame + ((y0 + y) * 4 / 3) * PW;
++
++			for (x = 0; x < VW; x++) {
++				unsigned short p = row[x * 4 / 3];
++
++				/* DS pixel (red in the low bits) -> 0RRRRRGGGGGBBBBB for the server */
++				strip[y * VW + x] = ((p & 31) << 10) | (p & 0x3e0) | ((p >> 10) & 31);
++			}
++		}
++		GrArea(win, gc, 2, 2 + y0, VW, 16, strip, MWPF_TRUECOLOR555);
+ 	}
+-	gx_swap();
+-	gx_flush();
+ }
+ 
+-static void label(struct gxw *w, int have, int armed)
++static void draw_label(void)
+ {
+-	char t[40];
++	char t[48];
+ 
++	w95_fill(win, gc, W95_FACE, 0, VH + 4, WIN_W, 24);
+ 	if (nphotos)
+-		sprintf(t, "%s", names[sel]);
++		sprintf(t, "%s  %d/%d%s", names[sel], sel + 1, nphotos, armed ? "  delete?" : "");
+ 	else
+ 		strcpy(t, "no photos yet");
+-	gxw_text(w, 0, t);
+-	sprintf(t, "%d / %d%s", nphotos ? sel + 1 : 0, nphotos, armed ? "  delete?" : "");
+-	gxw_text(w, 1, t);
+-	gxw_text(w, 2, have || !nphotos ? "< >  d:del  c:cam" : "cannot read photo");
++	w95_text(win, gc, W95_DARK, 4, VH + 5, t);
++	w95_text(win, gc, W95_SHADOW, 4, VH + 5 + th + 1, "< >  d:del  c:camera");
++}
++
++static void draw_all(void)
++{
++	w95_fill(win, gc, W95_FACE, 0, 0, WIN_W, 2);
++	draw_photo();
++	draw_label();
++}
++
++static void show(int delta)
++{
++	int n = sel + delta;
++
++	if (n < 0 || n >= nphotos)
++		return;
++	sel = n;
++	have = load() == 0;
++	draw_photo();
++	draw_label();
+ }
+ 
+ int main(int argc, char **argv)
+ {
+ 	GR_EVENT ev;
+-	struct gxw w;
+-	int running = 1, have = 0, armed = 0, redraw = 1;
++	GR_FONT_ID font;
+ 
+-	if (gx_open() < 0)
+-		return 1;
+ 	if (GrOpen() < 0) {
+ 		fprintf(stderr, "dsgallery: cannot connect to Nano-X\n");
+ 		return 1;
+ 	}
++	gc = GrNewGC();
++	font = GrCreateFont("Tiny", 0, NULL);
++	GrSetGCFont(gc, font);
++	w95_init(font);
++	th = w95_texth(gc);
+ 	scan();
+ 	if (nphotos)
+ 		sel = nphotos - 1;			/* the newest photo first */
+-	gxw_create(&w, "Photos", 30, 8, 160, 120, 1.0, 20.0);
+-	GrSelectEvents(w.win, GR_EVENT_MASK_EXPOSURE | GR_EVENT_MASK_KEY_DOWN | GR_EVENT_MASK_CLOSE_REQ |
+-		       GR_EVENT_MASK_BUTTON_DOWN);
+-	gx_control(GX_CTRL_TEXTURE);
+-	gx_flush();
+ 	have = load() == 0;
+ 
+-	while (running) {
++	win = GrNewWindowEx(GR_WM_PROPS_APPFRAME | GR_WM_PROPS_CAPTION | GR_WM_PROPS_CLOSEBOX, "Photos",
++			    GR_ROOT_WINDOW_ID, 24, 4, WIN_W, WIN_H, W95_FACE);
++	GrSelectEvents(win, GR_EVENT_MASK_EXPOSURE | GR_EVENT_MASK_KEY_DOWN | GR_EVENT_MASK_CLOSE_REQ |
++		       GR_EVENT_MASK_BUTTON_DOWN);
++	GrMapWindow(win);
++	GrSetFocus(win);
++
++	for (;;) {
+ 		int key = 0;
+ 
+-		GrGetNextEventTimeout(&ev, 200);
+-		if (gxw_event(&w, &ev))
+-			running = 0;
+-		if (ev.type == GR_EVENT_TYPE_BUTTON_DOWN) {
+-			if (ev.button.x < w.rw / 3)
+-				key = MWKEY_LEFT;
+-			else if (ev.button.x > w.rw * 2 / 3)
+-				key = MWKEY_RIGHT;
+-		} else if (ev.type == GR_EVENT_TYPE_KEY_DOWN) {
++		GrGetNextEvent(&ev);
++		switch (ev.type) {
++		case GR_EVENT_TYPE_EXPOSURE:
++			draw_all();
++			continue;
++		case GR_EVENT_TYPE_CLOSE_REQ:
++			GrClose();
++			return 0;
++		case GR_EVENT_TYPE_BUTTON_DOWN:
++			if (ev.button.y < VH + 4) {
++				if (ev.button.x < WIN_W / 3)
++					key = MWKEY_LEFT;
++				else if (ev.button.x > WIN_W * 2 / 3)
++					key = MWKEY_RIGHT;
++			}
++			break;
++		case GR_EVENT_TYPE_KEY_DOWN:
+ 			key = ev.keystroke.ch;
++			break;
++		default:
++			continue;
+ 		}
+ 		if (key != 'd' && armed) {
+ 			armed = 0;
+-			redraw = 1;
++			draw_label();
+ 		}
+ 		switch (key) {
+ 		case MWKEY_ESCAPE:
+ 		case 'q':
+-			running = 0;
+-			break;
++			GrClose();
++			return 0;
+ 		case MWKEY_LEFT:
+ 		case ',':
+-			if (sel > 0) {
+-				sel--;
+-				have = load() == 0;
+-				redraw = 1;
+-			}
++			show(-1);
+ 			break;
+ 		case MWKEY_RIGHT:
+ 		case '.':
+-			if (sel + 1 < nphotos) {
+-				sel++;
+-				have = load() == 0;
+-				redraw = 1;
+-			}
++			show(1);
+ 			break;
+ 		case 'd':
+ 			if (!nphotos)
+ 				break;
+ 			if (!armed) {
+ 				armed = 1;
++				draw_label();
+ 			} else {
+ 				char path[64];
+ 
+@@ -172,8 +205,9 @@ int main(int argc, char **argv)
+ 				unlink(path);
+ 				scan();
+ 				have = load() == 0;
++				draw_photo();
++				draw_label();
+ 			}
+-			redraw = 1;
+ 			break;
+ 		case 'c':
+ 			if (vfork() == 0) {
+@@ -182,16 +216,6 @@ int main(int argc, char **argv)
+ 			}
+ 			break;
+ 		}
+-		gxw_update(&w);
+-		if (!w.visible)
+-			continue;
+-		if (ev.type == GR_EVENT_TYPE_TIMEOUT || ev.type == GR_EVENT_TYPE_EXPOSURE || redraw) {
+-			draw(have);			/* cheap: refresh the 3D picture, in case the window moved */
+-			label(&w, have, armed);
+-			redraw = 0;
+-		}
+ 	}
+-	gx_close();
+-	GrClose();
+ 	return 0;
+ }
+-- 
+2.56.0
+
