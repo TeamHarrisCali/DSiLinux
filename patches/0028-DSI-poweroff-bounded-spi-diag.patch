@@ -1,0 +1,127 @@
+From 7182cfaca3f5526c324c5721ce8add9f473bcf20 Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 03:29:58 -0600
+Subject: [PATCH] DSi poweroff: own bounded SPI power-chip access with progress
+ marks the ARM9 prints even if the ARM7 hangs
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ linux-2.6.x/arch/arm/mach-nds/arm7/main.c  | 56 +++++++++++++++++++---
+ linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c |  2 +-
+ linux-2.6.x/drivers/block/dldi_c.c         | 11 +++--
+ 3 files changed, 57 insertions(+), 12 deletions(-)
+
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/main.c b/linux-2.6.x/arch/arm/mach-nds/arm7/main.c
+index 1c818d798..c22bef37c 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/arm7/main.c
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/main.c
+@@ -26,20 +26,62 @@ static struct nds_sd_block *sd_block;
+ 
+ /*
+  * NDS_SD_CMD_POWEROFF: switch the console off through the power chip's SPI control register (bit 6), as
+- * libnds and the Nintendo SDK do. Only returns if that did not work; diag[] then says what the chip showed.
++ * libnds and the Nintendo SDK do. Own SPI code with bounded waits (no BIOS delay calls) and progress
++ * marks in diag[] that the ARM9 can read even if this never returns. Only returns if the power-off did
++ * not work.
+  */
+-void dsi_poweroff_diag(unsigned int *diag)
++#define PM_SPICNT	(*(volatile u16 *)0x040001C0)
++#define PM_SPIDATA	(*(volatile u16 *)0x040001C2)
++
++static int pm_wait(void)
++{
++	int n = 300000;
++
++	while ((PM_SPICNT & 0x80) && --n)
++		;
++	return n;
++}
++
++/* one power-chip register access: cmd = register (| 0x80 to read); returns 1 if the bus never stuck */
++static int pm_xfer(u8 cmd, u8 data, u8 *out)
++{
++	if (!pm_wait())
++		return 0;
++	PM_SPICNT = 0x8802;		/* enable, keep chip selected, 1 MHz, power chip */
++	PM_SPIDATA = cmd;
++	if (!pm_wait()) {
++		PM_SPICNT = 0;
++		return 0;
++	}
++	PM_SPICNT = 0x8002;		/* last byte, chip select released afterwards */
++	PM_SPIDATA = data;
++	if (!pm_wait()) {
++		PM_SPICNT = 0;
++		return 0;
++	}
++	if (out)
++		*out = PM_SPIDATA;
++	PM_SPICNT = 0;
++	return 1;
++}
++
++void dsi_poweroff_diag(volatile unsigned int *diag)
+ {
++	u8 v = 0xee;
+ 	int k;
+ 
+ 	diag[0] = *(volatile unsigned int *)0x04004008;		/* SCFG_EXT */
+-	diag[1] = power_read(POWER_CONTROL);			/* control register before */
+-	diag[2] = power_read(POWER_BATTERY);
+-	diag[3] = power_read(POWER_BACKLIGHT);
+-	power_write(POWER_CONTROL, POWER0_SYSTEM_POWER);
++	diag[5] = 1;						/* progress */
++	diag[6] = PM_SPICNT;					/* bus state when we started */
++	diag[1] = pm_xfer(0x80, 0, &v) ? v : 0x1ff;		/* control register before */
++	diag[5] = 2;
++	diag[2] = pm_xfer(0x00, 0x40, 0) ? 1 : 0;		/* the power-off write; 1 = bus ok */
++	diag[5] = 3;
+ 	for (k = 0; k < 200000; k++)	/* give the chip time to cut the power */
+ 		asm volatile("" ::: "memory");
+-	diag[4] = power_read(POWER_CONTROL);			/* control register after */
++	diag[7] = PM_SPICNT;
++	diag[3] = pm_xfer(0x80, 0, &v) ? v : 0x1ff;		/* control register after */
++	diag[5] = 4;
+ }
+ 
+ int isDSPhat(void)
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c b/linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c
+index d2a4abcf2..09d67425c 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c
+@@ -755,7 +755,7 @@ static int region_ok(u32 sector, u32 count)
+ }
+ #endif /* CONFIG_NDS_DSISD_LOGFILE */
+ 
+-extern void dsi_poweroff_diag(unsigned int *diag);
++extern void dsi_poweroff_diag(volatile unsigned int *diag);
+ 
+ static void nds_sd_request_inner(struct nds_sd_block *b)
+ {
+diff --git a/linux-2.6.x/drivers/block/dldi_c.c b/linux-2.6.x/drivers/block/dldi_c.c
+index 01a588aae..fa465b2a9 100644
+--- a/linux-2.6.x/drivers/block/dldi_c.c
++++ b/linux-2.6.x/drivers/block/dldi_c.c
+@@ -176,12 +176,15 @@ static int sd_request(unsigned int cmd, unsigned int sector, unsigned int count)
+ void dsisd_poweroff(void)
+ {
+ 	long save = sd_timeout;
++	int ret;
+ 
+ 	sd_timeout = 3 * HZ;
+-	if (sd_request(NDS_SD_CMD_POWEROFF, 0, 0) == NDS_SD_OK)
+-		printk(KERN_ERR "dsi poweroff: still on. scfg %08x pwrctl-before %02x batt %02x backlight %02x "
+-		       "pwrctl-after %02x\n", sd_block.diag[0], sd_block.diag[1], sd_block.diag[2],
+-		       sd_block.diag[3], sd_block.diag[4]);
++	ret = sd_request(NDS_SD_CMD_POWEROFF, 0, 0);
++	/* the ARM7 marks its progress in diag[] even when it never answers: look at main memory */
++	dmac_flush_range((unsigned long)&sd_block, (unsigned long)&sd_block + sizeof(sd_block));
++	printk(KERN_ERR "dsi poweroff: still on (ret %d). scfg %08x ctl-before %02x wr-ok %u ctl-after %02x "
++	       "stage %u spicnt-start %04x spicnt-end %04x\n", ret, sd_block.diag[0], sd_block.diag[1],
++	       sd_block.diag[2], sd_block.diag[3], sd_block.diag[5], sd_block.diag[6], sd_block.diag[7]);
+ 	sd_timeout = save;
+ }
+ #endif
+-- 
+2.56.0
+

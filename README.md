@@ -5,7 +5,7 @@ its internal SD slot and its touchscreen, launched from TWiLight Menu++ through 
 
 This repository holds the notes, build scripts and patches. The source tree is a separate clone of
 [ipwndev/DSLinux](https://github.com/ipwndev/DSLinux) (GPL-2.0, a mirror of the official SVN) that you create in `work/dslinux`;
-the changes are in `patches/` (27 small patches, in order) and explained in `docs/`.
+the changes are in `patches/` (28 small patches, in order) and explained in `docs/`.
 
 ## What works, and how it was tested
 
@@ -24,7 +24,7 @@ the changes are in `patches/` (27 small patches, in order) and explained in `doc
 | Userland from the card, shell prompt | console | `/etc`, `/var`, `/home` get RAM copies at boot so the system can write while the card stays untouched (changes are lost at power-off) |
 | One writable file on the card: `sd:/linux/DSILOG.TXT` | console | See "Writing to the card" |
 | Writable ext2 root image `sd:/linux/ROOTFS.IMG`, card confined to it and the log file (reads too) | console (`v` build) | Reported by the user: files can be written and read. Persistence across a reboot and `e2fsck` of the image on a PC not yet reported |
-| `poweroff` actually powering off | **`y` build compiled; not yet run on the console** | `v`, `w`, `x` all left the DSi on. The `x` photo showed the power chip answering over I2C, so the fault was in the ARM7's SPI power write (it switched the SPI bus off before the data byte finished). `y` fixes that |
+| `poweroff` actually powering off | **still not working: `y` printed "ARM7 did not answer" (hang in the ARM7 power code); `z` records progress and prints it** | `v`, `w`, `x` all left the DSi on. The `x` photo showed the power chip answering over I2C, so the fault was in the ARM7's SPI power write (it switched the SPI bus off before the data byte finished). `y` fixes that |
 | Boot self-test (RAM, SD, confinement) printed at the end of boot | console | `/boot/selftest` |
 | ARM9 at 134 MHz | console (nothing to change) | The `u` build reads the clock register (read-only) and the self-test shows `CLK : PASS - ARM9 at 134 MHz (the fastest)`; the loader sets it. The optional `CONFIG_NDS_DSI_FASTCPU` writes the same bit and changes nothing |
 
@@ -65,7 +65,7 @@ The NAND is never selected (the driver only uses SD port 0).
 
 All ROMs are built into `out/dsi-mode/` (git-ignored; rebuild with the scripts below). See `out/dsi-mode/README.txt`.
 
-- `dslinux-dsimode-y-uc3.nds`: the current build (DSi-only header): `v` plus a fixed `poweroff` (see the table); needs `ROOTFS.IMG` for the writable root, otherwise it behaves like `u`. `old/u-readonly-card-clock-line/` is the last build confirmed on the console.
+- `dslinux-dsimode-z-uc3.nds`: the current build (DSi-only header): `v` plus a `poweroff` attempt that prints diagnostics if the DSi stays on (see the table); needs `ROOTFS.IMG` for the writable root, otherwise it behaves like `u`. `old/u-readonly-card-clock-line/` is the last build confirmed on the console.
 - (previous line:) `dslinux-dsimode-u-uc3.nds`: the build before the writable root (DSi-only header). Its self-test also has a `CLK :` line (ARM9 134 MHz or 67 MHz, read from the clock register) and the BogoMIPS line. `-uc2` is the same with a "DS or DSi" header; use it only if uc3 will not launch.
 - `old/r-log-file-works/`: the last build that was confirmed on the console (boots to a prompt, writes the log). `s` (tar-only RAM copies, `old/s-tar-m-no-clock-line/`) was run on the console too: clean log, all checks passing. `u` adds only the clock lines.
 
@@ -73,7 +73,7 @@ All ROMs are built into `out/dsi-mode/` (git-ignored; rebuild with the scripts b
 
 Nothing here touches the NAND or Unlaunch. Back up your card first if it matters to you; the build only reads it, except for the log file.
 
-1. Copy `dslinux-dsimode-y-uc3.nds` to any folder on the card (for example `sd:/dslinux/`).
+1. Copy `dslinux-dsimode-z-uc3.nds` to any folder on the card (for example `sd:/dslinux/`).
 2. Copy the whole folder `out/dsi-card/sd-root/linux` to the **root** of the card, so you get `sd:/linux/etc`, `sd:/linux/usr`, `sd:/linux/var`, `sd:/linux/home` and `sd:/linux/lib` (about 109 MB). It must be a folder named `linux` directly at the root.
 3. Writable system: `sd:/linux/ROOTFS.IMG` (512 MiB, from `out/dsi-card/sd-root/linux/ROOTFS.IMG`) copied as ONE file, plus `sd:/linux/DSILOG.TXT` (1 MiB), and the card's write-protect slider open. Shut down with `sync; poweroff`.
 4. Start the `.nds` from TWiLight Menu++. If it offers a "Run in" setting, choose DSi mode.
@@ -88,7 +88,7 @@ docker build -t dslinux-wheezy scripts/          # Debian Wheezy i386 with the b
 git clone --depth 1 https://github.com/ipwndev/DSLinux work/dslinux   # then apply patches/ in order (git am)
 scripts/prepare-tree.sh                           # recreates empty directories the git mirror drops, fixes autotools timestamps
 scripts/build-dsi.sh                              # Nintendo/DSI product (selects it, builds, packs ROMs)
-APPFLAGS=1 TAG=y scripts/make-dsimode.sh          # re-pack with a DSi header (needs BlocksDS's ndstool)
+APPFLAGS=1 TAG=z scripts/make-dsimode.sh          # re-pack with a DSi header (needs BlocksDS's ndstool)
 ```
 
 `docs/` has the whole story: `FEASIBILITY.md` (what was known at the start), `STAGE1.md`, `STAGE2.md`, `STAGE3.md` (every step, including the wrong turns and retractions).
