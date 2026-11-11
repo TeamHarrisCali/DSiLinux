@@ -1,0 +1,1756 @@
+From 85b6a426bb24527a5fab54a4f32a3367727f9cd3 Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 06:28:38 -0600
+Subject: [PATCH] dsgx.h: a small header-only 3D library for the DS 3D chip
+ (matrices, lights, materials, culling, meshes, vsync), dsgx_win.h
+ desktop-window helper; dsgl3d and the console dsgx rewritten on it; dsgl3d
+ takes the keyboard focus and always shows 'a:aa c:cull' state
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ user/TinySDGL/Makefile                   |   1 -
+ user/TinySDGL/examples/Makefile          |   5 +-
+ user/TinySDGL/examples/dsgx.c            | 420 --------------------
+ user/microwin/Makefile                   |   1 +
+ user/microwin/src/demos/nanox/Makefile   |  11 +-
+ user/microwin/src/demos/nanox/dsgl3d.c   | 482 +++++------------------
+ user/microwin/src/demos/nanox/dsgx.c     | 160 ++++++++
+ user/microwin/src/demos/nanox/dsgx.h     | 341 ++++++++++++++++
+ user/microwin/src/demos/nanox/dsgx_win.h | 132 +++++++
+ 9 files changed, 738 insertions(+), 815 deletions(-)
+ delete mode 100644 user/TinySDGL/examples/dsgx.c
+ create mode 100644 user/microwin/src/demos/nanox/dsgx.c
+ create mode 100644 user/microwin/src/demos/nanox/dsgx.h
+ create mode 100644 user/microwin/src/demos/nanox/dsgx_win.h
+
+diff --git a/user/TinySDGL/Makefile b/user/TinySDGL/Makefile
+index 68850b1f0..ed554b2e5 100644
+--- a/user/TinySDGL/Makefile
++++ b/user/TinySDGL/Makefile
+@@ -15,4 +15,3 @@ romfs:
+ 	$(ROMFSINST) examples/triangle /usr/bin
+ 	$(ROMFSINST) examples/gears /usr/bin
+ 	$(ROMFSINST) examples/dsgears /usr/bin
+-	$(ROMFSINST) examples/dsgx /usr/bin
+diff --git a/user/TinySDGL/examples/Makefile b/user/TinySDGL/examples/Makefile
+index d996bfe6f..556d4674c 100644
+--- a/user/TinySDGL/examples/Makefile
++++ b/user/TinySDGL/examples/Makefile
+@@ -1,6 +1,6 @@
+ include ../makeinclude
+ 
+-PROGS =  mElite gears triangle dsgears dsgx
++PROGS =  mElite gears triangle dsgears
+ 
+ all: $(PROGS)
+ 
+@@ -10,9 +10,6 @@ clean:
+ gears: gears.o
+ 	$(CC) $(LFLAGS) $^ -o $@ $(GL_LIBS) $(UI_LIBS) -lm
+ 
+-dsgx: dsgx.o
+-	$(CC) $(LFLAGS) $^ -o $@ -lm
+-
+ dsgears: dsgears.o
+ 	$(CC) $(LFLAGS) $^ -o $@ $(GL_LIBS) $(UI_LIBS) -lm
+ 
+diff --git a/user/TinySDGL/examples/dsgx.c b/user/TinySDGL/examples/dsgx.c
+deleted file mode 100644
+index caa640a49..000000000
+--- a/user/TinySDGL/examples/dsgx.c
++++ /dev/null
+@@ -1,420 +0,0 @@
+-/*
+- * dsgx - the gears demo on the Nintendo DS's hardware 3D engine (no TinyGL, no SDL).
+- *
+- *   dsgx          the three lit gears, 3 seconds of numbers on exit
+- *   dsgx tri      one colour triangle: the smallest test of the pipeline
+- *
+- * Runs on the text screen (stop the desktop first). The kernel (drivers/video/ndsfb.c) lets a program write
+- * command words to the geometry engine; the engine transforms, lights, clips and fills, and draws on BG0 behind the
+- * frame buffer's bitmap layers, so the frame buffer is cleared to transparent pixels (0). Esc or q quits.
+- *
+- * Number formats of the engine: matrices 1.19.12 (4096 = 1.0), vertex 16 bit 1.3.12, normals and light
+- * directions 1.0.9 packed 3 x 10 bits, colours RGB555.
+- */
+-#include <stdio.h>
+-#include <stdlib.h>
+-#include <string.h>
+-#include <math.h>
+-#include <fcntl.h>
+-#include <unistd.h>
+-#include <termios.h>
+-#include <sys/ioctl.h>
+-#include <sys/mman.h>
+-#include <sys/time.h>
+-#include <linux/fb.h>
+-#include <linux/kd.h>
+-
+-#define NDSFB_GX_SETUP	0x4e05
+-#define NDSFB_GX_SUBMIT	0x4e06
+-
+-#ifndef M_PI
+-#define M_PI 3.14159265
+-#endif
+-
+-/* command ports (offset from 0x04000000) */
+-#define GX_CONTROL	0x060
+-#define GX_CLEARCOLOR	0x350
+-#define GX_CLEARDEPTH	0x354
+-#define MTX_MODE	0x440
+-#define MTX_PUSH	0x444
+-#define MTX_POP		0x448
+-#define MTX_IDENTITY	0x454
+-#define MTX_MULT_4X4	0x460
+-#define MTX_MULT_3X3	0x468
+-#define MTX_TRANS	0x470
+-#define GX_COLOR	0x480
+-#define GX_NORMAL	0x484
+-#define GX_VTX16	0x48C
+-#define GX_POLYATTR	0x4A4
+-#define GX_DIFAMB	0x4C0
+-#define GX_SPEEMI	0x4C4
+-#define GX_LIGHTVEC	0x4C8
+-#define GX_LIGHTCOL	0x4CC
+-#define GX_BEGIN	0x500
+-#define GX_END		0x504
+-#define GX_SWAP		0x540
+-#define GX_VIEWPORT	0x580
+-
+-struct gx_submit {
+-	unsigned long words;
+-	unsigned int count;
+-};
+-
+-static int fb = -1;
+-static unsigned int cmd[2 * 4096];
+-static int ncmd;
+-
+-static void flush_cmds(void)
+-{
+-	struct gx_submit s;
+-
+-	if (!ncmd)
+-		return;
+-	s.words = (unsigned long)cmd;
+-	s.count = ncmd;
+-	if (ioctl(fb, NDSFB_GX_SUBMIT, &s) < 0)
+-		perror("dsgx: NDSFB_GX_SUBMIT");
+-	ncmd = 0;
+-}
+-
+-static void W(unsigned int reg, unsigned int val)
+-{
+-	if (ncmd >= 4096)
+-		flush_cmds();
+-	cmd[2 * ncmd] = reg;
+-	cmd[2 * ncmd + 1] = val;
+-	ncmd++;
+-}
+-
+-static int f12(double x)
+-{
+-	return (int)(x * 4096.0 + (x < 0 ? -0.5 : 0.5));
+-}
+-
+-static unsigned int pack_dir(double x, double y, double z)
+-{
+-	double l = sqrt(x * x + y * y + z * z);
+-	int a, b, c;
+-
+-	if (l > 0) {
+-		x /= l; y /= l; z /= l;
+-	}
+-	a = (int)(x * 511.0 + (x < 0 ? -0.5 : 0.5));
+-	b = (int)(y * 511.0 + (y < 0 ? -0.5 : 0.5));
+-	c = (int)(z * 511.0 + (z < 0 ? -0.5 : 0.5));
+-	return (a & 0x3ff) | ((b & 0x3ff) << 10) | ((c & 0x3ff) << 20);
+-}
+-
+-#define RGB15(r, g, b)	((r) | ((g) << 5) | ((b) << 10))
+-
+-/* ---- gear geometry, recorded once (the same shapes as gears.c) ---- */
+-#define MAXV 1200
+-struct vtx {
+-	unsigned int xy, z;		/* VTX_16 parameters */
+-	unsigned int normal;		/* NORMAL parameter in effect for this vertex */
+-	unsigned int newnormal;		/* 1 when it differs from the previous vertex's */
+-};
+-struct strip {
+-	int type, first, count;
+-};
+-struct gearmesh {
+-	struct vtx v[MAXV];
+-	struct strip s[8];
+-	int nv, ns;
+-	unsigned int color;		/* diffuse colour */
+-};
+-
+-static struct gearmesh *rec;
+-static unsigned int cur_normal;
+-static int last_emitted_normal_idx;
+-
+-static void rec_normal(double x, double y, double z)
+-{
+-	cur_normal = pack_dir(x, y, z);
+-}
+-
+-static void rec_begin(int type)
+-{
+-	rec->s[rec->ns].type = type;
+-	rec->s[rec->ns].first = rec->nv;
+-	rec->s[rec->ns].count = 0;
+-}
+-
+-static void rec_vertex(double x, double y, double z)
+-{
+-	struct vtx *v = &rec->v[rec->nv++];
+-
+-	v->xy = (f12(x) & 0xffff) | ((unsigned int)(f12(y) & 0xffff) << 16);
+-	v->z = f12(z) & 0xffff;
+-	v->normal = cur_normal;
+-	rec->s[rec->ns].count++;
+-}
+-
+-static void rec_end(void)
+-{
+-	rec->ns++;
+-}
+-
+-static void gear(struct gearmesh *m, double inner_radius, double outer_radius, double width, int teeth,
+-		 double tooth_depth)
+-{
+-	int i;
+-	double r0, r1, r2, angle, da, u, v, len;
+-
+-	rec = m;
+-	m->nv = 0;
+-	m->ns = 0;
+-	r0 = inner_radius;
+-	r1 = outer_radius - tooth_depth / 2.0;
+-	r2 = outer_radius + tooth_depth / 2.0;
+-	da = 2.0 * M_PI / teeth / 4.0;
+-
+-	rec_normal(0.0, 0.0, 1.0);
+-	rec_begin(3);			/* quad strip: front face */
+-	for (i = 0; i <= teeth; i++) {
+-		angle = i * 2.0 * M_PI / teeth;
+-		rec_vertex(r0 * cos(angle), r0 * sin(angle), width * 0.5);
+-		rec_vertex(r1 * cos(angle), r1 * sin(angle), width * 0.5);
+-		rec_vertex(r0 * cos(angle), r0 * sin(angle), width * 0.5);
+-		rec_vertex(r1 * cos(angle + 3 * da), r1 * sin(angle + 3 * da), width * 0.5);
+-	}
+-	rec_end();
+-
+-	rec_begin(3);			/* outward faces of teeth */
+-	for (i = 0; i < teeth; i++) {
+-		angle = i * 2.0 * M_PI / teeth;
+-
+-		rec_vertex(r1 * cos(angle), r1 * sin(angle), width * 0.5);
+-		rec_vertex(r1 * cos(angle), r1 * sin(angle), -width * 0.5);
+-		u = r2 * cos(angle + da) - r1 * cos(angle);
+-		v = r2 * sin(angle + da) - r1 * sin(angle);
+-		len = sqrt(u * u + v * v);
+-		u /= len;
+-		v /= len;
+-		rec_normal(v, -u, 0.0);
+-		rec_vertex(r2 * cos(angle + da), r2 * sin(angle + da), width * 0.5);
+-		rec_vertex(r2 * cos(angle + da), r2 * sin(angle + da), -width * 0.5);
+-		rec_normal(cos(angle), sin(angle), 0.0);
+-		rec_vertex(r2 * cos(angle + 2 * da), r2 * sin(angle + 2 * da), width * 0.5);
+-		rec_vertex(r2 * cos(angle + 2 * da), r2 * sin(angle + 2 * da), -width * 0.5);
+-		u = r1 * cos(angle + 3 * da) - r2 * cos(angle + 2 * da);
+-		v = r1 * sin(angle + 3 * da) - r2 * sin(angle + 2 * da);
+-		rec_normal(v, -u, 0.0);
+-		rec_vertex(r1 * cos(angle + 3 * da), r1 * sin(angle + 3 * da), width * 0.5);
+-		rec_vertex(r1 * cos(angle + 3 * da), r1 * sin(angle + 3 * da), -width * 0.5);
+-		rec_normal(cos(angle), sin(angle), 0.0);
+-	}
+-	rec_vertex(r1 * cos(0), r1 * sin(0), width * 0.5);
+-	rec_vertex(r1 * cos(0), r1 * sin(0), -width * 0.5);
+-	rec_end();
+-
+-	rec_begin(3);			/* inside radius cylinder */
+-	for (i = 0; i <= teeth; i++) {
+-		angle = i * 2.0 * M_PI / teeth;
+-		rec_normal(-cos(angle), -sin(angle), 0.0);
+-		rec_vertex(r0 * cos(angle), r0 * sin(angle), -width * 0.5);
+-		rec_vertex(r0 * cos(angle), r0 * sin(angle), width * 0.5);
+-	}
+-	rec_end();
+-}
+-
+-static void draw_mesh(const struct gearmesh *m)
+-{
+-	int i, j;
+-
+-	W(GX_DIFAMB, m->color | (1 << 15) | (RGB15(6, 6, 6) << 16));
+-	W(GX_SPEEMI, 0);
+-	for (i = 0; i < m->ns; i++) {
+-		unsigned int last = 0xffffffff;
+-
+-		W(GX_BEGIN, m->s[i].type);
+-		for (j = m->s[i].first; j < m->s[i].first + m->s[i].count; j++) {
+-			if (m->v[j].normal != last) {
+-				W(GX_NORMAL, m->v[j].normal);
+-				last = m->v[j].normal;
+-			}
+-			W(GX_VTX16, m->v[j].xy);
+-			W(GX_VTX16, m->v[j].z);
+-		}
+-		W(GX_END, 0);
+-	}
+-}
+-
+-/* column-major rotation about an axis (1 = x, 2 = y, 3 = z), degrees */
+-static void rotate(int axis, double deg)
+-{
+-	double c = cos(deg * M_PI / 180.0), s = sin(deg * M_PI / 180.0);
+-	int m[9] = { 4096, 0, 0, 0, 4096, 0, 0, 0, 4096 };
+-	int i;
+-
+-	switch (axis) {
+-	case 1: m[4] = f12(c); m[5] = f12(s); m[7] = f12(-s); m[8] = f12(c); break;
+-	case 2: m[0] = f12(c); m[2] = f12(-s); m[6] = f12(s); m[8] = f12(c); break;
+-	default: m[0] = f12(c); m[1] = f12(s); m[3] = f12(-s); m[4] = f12(c); break;
+-	}
+-	for (i = 0; i < 9; i++)
+-		W(MTX_MULT_3X3, m[i]);
+-}
+-
+-static void translate(double x, double y, double z)
+-{
+-	W(MTX_TRANS, f12(x));
+-	W(MTX_TRANS, f12(y));
+-	W(MTX_TRANS, f12(z));
+-}
+-
+-static void frustum(double l, double r, double b, double t, double n, double f)
+-{
+-	double m[16] = {
+-		2 * n / (r - l), 0, 0, 0,
+-		0, 2 * n / (t - b), 0, 0,
+-		(r + l) / (r - l), (t + b) / (t - b), -(f + n) / (f - n), -1,
+-		0, 0, -2 * f * n / (f - n), 0
+-	};
+-	int i;
+-
+-	for (i = 0; i < 16; i++)
+-		W(MTX_MULT_4X4, f12(m[i]));
+-}
+-
+-static long usec(void)
+-{
+-	struct timeval tv;
+-
+-	gettimeofday(&tv, NULL);
+-	return tv.tv_sec * 1000000L + tv.tv_usec;
+-}
+-
+-int main(int argc, char **argv)
+-{
+-	struct fb_fix_screeninfo fix;
+-	struct fb_var_screeninfo var;
+-	struct termios old, raw;
+-	unsigned char *mem;
+-	static struct gearmesh g[3];
+-	int tty, i, running = 1, tri = (argc > 1 && !strcmp(argv[1], "tri"));
+-	long frames = 0, t0, t1;
+-	double angle = 0.0, view_rotx = 20.0, view_roty = 30.0;
+-
+-	fb = open("/dev/fb0", O_RDWR);
+-	if (fb < 0) {
+-		perror("dsgx: /dev/fb0");
+-		return 1;
+-	}
+-	ioctl(fb, FBIOGET_FSCREENINFO, &fix);
+-	ioctl(fb, FBIOGET_VSCREENINFO, &var);
+-	mem = mmap(NULL, fix.smem_len, PROT_READ | PROT_WRITE, MAP_SHARED, fb, 0);
+-	tty = open("/dev/tty0", O_RDWR);
+-	if (tty >= 0)
+-		ioctl(tty, KDSETMODE, KD_GRAPHICS);	/* the console stops drawing */
+-	/* the frame buffer must not hide the 3D picture: transparent pixels everywhere (pixel 0) */
+-	if (mem != MAP_FAILED) {
+-		volatile unsigned long *p = (volatile unsigned long *)mem;
+-		unsigned long n = (var.xres_virtual * var.yres_virtual * (var.bits_per_pixel / 8)) / 4;
+-
+-		for (i = 0; (unsigned long)i < n && i < 256 * 192 / 2; i++)
+-			p[i] = 0;
+-	}
+-	if (ioctl(fb, NDSFB_GX_SETUP, 1) < 0) {
+-		perror("dsgx: NDSFB_GX_SETUP (is this kernel new enough?)");
+-		return 1;
+-	}
+-
+-	tcgetattr(0, &old);
+-	raw = old;
+-	raw.c_lflag &= ~(ICANON | ECHO);
+-	raw.c_cc[VMIN] = 0;
+-	raw.c_cc[VTIME] = 0;
+-	tcsetattr(0, TCSANOW, &raw);
+-
+-	if (!tri) {
+-		gear(&g[0], 1.0, 4.0, 1.0, 20, 0.7);
+-		gear(&g[1], 0.5, 2.0, 2.0, 10, 0.7);
+-		gear(&g[2], 1.3, 2.0, 0.5, 10, 0.7);
+-		g[0].color = RGB15(25, 3, 0);
+-		g[1].color = RGB15(0, 25, 6);
+-		g[2].color = RGB15(6, 6, 31);
+-	}
+-
+-	/* one time set-up: clear values, viewport, projection */
+-	W(GX_CONTROL, 0);
+-	W(GX_CLEARCOLOR, 0);		/* transparent */
+-	W(GX_CLEARDEPTH, 0x7fff);
+-	W(GX_VIEWPORT, 0 | (0 << 8) | (255 << 16) | (191 << 24));
+-	W(MTX_MODE, 0);
+-	W(MTX_IDENTITY, 0);
+-	if (tri)
+-		frustum(-1.0, 1.0, -0.75, 0.75, 1.0, 100.0);
+-	else
+-		frustum(-1.0, 1.0, -0.75, 0.75, 5.0, 60.0);
+-	flush_cmds();
+-
+-	t0 = usec();
+-	while (running) {
+-		char c;
+-
+-		if (read(0, &c, 1) == 1 && (c == 27 || c == 'q'))
+-			break;
+-
+-		/* camera and light: light direction is where the light travels (OpenGL position (5,5,10) w = 0) */
+-		W(MTX_MODE, 2);
+-		W(MTX_IDENTITY, 0);
+-		W(GX_LIGHTCOL, (0 << 30) | RGB15(31, 31, 31));
+-		W(GX_LIGHTVEC, (0u << 30) | pack_dir(-5.0, -5.0, -10.0));
+-		if (tri)
+-			W(GX_POLYATTR, (3 << 6) | (31 << 16));	/* no lighting, no culling, opaque */
+-		else
+-			W(GX_POLYATTR, 1 | (3 << 6) | (31 << 16));	/* light 0, no culling, opaque */
+-
+-		if (tri) {
+-			translate(0.0, 0.0, -3.0);
+-			rotate(3, angle);
+-			W(GX_BEGIN, 0);
+-			W(GX_COLOR, RGB15(31, 0, 0));
+-			W(GX_VTX16, (f12(-1.0) & 0xffff) | ((unsigned int)f12(-1.0) << 16));
+-			W(GX_VTX16, 0);
+-			W(GX_COLOR, RGB15(0, 31, 0));
+-			W(GX_VTX16, (f12(1.0) & 0xffff) | ((unsigned int)f12(-1.0) << 16));
+-			W(GX_VTX16, 0);
+-			W(GX_COLOR, RGB15(0, 0, 31));
+-			W(GX_VTX16, (f12(0.0) & 0xffff) | ((unsigned int)f12(1.0) << 16));
+-			W(GX_VTX16, 0);
+-			W(GX_END, 0);
+-		} else {
+-			translate(0.0, 0.0, -45.0);
+-			rotate(1, view_rotx);
+-			rotate(2, view_roty);
+-
+-			W(MTX_PUSH, 0);
+-			translate(-3.0, -2.0, 0.0);
+-			rotate(3, angle);
+-			draw_mesh(&g[0]);
+-			W(MTX_POP, 1);
+-
+-			W(MTX_PUSH, 0);
+-			translate(3.1, -2.0, 0.0);
+-			rotate(3, -2.0 * angle - 9.0);
+-			draw_mesh(&g[1]);
+-			W(MTX_POP, 1);
+-
+-			W(MTX_PUSH, 0);
+-			translate(-3.1, 4.2, 0.0);
+-			rotate(3, -2.0 * angle - 25.0);
+-			draw_mesh(&g[2]);
+-			W(MTX_POP, 1);
+-		}
+-		W(GX_SWAP, 0);
+-		flush_cmds();
+-		angle += 2.0;
+-		frames++;
+-	}
+-	t1 = usec();
+-
+-	tcsetattr(0, TCSANOW, &old);
+-	ioctl(fb, NDSFB_GX_SETUP, 0);
+-	if (tty >= 0)
+-		ioctl(tty, KDSETMODE, KD_TEXT);
+-	printf("dsgx %s: %ld frames in %.2f s = %.1f frames per second\n", tri ? "triangle" : "gears", frames,
+-	       (t1 - t0) / 1e6, frames * 1e6 / (double)(t1 - t0));
+-	return 0;
+-}
+diff --git a/user/microwin/Makefile b/user/microwin/Makefile
+index bc4aa049a..090dbea56 100644
+--- a/user/microwin/Makefile
++++ b/user/microwin/Makefile
+@@ -15,6 +15,7 @@ real_romfs:
+ 	$(ROMFSINST) /bin/dsfiles
+ 	$(ROMFSINST) /bin/dsbench
+ 	$(ROMFSINST) /bin/dsgl3d
++	$(ROMFSINST) /bin/dsgx
+ 	$(ROMFSINST) -e CONFIG_USER_MICROWIN_BIN_LANDMINE    /bin/landmine
+ 	$(ROMFSINST) -e CONFIG_USER_MICROWIN_BIN_LAUNCHER    /bin/launcher
+ 	$(ROMFSINST) -e CONFIG_USER_MICROWIN_BIN_MOVE        /bin/move
+diff --git a/user/microwin/src/demos/nanox/Makefile b/user/microwin/src/demos/nanox/Makefile
+index 5829c8672..07d67c8ad 100644
+--- a/user/microwin/src/demos/nanox/Makefile
++++ b/user/microwin/src/demos/nanox/Makefile
+@@ -82,10 +82,11 @@ OBJS =	demo.o \
+ 	dsnotes.o \
+ 	dsfiles.o \
+ 	dsbench.o \
+-	dsgl3d.o
++	dsgl3d.o \
++	dsgx.o
+ 
+ TARGETS = \
+-	$(TOP)/bin/dsdesk $(TOP)/bin/dsnotes $(TOP)/bin/dsfiles $(TOP)/bin/dsbench $(TOP)/bin/dsgl3d \
++	$(TOP)/bin/dsdesk $(TOP)/bin/dsnotes $(TOP)/bin/dsfiles $(TOP)/bin/dsbench $(TOP)/bin/dsgl3d $(TOP)/bin/dsgx \
+ 	$(TOP)/bin/demo $(TOP)/bin/move $(TOP)/bin/landmine \
+ 	$(TOP)/bin/world $(TOP)/bin/nxclock \
+ 	$(TOP)/bin/nxlsclients $(TOP)/bin/nxev \
+@@ -184,7 +185,11 @@ $(TOP)/bin/dsfiles: dsfiles.o $(NANOXCLIENTLIBS) $(TOP)/config
+ 	@echo "Linking $@ ..."
+ 	$(CC) $(CFLAGS) $(LDFLAGS) $< -o $@ $(LD_NANOXCLIENTLIBS)
+ 
+-$(TOP)/bin/dsgl3d: dsgl3d.o $(NANOXCLIENTLIBS) $(TOP)/config
++$(TOP)/bin/dsgx: dsgx.o dsgx.h $(NANOXCLIENTLIBS) $(TOP)/config
++	@echo "Linking $@ ..."
++	$(CC) $(CFLAGS) $(LDFLAGS) dsgx.o -o $@ $(LD_NANOXCLIENTLIBS) $(LIBM)
++
++$(TOP)/bin/dsgl3d: dsgl3d.o dsgx.h dsgx_win.h $(NANOXCLIENTLIBS) $(TOP)/config
+ 	@echo "Linking $@ ..."
+ 	$(CC) $(CFLAGS) $(LDFLAGS) $< -o $@ $(LD_NANOXCLIENTLIBS) $(LIBM)
+ 
+diff --git a/user/microwin/src/demos/nanox/dsgl3d.c b/user/microwin/src/demos/nanox/dsgl3d.c
+index 01e32f905..460c866fa 100644
+--- a/user/microwin/src/demos/nanox/dsgl3d.c
++++ b/user/microwin/src/demos/nanox/dsgl3d.c
+@@ -1,274 +1,71 @@
+ /*
+- * dsgl3d - hardware 3D (the DS 3D engine) in a desktop window: the three gears of dsgx.
+- *
+- * The window's client area is painted with the colour key magenta, which the DS frame buffer turns into transparent
+- * pixels; the 3D engine draws behind the frame buffer, so the gears show through exactly there, and any window above
+- * this one covers them. The 3D viewport is set to the window's rectangle (and follows when it is moved).
+- * Arrow keys turn the view, Esc or q or the close box end it. a = edge smoothing on/off, c = hidden face culling
+- * on/off. Each frame waits for the vertical blank, so the number in the corner is the rate really shown (60 at most).
+- * One 3D program at a time.
++ * dsgl3d - hardware 3D (the DS 3D engine) in a desktop window: three lit gears, written with dsgx.h / dsgx_win.h.
++ * Arrow keys turn the view, a = edge smoothing on/off, c = hidden face culling on/off, Esc or q or the close box end
++ * it. The window takes the keyboard focus when it starts. The first line in the corner is the frame rate really shown
++ * (each frame waits for the screen refresh, 60 at most), the second the state of the a and c switches.
+  */
+-#include <stdio.h>
+-#include <stdlib.h>
+-#include <string.h>
+-#include <math.h>
+-#include <fcntl.h>
+-#include <unistd.h>
+-#include <sys/ioctl.h>
+ #include <sys/time.h>
+-#include "nano-X.h"
++#include "dsgx_win.h"
+ 
+-#define NDSFB_GX_SETUP	0x4e05
+-#define NDSFB_GX_SUBMIT	0x4e06
+-#define NDSFB_VSYNC	0x4e07
+-
+-#ifndef M_PI
+-#define M_PI 3.14159265
+-#endif
+-
+-/* command ports (offset from 0x04000000) */
+-#define GX_CONTROL	0x060
+-#define GX_CLEARCOLOR	0x350
+-#define GX_CLEARDEPTH	0x354
+-#define MTX_MODE	0x440
+-#define MTX_PUSH	0x444
+-#define MTX_POP		0x448
+-#define MTX_IDENTITY	0x454
+-#define MTX_MULT_4X4	0x460
+-#define MTX_MULT_3X3	0x468
+-#define MTX_TRANS	0x470
+-#define GX_COLOR	0x480
+-#define GX_NORMAL	0x484
+-#define GX_VTX16	0x48C
+-#define GX_POLYATTR	0x4A4
+-#define GX_DIFAMB	0x4C0
+-#define GX_SPEEMI	0x4C4
+-#define GX_LIGHTVEC	0x4C8
+-#define GX_LIGHTCOL	0x4CC
+-#define GX_BEGIN	0x500
+-#define GX_END		0x504
+-#define GX_SWAP		0x540
+-#define GX_VIEWPORT	0x580
+-
+-struct gx_submit {
+-	unsigned long words;
+-	unsigned int count;
+-};
+-
+-static int fb = -1;
+-static unsigned int cmd[2 * 4096];
+-static int ncmd;
+-
+-static void flush_cmds(void)
+-{
+-	struct gx_submit s;
+-
+-	if (!ncmd)
+-		return;
+-	s.words = (unsigned long)cmd;
+-	s.count = ncmd;
+-	if (ioctl(fb, NDSFB_GX_SUBMIT, &s) < 0)
+-		perror("dsgx: NDSFB_GX_SUBMIT");
+-	ncmd = 0;
+-}
+-
+-static void W(unsigned int reg, unsigned int val)
+-{
+-	if (ncmd >= 4096)
+-		flush_cmds();
+-	cmd[2 * ncmd] = reg;
+-	cmd[2 * ncmd + 1] = val;
+-	ncmd++;
+-}
+-
+-static int f12(double x)
+-{
+-	return (int)(x * 4096.0 + (x < 0 ? -0.5 : 0.5));
+-}
+-
+-static unsigned int pack_dir(double x, double y, double z)
+-{
+-	double l = sqrt(x * x + y * y + z * z);
+-	int a, b, c;
+-
+-	if (l > 0) {
+-		x /= l; y /= l; z /= l;
+-	}
+-	a = (int)(x * 511.0 + (x < 0 ? -0.5 : 0.5));
+-	b = (int)(y * 511.0 + (y < 0 ? -0.5 : 0.5));
+-	c = (int)(z * 511.0 + (z < 0 ? -0.5 : 0.5));
+-	return (a & 0x3ff) | ((b & 0x3ff) << 10) | ((c & 0x3ff) << 20);
+-}
+-
+-#define RGB15(r, g, b)	((r) | ((g) << 5) | ((b) << 10))
+-
+-/* ---- gear geometry, recorded once (the same shapes as gears.c) ---- */
+-#define MAXV 1200
+-struct vtx {
+-	unsigned int xy, z;		/* VTX_16 parameters */
+-	unsigned int normal;		/* NORMAL parameter in effect for this vertex */
+-	unsigned int newnormal;		/* 1 when it differs from the previous vertex's */
+-};
+-struct strip {
+-	int type, first, count;
+-};
+-struct gearmesh {
+-	struct vtx v[MAXV];
+-	struct strip s[8];
+-	int nv, ns;
+-	unsigned int color;		/* diffuse colour */
+-};
+-
+-static struct gearmesh *rec;
+-static unsigned int cur_normal;
+-
+-static void rec_normal(double x, double y, double z)
+-{
+-	cur_normal = pack_dir(x, y, z);
+-}
+-
+-static void rec_begin(int type)
+-{
+-	rec->s[rec->ns].type = type;
+-	rec->s[rec->ns].first = rec->nv;
+-	rec->s[rec->ns].count = 0;
+-}
+-
+-static void rec_vertex(double x, double y, double z)
+-{
+-	struct vtx *v = &rec->v[rec->nv++];
+-
+-	v->xy = (f12(x) & 0xffff) | ((unsigned int)(f12(y) & 0xffff) << 16);
+-	v->z = f12(z) & 0xffff;
+-	v->normal = cur_normal;
+-	rec->s[rec->ns].count++;
+-}
+-
+-static void rec_end(void)
+-{
+-	rec->ns++;
+-}
+-
+-static void gear(struct gearmesh *m, double inner_radius, double outer_radius, double width, int teeth,
++static void gear(struct gx_mesh *m, double inner_radius, double outer_radius, double width, int teeth,
+ 		 double tooth_depth)
+ {
+ 	int i;
+ 	double r0, r1, r2, angle, da, u, v, len;
+ 
+-	rec = m;
+-	m->nv = 0;
+-	m->ns = 0;
++	gx_mesh_init(m, 400);
+ 	r0 = inner_radius;
+ 	r1 = outer_radius - tooth_depth / 2.0;
+ 	r2 = outer_radius + tooth_depth / 2.0;
+ 	da = 2.0 * M_PI / teeth / 4.0;
+ 
+-	rec_normal(0.0, 0.0, 1.0);
+-	rec_begin(3);			/* quad strip: front face */
++	gx_mesh_normal(m, 0.0, 0.0, 1.0);
++	gx_mesh_begin(m, GX_QUAD_STRIP);		/* front face */
+ 	for (i = 0; i <= teeth; i++) {
+ 		angle = i * 2.0 * M_PI / teeth;
+-		rec_vertex(r0 * cos(angle), r0 * sin(angle), width * 0.5);
+-		rec_vertex(r1 * cos(angle), r1 * sin(angle), width * 0.5);
+-		rec_vertex(r0 * cos(angle), r0 * sin(angle), width * 0.5);
+-		rec_vertex(r1 * cos(angle + 3 * da), r1 * sin(angle + 3 * da), width * 0.5);
++		gx_mesh_vertex(m, r0 * cos(angle), r0 * sin(angle), width * 0.5);
++		gx_mesh_vertex(m, r1 * cos(angle), r1 * sin(angle), width * 0.5);
++		gx_mesh_vertex(m, r0 * cos(angle), r0 * sin(angle), width * 0.5);
++		gx_mesh_vertex(m, r1 * cos(angle + 3 * da), r1 * sin(angle + 3 * da), width * 0.5);
+ 	}
+-	rec_end();
++	gx_mesh_end(m);
+ 
+-	rec_begin(3);			/* outward faces of teeth */
++	gx_mesh_begin(m, GX_QUAD_STRIP);		/* outward faces of the teeth */
+ 	for (i = 0; i < teeth; i++) {
+ 		angle = i * 2.0 * M_PI / teeth;
+ 
+-		rec_vertex(r1 * cos(angle), r1 * sin(angle), width * 0.5);
+-		rec_vertex(r1 * cos(angle), r1 * sin(angle), -width * 0.5);
++		gx_mesh_vertex(m, r1 * cos(angle), r1 * sin(angle), width * 0.5);
++		gx_mesh_vertex(m, r1 * cos(angle), r1 * sin(angle), -width * 0.5);
+ 		u = r2 * cos(angle + da) - r1 * cos(angle);
+ 		v = r2 * sin(angle + da) - r1 * sin(angle);
+ 		len = sqrt(u * u + v * v);
+ 		u /= len;
+ 		v /= len;
+-		rec_normal(v, -u, 0.0);
+-		rec_vertex(r2 * cos(angle + da), r2 * sin(angle + da), width * 0.5);
+-		rec_vertex(r2 * cos(angle + da), r2 * sin(angle + da), -width * 0.5);
+-		rec_normal(cos(angle), sin(angle), 0.0);
+-		rec_vertex(r2 * cos(angle + 2 * da), r2 * sin(angle + 2 * da), width * 0.5);
+-		rec_vertex(r2 * cos(angle + 2 * da), r2 * sin(angle + 2 * da), -width * 0.5);
++		gx_mesh_normal(m, v, -u, 0.0);
++		gx_mesh_vertex(m, r2 * cos(angle + da), r2 * sin(angle + da), width * 0.5);
++		gx_mesh_vertex(m, r2 * cos(angle + da), r2 * sin(angle + da), -width * 0.5);
++		gx_mesh_normal(m, cos(angle), sin(angle), 0.0);
++		gx_mesh_vertex(m, r2 * cos(angle + 2 * da), r2 * sin(angle + 2 * da), width * 0.5);
++		gx_mesh_vertex(m, r2 * cos(angle + 2 * da), r2 * sin(angle + 2 * da), -width * 0.5);
+ 		u = r1 * cos(angle + 3 * da) - r2 * cos(angle + 2 * da);
+ 		v = r1 * sin(angle + 3 * da) - r2 * sin(angle + 2 * da);
+-		rec_normal(v, -u, 0.0);
+-		rec_vertex(r1 * cos(angle + 3 * da), r1 * sin(angle + 3 * da), width * 0.5);
+-		rec_vertex(r1 * cos(angle + 3 * da), r1 * sin(angle + 3 * da), -width * 0.5);
+-		rec_normal(cos(angle), sin(angle), 0.0);
++		gx_mesh_normal(m, v, -u, 0.0);
++		gx_mesh_vertex(m, r1 * cos(angle + 3 * da), r1 * sin(angle + 3 * da), width * 0.5);
++		gx_mesh_vertex(m, r1 * cos(angle + 3 * da), r1 * sin(angle + 3 * da), -width * 0.5);
++		gx_mesh_normal(m, cos(angle), sin(angle), 0.0);
+ 	}
+-	rec_vertex(r1 * cos(0), r1 * sin(0), width * 0.5);
+-	rec_vertex(r1 * cos(0), r1 * sin(0), -width * 0.5);
+-	rec_end();
++	gx_mesh_vertex(m, r1 * cos(0), r1 * sin(0), width * 0.5);
++	gx_mesh_vertex(m, r1 * cos(0), r1 * sin(0), -width * 0.5);
++	gx_mesh_end(m);
+ 
+-	rec_begin(3);			/* inside radius cylinder */
++	gx_mesh_begin(m, GX_QUAD_STRIP);		/* inside radius cylinder */
+ 	for (i = 0; i <= teeth; i++) {
+ 		angle = i * 2.0 * M_PI / teeth;
+-		rec_normal(-cos(angle), -sin(angle), 0.0);
+-		rec_vertex(r0 * cos(angle), r0 * sin(angle), -width * 0.5);
+-		rec_vertex(r0 * cos(angle), r0 * sin(angle), width * 0.5);
+-	}
+-	rec_end();
+-}
+-
+-static void draw_mesh(const struct gearmesh *m)
+-{
+-	int i, j;
+-
+-	W(GX_DIFAMB, m->color | (1 << 15) | (RGB15(6, 6, 6) << 16));
+-	W(GX_SPEEMI, 0);
+-	for (i = 0; i < m->ns; i++) {
+-		unsigned int last = 0xffffffff;
+-
+-		W(GX_BEGIN, m->s[i].type);
+-		for (j = m->s[i].first; j < m->s[i].first + m->s[i].count; j++) {
+-			if (m->v[j].normal != last) {
+-				W(GX_NORMAL, m->v[j].normal);
+-				last = m->v[j].normal;
+-			}
+-			W(GX_VTX16, m->v[j].xy);
+-			W(GX_VTX16, m->v[j].z);
+-		}
+-		W(GX_END, 0);
++		gx_mesh_normal(m, -cos(angle), -sin(angle), 0.0);
++		gx_mesh_vertex(m, r0 * cos(angle), r0 * sin(angle), -width * 0.5);
++		gx_mesh_vertex(m, r0 * cos(angle), r0 * sin(angle), width * 0.5);
+ 	}
+-}
+-
+-/* column-major rotation about an axis (1 = x, 2 = y, 3 = z), degrees */
+-static void rotate(int axis, double deg)
+-{
+-	double c = cos(deg * M_PI / 180.0), s = sin(deg * M_PI / 180.0);
+-	int m[9] = { 4096, 0, 0, 0, 4096, 0, 0, 0, 4096 };
+-	int i;
+-
+-	switch (axis) {
+-	case 1: m[4] = f12(c); m[5] = f12(s); m[7] = f12(-s); m[8] = f12(c); break;
+-	case 2: m[0] = f12(c); m[2] = f12(-s); m[6] = f12(s); m[8] = f12(c); break;
+-	default: m[0] = f12(c); m[1] = f12(s); m[3] = f12(-s); m[4] = f12(c); break;
+-	}
+-	for (i = 0; i < 9; i++)
+-		W(MTX_MULT_3X3, m[i]);
+-}
+-
+-static void translate(double x, double y, double z)
+-{
+-	W(MTX_TRANS, f12(x));
+-	W(MTX_TRANS, f12(y));
+-	W(MTX_TRANS, f12(z));
+-}
+-
+-static void frustum(double l, double r, double b, double t, double n, double f)
+-{
+-	double m[16] = {
+-		2 * n / (r - l), 0, 0, 0,
+-		0, 2 * n / (t - b), 0, 0,
+-		(r + l) / (r - l), (t + b) / (t - b), -(f + n) / (f - n), -1,
+-		0, 0, -2 * f * n / (f - n), 0
+-	};
+-	int i;
+-
+-	for (i = 0; i < 16; i++)
+-		W(MTX_MULT_4X4, f12(m[i]));
++	gx_mesh_end(m);
+ }
+ 
+ static long usec(void)
+@@ -279,109 +76,36 @@ static long usec(void)
+ 	return tv.tv_sec * 1000000L + tv.tv_usec;
+ }
+ 
+-
+-#define KEYCOLOR	GR_RGB(255, 0, 255)
+-
+-static GR_WINDOW_ID win;
+-static int rx, ry, rw = 160, rh = 120, visible = 1;
+-
+-/* where is the window's client area on the screen? */
+-static void read_rect(void)
+-{
+-	GR_WINDOW_INFO ci, pi;
+-
+-	GrGetWindowInfo(win, &ci);
+-	GrGetWindowInfo(ci.parent, &pi);
+-	if (ci.parent == GR_ROOT_WINDOW_ID) {
+-		pi.x = 0;
+-		pi.y = 0;
+-		pi.mapped = 1;
+-	}
+-	rx = pi.x + ci.x;
+-	ry = pi.y + ci.y;
+-	rw = ci.width;
+-	rh = ci.height;
+-	visible = ci.mapped && pi.mapped;
+-}
+-
+-/*
+- * Viewport and projection for the current rectangle. The engine's viewport cannot go off the screen, so a window
+- * that is partly outside gets the visible part as its viewport and the matching slice of the full window's frustum:
+- * the picture is clipped, not squashed. (The engine's y axis starts at the bottom.)
+- */
+-static void set_view(void)
+-{
+-	int cx1 = rx, cx2 = rx + rw - 1, cy1 = ry, cy2 = ry + rh - 1;
+-	double h, s, l, r, t, b;
+-
+-	if (cx1 < 0) cx1 = 0;
+-	if (cx2 > 255) cx2 = 255;
+-	if (cy1 < 0) cy1 = 0;
+-	if (cy2 > 191) cy2 = 191;
+-	if (cx2 <= cx1 || cy2 <= cy1)
+-		return;
+-	h = (double)rh / (double)rw;		/* full window: x from -1 to 1, y from -h to h */
+-	s = 2.0 / (double)rw;			/* world units per pixel at the near plane */
+-	l = -1.0 + (cx1 - rx) * s;
+-	r = -1.0 + (cx2 + 1 - rx) * s;
+-	t = h - (cy1 - ry) * s;
+-	b = h - (cy2 + 1 - ry) * s;
+-	W(GX_VIEWPORT, cx1 | ((191 - cy2) << 8) | (cx2 << 16) | ((191 - cy1) << 24));
+-	W(MTX_MODE, 0);
+-	W(MTX_IDENTITY, 0);
+-	frustum(l, r, b, t, 5.0, 60.0);
+-	flush_cmds();
+-}
+-
+ int main(int argc, char **argv)
+ {
+ 	GR_EVENT ev;
+-	static struct gearmesh g[3];
+-	int running = 1, dirty = 1, aa = 1, cull = 0, frames = 0, shown_fps = 0, heal = 0;
++	struct gxw w;
++	static struct gx_mesh g[3];
++	int running = 1, aa = 1, cull = 0, frames = 0;
+ 	long fps_t = 0;
+-	GR_GC_ID tgc;
++	char txt[32];
+ 	double angle = 0.0, view_rotx = 20.0, view_roty = 30.0;
+ 
+-	fb = open("/dev/fb0", O_RDWR);
+-	if (fb < 0) {
+-		perror("dsgl3d: /dev/fb0");
++	if (gx_open() < 0)
+ 		return 1;
+-	}
+ 	if (GrOpen() < 0) {
+ 		fprintf(stderr, "dsgl3d: cannot connect to Nano-X\n");
+ 		return 1;
+ 	}
+-	if (ioctl(fb, NDSFB_GX_SETUP, 1) < 0) {
+-		perror("dsgl3d: NDSFB_GX_SETUP");
+-		return 1;
+-	}
+ 	gear(&g[0], 1.0, 4.0, 1.0, 20, 0.7);
+ 	gear(&g[1], 0.5, 2.0, 2.0, 10, 0.7);
+ 	gear(&g[2], 1.3, 2.0, 0.5, 10, 0.7);
+-	g[0].color = RGB15(25, 3, 0);
+-	g[1].color = RGB15(0, 25, 6);
+-	g[2].color = RGB15(6, 6, 31);
+-
+-	win = GrNewWindowEx(GR_WM_PROPS_APPFRAME | GR_WM_PROPS_CAPTION | GR_WM_PROPS_CLOSEBOX, "3D gears",
+-			    GR_ROOT_WINDOW_ID, 30, 8, 160, 120, KEYCOLOR);
+-	GrSelectEvents(win, GR_EVENT_MASK_EXPOSURE | GR_EVENT_MASK_KEY_DOWN | GR_EVENT_MASK_CLOSE_REQ);
+-	GrSelectEvents(GR_ROOT_WINDOW_ID, GR_EVENT_MASK_CHLD_UPDATE);	/* the window manager moved it */
+-	GrMapWindow(win);
+-
+-	tgc = GrNewGC();
+-	W(GX_CONTROL, aa ? 0x10 : 0);	/* bit 4: anti-aliasing of polygon edges */
+-	W(GX_CLEARCOLOR, 0);		/* transparent rear plane */
+-	W(GX_CLEARDEPTH, 0x7fff);
+-	flush_cmds();
++	gxw_create(&w, "3D gears", 30, 8, 160, 120, 5.0, 60.0);
++	gx_control(aa ? GX_CTRL_AA : 0);
++	gx_flush();
+ 
+ 	while (running) {
+-		/* events: a round trip to the server, but only one per frame */
++		int changed = 0;
++
+ 		GrCheckNextEvent(&ev);
+-		switch (ev.type) {
+-		case GR_EVENT_TYPE_CLOSE_REQ:
++		if (gxw_event(&w, &ev))
+ 			running = 0;
+-			break;
+-		case GR_EVENT_TYPE_KEY_DOWN:
++		if (ev.type == GR_EVENT_TYPE_KEY_DOWN) {
+ 			switch (ev.keystroke.ch) {
+ 			case MWKEY_ESCAPE:
+ 			case 'q':
+@@ -389,10 +113,12 @@ int main(int argc, char **argv)
+ 				break;
+ 			case 'a':
+ 				aa = !aa;
+-				W(GX_CONTROL, aa ? 0x10 : 0);
++				gx_control(aa ? GX_CTRL_AA : 0);
++				changed = 1;
+ 				break;
+ 			case 'c':
+ 				cull = !cull;
++				changed = 1;
+ 				break;
+ 			case MWKEY_LEFT:
+ 				view_roty += 5.0;
+@@ -407,81 +133,63 @@ int main(int argc, char **argv)
+ 				view_rotx -= 5.0;
+ 				break;
+ 			}
+-			break;
+-		case GR_EVENT_TYPE_EXPOSURE:
+-		case GR_EVENT_TYPE_CHLD_UPDATE:
+-			dirty = 1;
+-			break;
+-		}
+-		if (++heal >= 30) {	/* twice a second: look at the rectangle again, in case a move was missed */
+-			heal = 0;
+-			dirty = 1;
+-		}
+-		if (dirty) {
+-			int ox = rx, oy = ry, ow = rw, oh = rh;
+-
+-			read_rect();
+-			if (rx != ox || ry != oy || rw != ow || rh != oh || visible != 1 || fps_t == 0)
+-				set_view();
+-			dirty = 0;
+ 		}
+-		if (!visible) {		/* minimised: do not keep the engine busy */
++		gxw_update(&w);
++		if (!w.visible) {		/* minimised: do not keep the engine busy */
+ 			usleep(100000);
+-			dirty = 1;
++			w.dirty = 1;
+ 			continue;
+ 		}
+ 
+-		ioctl(fb, NDSFB_VSYNC, 0);	/* one frame per screen refresh */
+-		W(MTX_MODE, 2);
+-		W(MTX_IDENTITY, 0);
+-		W(GX_LIGHTCOL, (0 << 30) | RGB15(31, 31, 31));
+-		W(GX_LIGHTVEC, (0u << 30) | pack_dir(-5.0, -5.0, -10.0));
+-		/* light 0, culling (2 = render front faces only) or none (3), opaque */
+-		W(GX_POLYATTR, 1 | ((cull ? 2 : 3) << 6) | (31 << 16));
+-		translate(0.0, 0.0, -45.0);
+-		rotate(1, view_rotx);
+-		rotate(2, view_roty);
+-
+-		W(MTX_PUSH, 0);
+-		translate(-3.0, -2.0, 0.0);
+-		rotate(3, angle);
+-		draw_mesh(&g[0]);
+-		W(MTX_POP, 1);
+-
+-		W(MTX_PUSH, 0);
+-		translate(3.1, -2.0, 0.0);
+-		rotate(3, -2.0 * angle - 9.0);
+-		draw_mesh(&g[1]);
+-		W(MTX_POP, 1);
+-
+-		W(MTX_PUSH, 0);
+-		translate(-3.1, 4.2, 0.0);
+-		rotate(3, -2.0 * angle - 25.0);
+-		draw_mesh(&g[2]);
+-		W(MTX_POP, 1);
+-
+-		W(GX_SWAP, 0);
+-		flush_cmds();
++		gx_vsync();			/* one frame per screen refresh */
++		gx_mode(GX_MODELVIEW);
++		gx_identity();
++		gx_light(0, 31, 31, 31, -5.0, -5.0, -10.0);
++		gx_polyattr(1, cull ? GX_CULL_BACK : GX_CULL_NONE, 31);
++		gx_translate(0.0, 0.0, -45.0);
++		gx_rotate('x', view_rotx);
++		gx_rotate('y', view_roty);
++
++		gx_push();
++		gx_translate(-3.0, -2.0, 0.0);
++		gx_rotate('z', angle);
++		gx_material(GX_RGB(25, 3, 0), GX_RGB(6, 6, 6));
++		gx_mesh_draw(&g[0]);
++		gx_pop(1);
++
++		gx_push();
++		gx_translate(3.1, -2.0, 0.0);
++		gx_rotate('z', -2.0 * angle - 9.0);
++		gx_material(GX_RGB(0, 25, 6), GX_RGB(6, 6, 6));
++		gx_mesh_draw(&g[1]);
++		gx_pop(1);
++
++		gx_push();
++		gx_translate(-3.1, 4.2, 0.0);
++		gx_rotate('z', -2.0 * angle - 25.0);
++		gx_material(GX_RGB(6, 6, 31), GX_RGB(6, 6, 6));
++		gx_mesh_draw(&g[2]);
++		gx_pop(1);
++
++		gx_swap();
++		gx_flush();
+ 		angle += 2.0;
+ 
+-		/* once a second: the rate, drawn into the window's corner (opaque text over the 3D picture) */
+ 		frames++;
+ 		if (fps_t == 0)
+ 			fps_t = usec();
+-		else if (usec() - fps_t >= 1000000L) {
+-			char txt[24];
+-
+-			shown_fps = frames;
+-			frames = 0;
+-			fps_t = usec();
+-			sprintf(txt, "%d fps%s%s", shown_fps, aa ? " aa" : "", cull ? " cull" : "");
+-			GrSetGCForeground(tgc, KEYCOLOR);
+-			GrFillRect(win, tgc, 0, 0, 80, 10);
+-			GrSetGCForeground(tgc, GR_RGB(255, 255, 255));
+-			GrText(win, tgc, 2, 1, txt, -1, GR_TFASCII | GR_TFTOP);
++		if (changed || usec() - fps_t >= 1000000L) {
++			if (usec() - fps_t >= 1000000L) {
++				sprintf(txt, "%d fps", frames);
++				frames = 0;
++				fps_t = usec();
++				gxw_text(&w, 0, txt);
++			}
++			sprintf(txt, "a:aa %s c:cull %s", aa ? "on" : "off", cull ? "on" : "off");
++			gxw_text(&w, 1, txt);
+ 		}
+ 	}
+-	ioctl(fb, NDSFB_GX_SETUP, 0);
++	gx_close();
+ 	GrClose();
+ 	return 0;
+ }
+diff --git a/user/microwin/src/demos/nanox/dsgx.c b/user/microwin/src/demos/nanox/dsgx.c
+new file mode 100644
+index 000000000..1c81776cb
+--- /dev/null
++++ b/user/microwin/src/demos/nanox/dsgx.c
+@@ -0,0 +1,160 @@
++/*
++ * dsgx - the hardware 3D engine on the text screen (stop the desktop first), written with dsgx.h.
++ *   dsgx        the lit gears        dsgx tri     one colour triangle (the smallest test)
++ * Esc or q quits and prints the frame rate (each frame waits for the screen refresh: 60 at most).
++ * The frame buffer is cleared to transparent pixels so the 3D picture, which is behind it, shows.
++ */
++#include <termios.h>
++#include <sys/mman.h>
++#include <sys/time.h>
++#include <linux/fb.h>
++#include <linux/kd.h>
++#include "dsgx.h"
++
++static void gear(struct gx_mesh *m, double ri, double ro, double width, int teeth, double depth)
++{
++	int i;
++	double r0 = ri, r1 = ro - depth / 2.0, r2 = ro + depth / 2.0, a, da = 2.0 * M_PI / teeth / 4.0, u, v, len;
++
++	gx_mesh_init(m, 400);
++	gx_mesh_normal(m, 0.0, 0.0, 1.0);
++	gx_mesh_begin(m, GX_QUAD_STRIP);
++	for (i = 0; i <= teeth; i++) {
++		a = i * 2.0 * M_PI / teeth;
++		gx_mesh_vertex(m, r0 * cos(a), r0 * sin(a), width * 0.5);
++		gx_mesh_vertex(m, r1 * cos(a), r1 * sin(a), width * 0.5);
++		gx_mesh_vertex(m, r0 * cos(a), r0 * sin(a), width * 0.5);
++		gx_mesh_vertex(m, r1 * cos(a + 3 * da), r1 * sin(a + 3 * da), width * 0.5);
++	}
++	gx_mesh_end(m);
++	gx_mesh_begin(m, GX_QUAD_STRIP);
++	for (i = 0; i < teeth; i++) {
++		a = i * 2.0 * M_PI / teeth;
++		gx_mesh_vertex(m, r1 * cos(a), r1 * sin(a), width * 0.5);
++		gx_mesh_vertex(m, r1 * cos(a), r1 * sin(a), -width * 0.5);
++		u = r2 * cos(a + da) - r1 * cos(a);
++		v = r2 * sin(a + da) - r1 * sin(a);
++		len = sqrt(u * u + v * v);
++		gx_mesh_normal(m, v / len, -u / len, 0.0);
++		gx_mesh_vertex(m, r2 * cos(a + da), r2 * sin(a + da), width * 0.5);
++		gx_mesh_vertex(m, r2 * cos(a + da), r2 * sin(a + da), -width * 0.5);
++		gx_mesh_normal(m, cos(a), sin(a), 0.0);
++		gx_mesh_vertex(m, r2 * cos(a + 2 * da), r2 * sin(a + 2 * da), width * 0.5);
++		gx_mesh_vertex(m, r2 * cos(a + 2 * da), r2 * sin(a + 2 * da), -width * 0.5);
++		u = r1 * cos(a + 3 * da) - r2 * cos(a + 2 * da);
++		v = r1 * sin(a + 3 * da) - r2 * sin(a + 2 * da);
++		len = sqrt(u * u + v * v);
++		gx_mesh_normal(m, v / len, -u / len, 0.0);
++		gx_mesh_vertex(m, r1 * cos(a + 3 * da), r1 * sin(a + 3 * da), width * 0.5);
++		gx_mesh_vertex(m, r1 * cos(a + 3 * da), r1 * sin(a + 3 * da), -width * 0.5);
++		gx_mesh_normal(m, cos(a), sin(a), 0.0);
++	}
++	gx_mesh_vertex(m, r1, 0.0, width * 0.5);
++	gx_mesh_vertex(m, r1, 0.0, -width * 0.5);
++	gx_mesh_end(m);
++	gx_mesh_begin(m, GX_QUAD_STRIP);
++	for (i = 0; i <= teeth; i++) {
++		a = i * 2.0 * M_PI / teeth;
++		gx_mesh_normal(m, -cos(a), -sin(a), 0.0);
++		gx_mesh_vertex(m, r0 * cos(a), r0 * sin(a), -width * 0.5);
++		gx_mesh_vertex(m, r0 * cos(a), r0 * sin(a), width * 0.5);
++	}
++	gx_mesh_end(m);
++}
++
++static long usec(void)
++{
++	struct timeval tv;
++
++	gettimeofday(&tv, NULL);
++	return tv.tv_sec * 1000000L + tv.tv_usec;
++}
++
++int main(int argc, char **argv)
++{
++	struct fb_fix_screeninfo fix;
++	struct termios old, raw;
++	unsigned char *mem;
++	static struct gx_mesh g[3];
++	int tty, i, tri = (argc > 1 && !strcmp(argv[1], "tri"));
++	long frames = 0, t0, t1;
++	double angle = 0.0;
++	char c;
++
++	if (gx_open() < 0)
++		return 1;
++	ioctl(gx_fb, FBIOGET_FSCREENINFO, &fix);
++	mem = mmap(NULL, fix.smem_len, PROT_READ | PROT_WRITE, MAP_SHARED, gx_fb, 0);
++	tty = open("/dev/tty0", O_RDWR);
++	if (tty >= 0)
++		ioctl(tty, KDSETMODE, KD_GRAPHICS);	/* the console stops drawing */
++	if (mem != MAP_FAILED) {
++		volatile unsigned long *p = (volatile unsigned long *)mem;
++
++		for (i = 0; i < 256 * 192 / 2; i++)	/* 16 bit: 98304 bytes of transparent pixels */
++			p[i] = 0;
++	}
++	tcgetattr(0, &old);
++	raw = old;
++	raw.c_lflag &= ~(ICANON | ECHO);
++	raw.c_cc[VMIN] = 0;
++	raw.c_cc[VTIME] = 0;
++	tcsetattr(0, TCSANOW, &raw);
++
++	if (!tri) {
++		gear(&g[0], 1.0, 4.0, 1.0, 20, 0.7);
++		gear(&g[1], 0.5, 2.0, 2.0, 10, 0.7);
++		gear(&g[2], 1.3, 2.0, 0.5, 10, 0.7);
++	}
++	gx_control(GX_CTRL_AA);
++	gx_viewport(0, 0, 255, 191);
++	gx_mode(GX_PROJECTION);
++	gx_identity();
++	if (tri)
++		gx_frustum(-1.0, 1.0, -0.75, 0.75, 1.0, 100.0);
++	else
++		gx_frustum(-1.0, 1.0, -0.75, 0.75, 5.0, 60.0);
++	gx_flush();
++
++	t0 = usec();
++	while (read(0, &c, 1) != 1 || (c != 27 && c != 'q')) {
++		gx_vsync();
++		gx_mode(GX_MODELVIEW);
++		gx_identity();
++		if (tri) {
++			gx_polyattr(0, GX_CULL_NONE, 31);
++			gx_translate(0.0, 0.0, -3.0);
++			gx_rotate('z', angle);
++			gx_begin(GX_TRIANGLES);
++			gx_color(31, 0, 0); gx_vertex(-1.0, -1.0, 0.0);
++			gx_color(0, 31, 0); gx_vertex(1.0, -1.0, 0.0);
++			gx_color(0, 0, 31); gx_vertex(0.0, 1.0, 0.0);
++			gx_end();
++		} else {
++			gx_light(0, 31, 31, 31, -5.0, -5.0, -10.0);
++			gx_polyattr(1, GX_CULL_NONE, 31);
++			gx_translate(0.0, 0.0, -45.0);
++			gx_rotate('x', 20.0);
++			gx_rotate('y', 30.0);
++			gx_push(); gx_translate(-3.0, -2.0, 0.0); gx_rotate('z', angle);
++			gx_material(GX_RGB(25, 3, 0), GX_RGB(6, 6, 6)); gx_mesh_draw(&g[0]); gx_pop(1);
++			gx_push(); gx_translate(3.1, -2.0, 0.0); gx_rotate('z', -2.0 * angle - 9.0);
++			gx_material(GX_RGB(0, 25, 6), GX_RGB(6, 6, 6)); gx_mesh_draw(&g[1]); gx_pop(1);
++			gx_push(); gx_translate(-3.1, 4.2, 0.0); gx_rotate('z', -2.0 * angle - 25.0);
++			gx_material(GX_RGB(6, 6, 31), GX_RGB(6, 6, 6)); gx_mesh_draw(&g[2]); gx_pop(1);
++		}
++		gx_swap();
++		gx_flush();
++		angle += 2.0;
++		frames++;
++	}
++	t1 = usec();
++
++	tcsetattr(0, TCSANOW, &old);
++	gx_close();
++	if (tty >= 0)
++		ioctl(tty, KDSETMODE, KD_TEXT);
++	printf("dsgx %s: %ld frames in %.2f s = %.1f frames per second (waiting for each screen refresh)\n",
++	       tri ? "triangle" : "gears", frames, (t1 - t0) / 1e6, frames * 1e6 / (double)(t1 - t0));
++	return 0;
++}
+diff --git a/user/microwin/src/demos/nanox/dsgx.h b/user/microwin/src/demos/nanox/dsgx.h
+new file mode 100644
+index 000000000..be8fb1f3c
+--- /dev/null
++++ b/user/microwin/src/demos/nanox/dsgx.h
+@@ -0,0 +1,341 @@
++/*
++ * dsgx.h - the Nintendo DS hardware 3D engine for programs (header only: include it, call gx_open()).
++ *
++ * The engine does the transforms, lighting, clipping and polygon filling; a program describes a scene with the calls
++ * below, much like fixed function OpenGL, and ends the frame with gx_swap(). The picture is drawn behind the frame
++ * buffer's layers, so it shows through every transparent frame buffer pixel (see dsgx_win.h for a desktop window).
++ * The kernel (drivers/video/ndsfb.c) passes the command words on; only one program can use the engine at a time.
++ *
++ *   gx_open();                                  power the engine on
++ *   gx_viewport(0, 0, 255, 191); gx_frustum(...)
++ *   per frame:  gx_vsync();
++ *               gx_mode(GX_MODELVIEW); gx_identity(); gx_light(0, 31,31,31, -1,-1,-1);
++ *               gx_translate(...); gx_rotate(...); gx_polyattr(...); gx_material(...);
++ *               gx_begin(GX_QUADS); gx_normal(...); gx_vertex(...); ... gx_end();
++ *               gx_swap(); gx_flush();
++ *   gx_close();
++ *
++ * Number formats: angles in degrees, coordinates in world units (a vertex must lie within +-8, matrices are
++ * unrestricted), colours as 5 bit components (0..31).
++ */
++#ifndef DSGX_H
++#define DSGX_H
++
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <math.h>
++#include <fcntl.h>
++#include <unistd.h>
++#include <sys/ioctl.h>
++
++#ifndef M_PI
++#define M_PI 3.14159265
++#endif
++
++/* kernel interface (drivers/video/ndsfb.c) */
++#define GX_IOC_SETUP	0x4e05
++#define GX_IOC_SUBMIT	0x4e06
++#define GX_IOC_VSYNC	0x4e07
++
++/* engine registers, offsets from 0x04000000 */
++#define GXR_CONTROL	0x060
++#define GXR_CLEARCOLOR	0x350
++#define GXR_CLEARDEPTH	0x354
++#define GXR_MTX_MODE	0x440
++#define GXR_MTX_PUSH	0x444
++#define GXR_MTX_POP	0x448
++#define GXR_MTX_IDENT	0x454
++#define GXR_MTX_MULT4	0x460
++#define GXR_MTX_MULT3	0x468
++#define GXR_MTX_SCALE	0x46C
++#define GXR_MTX_TRANS	0x470
++#define GXR_COLOR	0x480
++#define GXR_NORMAL	0x484
++#define GXR_TEXCOORD	0x488
++#define GXR_VTX16	0x48C
++#define GXR_POLYATTR	0x4A4
++#define GXR_TEXIMAGE	0x4A8
++#define GXR_PLTTBASE	0x4AC
++#define GXR_DIFAMB	0x4C0
++#define GXR_SPEEMI	0x4C4
++#define GXR_LIGHTVEC	0x4C8
++#define GXR_LIGHTCOL	0x4CC
++#define GXR_BEGIN	0x500
++#define GXR_END		0x504
++#define GXR_SWAP	0x540
++#define GXR_VIEWPORT	0x580
++
++/* matrix modes, primitive types, control flags, polygon cull modes */
++#define GX_PROJECTION	0
++#define GX_MODELVIEW	2		/* position and direction (normal) matrix together */
++#define GX_TRIANGLES	0
++#define GX_QUADS	1
++#define GX_TRIANGLE_STRIP 2
++#define GX_QUAD_STRIP	3
++#define GX_CTRL_TEXTURE	0x01		/* texture mapping on */
++#define GX_CTRL_AA	0x10		/* smooth polygon edges */
++#define GX_CULL_BACK	2		/* draw front faces only (counter clockwise is front) */
++#define GX_CULL_FRONT	1
++#define GX_CULL_NONE	3
++
++#define GX_RGB(r, g, b)	((r) | ((g) << 5) | ((b) << 10))
++
++struct gx_submit {
++	unsigned long words;
++	unsigned int count;
++};
++
++static int gx_fb = -1;
++static unsigned int gx_buf[2 * 4096];
++static int gx_n;
++
++/* hand the queued command words to the engine (the call waits when the engine's FIFO is full) */
++static void gx_flush(void)
++{
++	struct gx_submit s;
++
++	if (!gx_n)
++		return;
++	s.words = (unsigned long)gx_buf;
++	s.count = gx_n;
++	if (ioctl(gx_fb, GX_IOC_SUBMIT, &s) < 0)
++		perror("dsgx: submit");
++	gx_n = 0;
++}
++
++static void gx_cmd(unsigned int reg, unsigned int val)
++{
++	if (gx_n >= 4096)
++		gx_flush();
++	gx_buf[2 * gx_n] = reg;
++	gx_buf[2 * gx_n + 1] = val;
++	gx_n++;
++}
++
++static int gx_f12(double x)		/* 1.19.12 fixed point */
++{
++	return (int)(x * 4096.0 + (x < 0 ? -0.5 : 0.5));
++}
++
++/* a direction as the engine wants it: three 10 bit signed components, normalised */
++static unsigned int gx_pack_dir(double x, double y, double z)
++{
++	double l = sqrt(x * x + y * y + z * z);
++	int a, b, c;
++
++	if (l > 0) {
++		x /= l; y /= l; z /= l;
++	}
++	a = (int)(x * 511.0 + (x < 0 ? -0.5 : 0.5));
++	b = (int)(y * 511.0 + (y < 0 ? -0.5 : 0.5));
++	c = (int)(z * 511.0 + (z < 0 ? -0.5 : 0.5));
++	return (a & 0x3ff) | ((b & 0x3ff) << 10) | ((c & 0x3ff) << 20);
++}
++
++/* ---- set-up ---- */
++static int gx_open(void)
++{
++	gx_fb = open("/dev/fb0", O_RDWR);
++	if (gx_fb < 0) {
++		perror("dsgx: /dev/fb0");
++		return -1;
++	}
++	if (ioctl(gx_fb, GX_IOC_SETUP, 1) < 0) {
++		perror("dsgx: switching the 3D engine on (kernel too old?)");
++		return -1;
++	}
++	gx_cmd(GXR_CLEARCOLOR, 0);		/* rear plane: transparent */
++	gx_cmd(GXR_CLEARDEPTH, 0x7fff);
++	gx_flush();
++	return 0;
++}
++
++static void gx_close(void)
++{
++	ioctl(gx_fb, GX_IOC_SETUP, 0);
++}
++
++static void gx_control(unsigned int flags)	/* GX_CTRL_* */
++{
++	gx_cmd(GXR_CONTROL, flags);
++}
++
++static void gx_vsync(void)			/* wait for the screen refresh: one frame per refresh */
++{
++	ioctl(gx_fb, GX_IOC_VSYNC, 0);
++}
++
++/* x1, y1, x2, y2: screen pixels, origin top left, inclusive, within 0..255 and 0..191 */
++static void gx_viewport(int x1, int y1, int x2, int y2)
++{
++	gx_cmd(GXR_VIEWPORT, x1 | ((191 - y2) << 8) | (x2 << 16) | ((191 - y1) << 24));
++}
++
++/* ---- matrices ---- */
++static void gx_mode(int m)	{ gx_cmd(GXR_MTX_MODE, m); }
++static void gx_identity(void)	{ gx_cmd(GXR_MTX_IDENT, 0); }
++static void gx_push(void)	{ gx_cmd(GXR_MTX_PUSH, 0); }
++static void gx_pop(int n)	{ gx_cmd(GXR_MTX_POP, n); }
++
++static void gx_translate(double x, double y, double z)
++{
++	gx_cmd(GXR_MTX_TRANS, gx_f12(x));
++	gx_cmd(GXR_MTX_TRANS, gx_f12(y));
++	gx_cmd(GXR_MTX_TRANS, gx_f12(z));
++}
++
++static void gx_scale(double x, double y, double z)
++{
++	gx_cmd(GXR_MTX_SCALE, gx_f12(x));
++	gx_cmd(GXR_MTX_SCALE, gx_f12(y));
++	gx_cmd(GXR_MTX_SCALE, gx_f12(z));
++}
++
++/* rotate about axis 'x', 'y' or 'z' (or 1, 2, 3), degrees, counter clockwise like OpenGL */
++static void gx_rotate(int axis, double deg)
++{
++	double c = cos(deg * M_PI / 180.0), s = sin(deg * M_PI / 180.0);
++	int m[9] = { 4096, 0, 0, 0, 4096, 0, 0, 0, 4096 };
++	int i;
++
++	if (axis == 'x') axis = 1;
++	if (axis == 'y') axis = 2;
++	if (axis == 'z') axis = 3;
++	switch (axis) {
++	case 1: m[4] = gx_f12(c); m[5] = gx_f12(s); m[7] = gx_f12(-s); m[8] = gx_f12(c); break;
++	case 2: m[0] = gx_f12(c); m[2] = gx_f12(-s); m[6] = gx_f12(s); m[8] = gx_f12(c); break;
++	default: m[0] = gx_f12(c); m[1] = gx_f12(s); m[3] = gx_f12(-s); m[4] = gx_f12(c); break;
++	}
++	for (i = 0; i < 9; i++)
++		gx_cmd(GXR_MTX_MULT3, m[i]);
++}
++
++/* perspective projection, like glFrustum (call in GX_PROJECTION mode after gx_identity) */
++static void gx_frustum(double l, double r, double b, double t, double n, double f)
++{
++	double m[16] = {
++		2 * n / (r - l), 0, 0, 0,
++		0, 2 * n / (t - b), 0, 0,
++		(r + l) / (r - l), (t + b) / (t - b), -(f + n) / (f - n), -1,
++		0, 0, -2 * f * n / (f - n), 0
++	};
++	int i;
++
++	for (i = 0; i < 16; i++)
++		gx_cmd(GXR_MTX_MULT4, gx_f12(m[i]));
++}
++
++/* ---- lighting, material, polygon attributes ---- */
++/* light 0..3, colour (0..31 each), direction the light travels in the current direction matrix (call right after
++ * gx_identity() in GX_MODELVIEW mode to fix it in the viewer's space) */
++static void gx_light(int id, int r, int g, int b, double dx, double dy, double dz)
++{
++	gx_cmd(GXR_LIGHTCOL, ((unsigned)id << 30) | GX_RGB(r, g, b));
++	gx_cmd(GXR_LIGHTVEC, ((unsigned)id << 30) | gx_pack_dir(dx, dy, dz));
++}
++
++/* diffuse and ambient colour; the diffuse colour also becomes the vertex colour */
++static void gx_material(unsigned int diffuse, unsigned int ambient)
++{
++	gx_cmd(GXR_DIFAMB, diffuse | (1 << 15) | (ambient << 16));
++	gx_cmd(GXR_SPEEMI, 0);
++}
++
++/* lights: bit mask of lights 0..3 (0 = unlit); cull: GX_CULL_*; alpha 1..31 (31 opaque) */
++static void gx_polyattr(int lights, int cull, int alpha)
++{
++	gx_cmd(GXR_POLYATTR, (lights & 15) | (cull << 6) | (alpha << 16));
++}
++
++/* ---- primitives ---- */
++static void gx_begin(int type)	{ gx_cmd(GXR_BEGIN, type); }
++static void gx_end(void)	{ gx_cmd(GXR_END, 0); }
++static void gx_color(int r, int g, int b) { gx_cmd(GXR_COLOR, GX_RGB(r, g, b)); }
++static void gx_normal(double x, double y, double z) { gx_cmd(GXR_NORMAL, gx_pack_dir(x, y, z)); }
++
++static void gx_vertex(double x, double y, double z)
++{
++	gx_cmd(GXR_VTX16, (gx_f12(x) & 0xffff) | ((unsigned int)gx_f12(y) << 16));
++	gx_cmd(GXR_VTX16, gx_f12(z) & 0xffff);
++}
++
++/* end of frame: the engine draws what was sent at the next vertical blank */
++static void gx_swap(void)	{ gx_cmd(GXR_SWAP, 0); }
++
++/* ---- recorded meshes: build once (slow maths allowed), draw every frame (just words) ---- */
++struct gx_vtx {
++	unsigned int xy, z, normal;
++};
++struct gx_strip {
++	int type, first, count;
++};
++struct gx_mesh {
++	struct gx_vtx *v;
++	int nv, cap;
++	struct gx_strip s[16];
++	int ns;
++	unsigned int normal;		/* normal in effect for the next vertex */
++};
++
++static void gx_mesh_init(struct gx_mesh *m, int cap)
++{
++	memset(m, 0, sizeof(*m));
++	m->v = malloc(cap * sizeof(struct gx_vtx));
++	m->cap = m->v ? cap : 0;
++}
++
++static void gx_mesh_normal(struct gx_mesh *m, double x, double y, double z)
++{
++	m->normal = gx_pack_dir(x, y, z);
++}
++
++static void gx_mesh_begin(struct gx_mesh *m, int type)
++{
++	if (m->ns >= 16)
++		return;
++	m->s[m->ns].type = type;
++	m->s[m->ns].first = m->nv;
++	m->s[m->ns].count = 0;
++}
++
++static void gx_mesh_vertex(struct gx_mesh *m, double x, double y, double z)
++{
++	struct gx_vtx *v;
++
++	if (m->nv >= m->cap || m->ns >= 16)
++		return;
++	v = &m->v[m->nv++];
++	v->xy = (gx_f12(x) & 0xffff) | ((unsigned int)gx_f12(y) << 16);
++	v->z = gx_f12(z) & 0xffff;
++	v->normal = m->normal;
++	m->s[m->ns].count++;
++}
++
++static void gx_mesh_end(struct gx_mesh *m)
++{
++	if (m->ns < 16)
++		m->ns++;
++}
++
++static void gx_mesh_draw(const struct gx_mesh *m)
++{
++	int i, j;
++
++	for (i = 0; i < m->ns; i++) {
++		unsigned int last = 0xffffffffu;
++
++		gx_begin(m->s[i].type);
++		for (j = m->s[i].first; j < m->s[i].first + m->s[i].count; j++) {
++			if (m->v[j].normal != last) {
++				gx_cmd(GXR_NORMAL, m->v[j].normal);
++				last = m->v[j].normal;
++			}
++			gx_cmd(GXR_VTX16, m->v[j].xy);
++			gx_cmd(GXR_VTX16, m->v[j].z);
++		}
++		gx_end();
++	}
++}
++
++#endif
+diff --git a/user/microwin/src/demos/nanox/dsgx_win.h b/user/microwin/src/demos/nanox/dsgx_win.h
+new file mode 100644
+index 000000000..d4577354b
+--- /dev/null
++++ b/user/microwin/src/demos/nanox/dsgx_win.h
+@@ -0,0 +1,132 @@
++/*
++ * dsgx_win.h - 3D (dsgx.h) inside a Nano-X desktop window.
++ *
++ * The window's client area is painted with the colour key magenta, which the DS frame buffer turns into transparent
++ * pixels; the 3D engine draws behind the frame buffer, so the picture shows through exactly there. Windows above it
++ * cover it as usual. The viewport follows the window (read back when the window manager moves it), a window that is
++ * partly off the screen gets the matching slice of the projection, so the picture is clipped, not squashed.
++ *
++ *   struct gxw w;
++ *   gx_open();  gxw_create(&w, "title", x, y, width, height, 5.0, 60.0);
++ *   loop:  GrCheckNextEvent(&ev);  if (gxw_event(&w, &ev)) ...   (CHLD_UPDATE / EXPOSURE mark the rectangle dirty)
++ *          gxw_update(&w);          (re-reads the rectangle when needed, sets viewport + projection)
++ *          if (!w.visible) skip the frame;
++ *          draw with gx_*();       gxw_text(&w, 0, "60 fps") for opaque text over the picture
++ */
++#ifndef DSGX_WIN_H
++#define DSGX_WIN_H
++
++#include "nano-X.h"
++#include "dsgx.h"
++
++#define GXW_KEY	GR_RGB(255, 0, 255)
++
++struct gxw {
++	GR_WINDOW_ID win;
++	GR_GC_ID gc;
++	int rx, ry, rw, rh;		/* client area on the screen */
++	int visible;
++	int dirty, heal;
++	double znear, zfar;
++};
++
++/* create, map and focus the window; also listens for the window manager moving it */
++static int gxw_create(struct gxw *w, const char *title, int x, int y, int cw, int ch, double znear, double zfar)
++{
++	memset(w, 0, sizeof(*w));
++	w->znear = znear;
++	w->zfar = zfar;
++	w->win = GrNewWindowEx(GR_WM_PROPS_APPFRAME | GR_WM_PROPS_CAPTION | GR_WM_PROPS_CLOSEBOX, (GR_CHAR *)title,
++			       GR_ROOT_WINDOW_ID, x, y, cw, ch, GXW_KEY);
++	GrSelectEvents(w->win, GR_EVENT_MASK_EXPOSURE | GR_EVENT_MASK_KEY_DOWN | GR_EVENT_MASK_CLOSE_REQ);
++	GrSelectEvents(GR_ROOT_WINDOW_ID, GR_EVENT_MASK_CHLD_UPDATE);
++	GrMapWindow(w->win);
++	GrSetFocus(w->win);		/* so its keys work without clicking it first */
++	w->gc = GrNewGC();
++	w->rw = cw;
++	w->rh = ch;
++	w->dirty = 1;
++	w->visible = 1;
++	return 0;
++}
++
++static void gxw_read_rect(struct gxw *w)
++{
++	GR_WINDOW_INFO ci, pi;
++
++	GrGetWindowInfo(w->win, &ci);
++	GrGetWindowInfo(ci.parent, &pi);
++	if (ci.parent == GR_ROOT_WINDOW_ID) {
++		pi.x = 0;
++		pi.y = 0;
++		pi.mapped = 1;
++	}
++	w->rx = pi.x + ci.x;
++	w->ry = pi.y + ci.y;
++	w->rw = ci.width;
++	w->rh = ci.height;
++	w->visible = ci.mapped && pi.mapped;
++}
++
++/* viewport = the visible part; projection = the matching slice of the full window's frustum */
++static void gxw_set_view(struct gxw *w)
++{
++	int cx1 = w->rx, cx2 = w->rx + w->rw - 1, cy1 = w->ry, cy2 = w->ry + w->rh - 1;
++	double h, s, l, r, t, b;
++
++	if (cx1 < 0) cx1 = 0;
++	if (cx2 > 255) cx2 = 255;
++	if (cy1 < 0) cy1 = 0;
++	if (cy2 > 191) cy2 = 191;
++	if (cx2 <= cx1 || cy2 <= cy1)
++		return;
++	h = (double)w->rh / (double)w->rw;	/* full window: x from -1 to 1, y from -h to h */
++	s = 2.0 / (double)w->rw;
++	l = -1.0 + (cx1 - w->rx) * s;
++	r = -1.0 + (cx2 + 1 - w->rx) * s;
++	t = h - (cy1 - w->ry) * s;
++	b = h - (cy2 + 1 - w->ry) * s;
++	gx_viewport(cx1, cy1, cx2, cy2);
++	gx_mode(GX_PROJECTION);
++	gx_identity();
++	gx_frustum(l, r, b, t, w->znear, w->zfar);
++	gx_flush();
++}
++
++/* events that change the rectangle mark it dirty; returns 1 for a close request */
++static int gxw_event(struct gxw *w, GR_EVENT *ev)
++{
++	if (ev->type == GR_EVENT_TYPE_CLOSE_REQ)
++		return 1;
++	if (ev->type == GR_EVENT_TYPE_EXPOSURE || ev->type == GR_EVENT_TYPE_CHLD_UPDATE)
++		w->dirty = 1;
++	return 0;
++}
++
++/* call once per frame: re-reads the rectangle when something changed, and twice a second anyway */
++static void gxw_update(struct gxw *w)
++{
++	int ox = w->rx, oy = w->ry, ow = w->rw, oh = w->rh, ov = w->visible;
++
++	if (++w->heal >= 30) {
++		w->heal = 0;
++		w->dirty = 1;
++	}
++	if (!w->dirty)
++		return;
++	gxw_read_rect(w);
++	w->dirty = 0;
++	if (w->rx != ox || w->ry != oy || w->rw != ow || w->rh != oh || w->visible != ov || ov == 0)
++		gxw_set_view(w);
++}
++
++/* opaque text over the 3D picture, line 0, 1, ... (10 pixels each) */
++static void gxw_text(struct gxw *w, int line, const char *txt)
++{
++	GrSetGCForeground(w->gc, GXW_KEY);
++	GrFillRect(w->win, w->gc, 0, line * 10, 120, 10);
++	GrSetGCForeground(w->gc, GR_RGB(255, 255, 255));
++	GrText(w->win, w->gc, 2, line * 10 + 1, (void *)txt, -1, GR_TFASCII | GR_TFTOP);
++}
++
++#endif
+-- 
+2.56.0
+
