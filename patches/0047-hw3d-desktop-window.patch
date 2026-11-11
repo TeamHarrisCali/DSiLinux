@@ -1,0 +1,561 @@
+From 2b715e1258a575bb4ece6218f61f58d9899aaff4 Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 06:11:16 -0600
+Subject: [PATCH] Hardware 3D in a desktop window: colour key magenta =
+ transparent pixel (the 3D layer shows through), dsgl3d (gears, viewport
+ follows the window), Start menu entry '3D gears'
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ user/microwin/Makefile                 |   1 +
+ user/microwin/src/demos/nanox/Makefile |   9 +-
+ user/microwin/src/demos/nanox/dsdesk.c |   1 +
+ user/microwin/src/demos/nanox/dsgl3d.c | 439 +++++++++++++++++++++++++
+ user/microwin/src/include/device.h     |  11 +-
+ vendors/Nintendo/DSI/Makefile          |   1 +
+ 6 files changed, 458 insertions(+), 4 deletions(-)
+ create mode 100644 user/microwin/src/demos/nanox/dsgl3d.c
+
+diff --git a/user/microwin/Makefile b/user/microwin/Makefile
+index faaff1e3a..bc4aa049a 100644
+--- a/user/microwin/Makefile
++++ b/user/microwin/Makefile
+@@ -14,6 +14,7 @@ real_romfs:
+ 	$(ROMFSINST) /bin/dsnotes
+ 	$(ROMFSINST) /bin/dsfiles
+ 	$(ROMFSINST) /bin/dsbench
++	$(ROMFSINST) /bin/dsgl3d
+ 	$(ROMFSINST) -e CONFIG_USER_MICROWIN_BIN_LANDMINE    /bin/landmine
+ 	$(ROMFSINST) -e CONFIG_USER_MICROWIN_BIN_LAUNCHER    /bin/launcher
+ 	$(ROMFSINST) -e CONFIG_USER_MICROWIN_BIN_MOVE        /bin/move
+diff --git a/user/microwin/src/demos/nanox/Makefile b/user/microwin/src/demos/nanox/Makefile
+index 8ae0e74d3..5829c8672 100644
+--- a/user/microwin/src/demos/nanox/Makefile
++++ b/user/microwin/src/demos/nanox/Makefile
+@@ -81,10 +81,11 @@ OBJS =	demo.o \
+ 	dsdesk.o \
+ 	dsnotes.o \
+ 	dsfiles.o \
+-	dsbench.o
++	dsbench.o \
++	dsgl3d.o
+ 
+ TARGETS = \
+-	$(TOP)/bin/dsdesk $(TOP)/bin/dsnotes $(TOP)/bin/dsfiles $(TOP)/bin/dsbench \
++	$(TOP)/bin/dsdesk $(TOP)/bin/dsnotes $(TOP)/bin/dsfiles $(TOP)/bin/dsbench $(TOP)/bin/dsgl3d \
+ 	$(TOP)/bin/demo $(TOP)/bin/move $(TOP)/bin/landmine \
+ 	$(TOP)/bin/world $(TOP)/bin/nxclock \
+ 	$(TOP)/bin/nxlsclients $(TOP)/bin/nxev \
+@@ -183,6 +184,10 @@ $(TOP)/bin/dsfiles: dsfiles.o $(NANOXCLIENTLIBS) $(TOP)/config
+ 	@echo "Linking $@ ..."
+ 	$(CC) $(CFLAGS) $(LDFLAGS) $< -o $@ $(LD_NANOXCLIENTLIBS)
+ 
++$(TOP)/bin/dsgl3d: dsgl3d.o $(NANOXCLIENTLIBS) $(TOP)/config
++	@echo "Linking $@ ..."
++	$(CC) $(CFLAGS) $(LDFLAGS) $< -o $@ $(LD_NANOXCLIENTLIBS) $(LIBM)
++
+ $(TOP)/bin/dsbench: dsbench.o $(NANOXCLIENTLIBS) $(TOP)/config
+ 	@echo "Linking $@ ..."
+ 	$(CC) $(CFLAGS) $(LDFLAGS) $< -o $@ $(LD_NANOXCLIENTLIBS)
+diff --git a/user/microwin/src/demos/nanox/dsdesk.c b/user/microwin/src/demos/nanox/dsdesk.c
+index cc9939c58..e245c2564 100644
+--- a/user/microwin/src/demos/nanox/dsdesk.c
++++ b/user/microwin/src/demos/nanox/dsdesk.c
+@@ -28,6 +28,7 @@ static struct item items[] = {
+ 	{ "Notes", "/boot/dsnotes", NULL },
+ 	{ "Files", "/boot/dsfiles", NULL },
+ 	{ "Clock", "/usr/bin/nxclock", NULL },
++	{ "3D gears", "/boot/dsgl3d", NULL },
+ 	{ "Bench", "/boot/dsbench", NULL },
+ 	{ "Save log", "/boot/savelog", NULL },
+ 	{ "Exit desktop", "/boot/desktop", "stop" },
+diff --git a/user/microwin/src/demos/nanox/dsgl3d.c b/user/microwin/src/demos/nanox/dsgl3d.c
+new file mode 100644
+index 000000000..f7697d6f2
+--- /dev/null
++++ b/user/microwin/src/demos/nanox/dsgl3d.c
+@@ -0,0 +1,439 @@
++/*
++ * dsgl3d - hardware 3D (the DS 3D engine) in a desktop window: the three gears of dsgx.
++ *
++ * The window's client area is painted with the colour key magenta, which the DS frame buffer turns into transparent
++ * pixels; the 3D engine draws behind the frame buffer, so the gears show through exactly there, and any window above
++ * this one covers them. The 3D viewport is set to the window's rectangle (and follows when it is moved).
++ * Arrow keys turn the view, Esc or q or the close box end it. One 3D program at a time.
++ */
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <math.h>
++#include <fcntl.h>
++#include <unistd.h>
++#include <sys/ioctl.h>
++#include <sys/time.h>
++#include "nano-X.h"
++
++#define NDSFB_GX_SETUP	0x4e05
++#define NDSFB_GX_SUBMIT	0x4e06
++
++#ifndef M_PI
++#define M_PI 3.14159265
++#endif
++
++/* command ports (offset from 0x04000000) */
++#define GX_CONTROL	0x060
++#define GX_CLEARCOLOR	0x350
++#define GX_CLEARDEPTH	0x354
++#define MTX_MODE	0x440
++#define MTX_PUSH	0x444
++#define MTX_POP		0x448
++#define MTX_IDENTITY	0x454
++#define MTX_MULT_4X4	0x460
++#define MTX_MULT_3X3	0x468
++#define MTX_TRANS	0x470
++#define GX_COLOR	0x480
++#define GX_NORMAL	0x484
++#define GX_VTX16	0x48C
++#define GX_POLYATTR	0x4A4
++#define GX_DIFAMB	0x4C0
++#define GX_SPEEMI	0x4C4
++#define GX_LIGHTVEC	0x4C8
++#define GX_LIGHTCOL	0x4CC
++#define GX_BEGIN	0x500
++#define GX_END		0x504
++#define GX_SWAP		0x540
++#define GX_VIEWPORT	0x580
++
++struct gx_submit {
++	unsigned long words;
++	unsigned int count;
++};
++
++static int fb = -1;
++static unsigned int cmd[2 * 4096];
++static int ncmd;
++
++static void flush_cmds(void)
++{
++	struct gx_submit s;
++
++	if (!ncmd)
++		return;
++	s.words = (unsigned long)cmd;
++	s.count = ncmd;
++	if (ioctl(fb, NDSFB_GX_SUBMIT, &s) < 0)
++		perror("dsgx: NDSFB_GX_SUBMIT");
++	ncmd = 0;
++}
++
++static void W(unsigned int reg, unsigned int val)
++{
++	if (ncmd >= 4096)
++		flush_cmds();
++	cmd[2 * ncmd] = reg;
++	cmd[2 * ncmd + 1] = val;
++	ncmd++;
++}
++
++static int f12(double x)
++{
++	return (int)(x * 4096.0 + (x < 0 ? -0.5 : 0.5));
++}
++
++static unsigned int pack_dir(double x, double y, double z)
++{
++	double l = sqrt(x * x + y * y + z * z);
++	int a, b, c;
++
++	if (l > 0) {
++		x /= l; y /= l; z /= l;
++	}
++	a = (int)(x * 511.0 + (x < 0 ? -0.5 : 0.5));
++	b = (int)(y * 511.0 + (y < 0 ? -0.5 : 0.5));
++	c = (int)(z * 511.0 + (z < 0 ? -0.5 : 0.5));
++	return (a & 0x3ff) | ((b & 0x3ff) << 10) | ((c & 0x3ff) << 20);
++}
++
++#define RGB15(r, g, b)	((r) | ((g) << 5) | ((b) << 10))
++
++/* ---- gear geometry, recorded once (the same shapes as gears.c) ---- */
++#define MAXV 1200
++struct vtx {
++	unsigned int xy, z;		/* VTX_16 parameters */
++	unsigned int normal;		/* NORMAL parameter in effect for this vertex */
++	unsigned int newnormal;		/* 1 when it differs from the previous vertex's */
++};
++struct strip {
++	int type, first, count;
++};
++struct gearmesh {
++	struct vtx v[MAXV];
++	struct strip s[8];
++	int nv, ns;
++	unsigned int color;		/* diffuse colour */
++};
++
++static struct gearmesh *rec;
++static unsigned int cur_normal;
++
++static void rec_normal(double x, double y, double z)
++{
++	cur_normal = pack_dir(x, y, z);
++}
++
++static void rec_begin(int type)
++{
++	rec->s[rec->ns].type = type;
++	rec->s[rec->ns].first = rec->nv;
++	rec->s[rec->ns].count = 0;
++}
++
++static void rec_vertex(double x, double y, double z)
++{
++	struct vtx *v = &rec->v[rec->nv++];
++
++	v->xy = (f12(x) & 0xffff) | ((unsigned int)(f12(y) & 0xffff) << 16);
++	v->z = f12(z) & 0xffff;
++	v->normal = cur_normal;
++	rec->s[rec->ns].count++;
++}
++
++static void rec_end(void)
++{
++	rec->ns++;
++}
++
++static void gear(struct gearmesh *m, double inner_radius, double outer_radius, double width, int teeth,
++		 double tooth_depth)
++{
++	int i;
++	double r0, r1, r2, angle, da, u, v, len;
++
++	rec = m;
++	m->nv = 0;
++	m->ns = 0;
++	r0 = inner_radius;
++	r1 = outer_radius - tooth_depth / 2.0;
++	r2 = outer_radius + tooth_depth / 2.0;
++	da = 2.0 * M_PI / teeth / 4.0;
++
++	rec_normal(0.0, 0.0, 1.0);
++	rec_begin(3);			/* quad strip: front face */
++	for (i = 0; i <= teeth; i++) {
++		angle = i * 2.0 * M_PI / teeth;
++		rec_vertex(r0 * cos(angle), r0 * sin(angle), width * 0.5);
++		rec_vertex(r1 * cos(angle), r1 * sin(angle), width * 0.5);
++		rec_vertex(r0 * cos(angle), r0 * sin(angle), width * 0.5);
++		rec_vertex(r1 * cos(angle + 3 * da), r1 * sin(angle + 3 * da), width * 0.5);
++	}
++	rec_end();
++
++	rec_begin(3);			/* outward faces of teeth */
++	for (i = 0; i < teeth; i++) {
++		angle = i * 2.0 * M_PI / teeth;
++
++		rec_vertex(r1 * cos(angle), r1 * sin(angle), width * 0.5);
++		rec_vertex(r1 * cos(angle), r1 * sin(angle), -width * 0.5);
++		u = r2 * cos(angle + da) - r1 * cos(angle);
++		v = r2 * sin(angle + da) - r1 * sin(angle);
++		len = sqrt(u * u + v * v);
++		u /= len;
++		v /= len;
++		rec_normal(v, -u, 0.0);
++		rec_vertex(r2 * cos(angle + da), r2 * sin(angle + da), width * 0.5);
++		rec_vertex(r2 * cos(angle + da), r2 * sin(angle + da), -width * 0.5);
++		rec_normal(cos(angle), sin(angle), 0.0);
++		rec_vertex(r2 * cos(angle + 2 * da), r2 * sin(angle + 2 * da), width * 0.5);
++		rec_vertex(r2 * cos(angle + 2 * da), r2 * sin(angle + 2 * da), -width * 0.5);
++		u = r1 * cos(angle + 3 * da) - r2 * cos(angle + 2 * da);
++		v = r1 * sin(angle + 3 * da) - r2 * sin(angle + 2 * da);
++		rec_normal(v, -u, 0.0);
++		rec_vertex(r1 * cos(angle + 3 * da), r1 * sin(angle + 3 * da), width * 0.5);
++		rec_vertex(r1 * cos(angle + 3 * da), r1 * sin(angle + 3 * da), -width * 0.5);
++		rec_normal(cos(angle), sin(angle), 0.0);
++	}
++	rec_vertex(r1 * cos(0), r1 * sin(0), width * 0.5);
++	rec_vertex(r1 * cos(0), r1 * sin(0), -width * 0.5);
++	rec_end();
++
++	rec_begin(3);			/* inside radius cylinder */
++	for (i = 0; i <= teeth; i++) {
++		angle = i * 2.0 * M_PI / teeth;
++		rec_normal(-cos(angle), -sin(angle), 0.0);
++		rec_vertex(r0 * cos(angle), r0 * sin(angle), -width * 0.5);
++		rec_vertex(r0 * cos(angle), r0 * sin(angle), width * 0.5);
++	}
++	rec_end();
++}
++
++static void draw_mesh(const struct gearmesh *m)
++{
++	int i, j;
++
++	W(GX_DIFAMB, m->color | (1 << 15) | (RGB15(6, 6, 6) << 16));
++	W(GX_SPEEMI, 0);
++	for (i = 0; i < m->ns; i++) {
++		unsigned int last = 0xffffffff;
++
++		W(GX_BEGIN, m->s[i].type);
++		for (j = m->s[i].first; j < m->s[i].first + m->s[i].count; j++) {
++			if (m->v[j].normal != last) {
++				W(GX_NORMAL, m->v[j].normal);
++				last = m->v[j].normal;
++			}
++			W(GX_VTX16, m->v[j].xy);
++			W(GX_VTX16, m->v[j].z);
++		}
++		W(GX_END, 0);
++	}
++}
++
++/* column-major rotation about an axis (1 = x, 2 = y, 3 = z), degrees */
++static void rotate(int axis, double deg)
++{
++	double c = cos(deg * M_PI / 180.0), s = sin(deg * M_PI / 180.0);
++	int m[9] = { 4096, 0, 0, 0, 4096, 0, 0, 0, 4096 };
++	int i;
++
++	switch (axis) {
++	case 1: m[4] = f12(c); m[5] = f12(s); m[7] = f12(-s); m[8] = f12(c); break;
++	case 2: m[0] = f12(c); m[2] = f12(-s); m[6] = f12(s); m[8] = f12(c); break;
++	default: m[0] = f12(c); m[1] = f12(s); m[3] = f12(-s); m[4] = f12(c); break;
++	}
++	for (i = 0; i < 9; i++)
++		W(MTX_MULT_3X3, m[i]);
++}
++
++static void translate(double x, double y, double z)
++{
++	W(MTX_TRANS, f12(x));
++	W(MTX_TRANS, f12(y));
++	W(MTX_TRANS, f12(z));
++}
++
++static void frustum(double l, double r, double b, double t, double n, double f)
++{
++	double m[16] = {
++		2 * n / (r - l), 0, 0, 0,
++		0, 2 * n / (t - b), 0, 0,
++		(r + l) / (r - l), (t + b) / (t - b), -(f + n) / (f - n), -1,
++		0, 0, -2 * f * n / (f - n), 0
++	};
++	int i;
++
++	for (i = 0; i < 16; i++)
++		W(MTX_MULT_4X4, f12(m[i]));
++}
++
++static long usec(void)
++{
++	struct timeval tv;
++
++	gettimeofday(&tv, NULL);
++	return tv.tv_sec * 1000000L + tv.tv_usec;
++}
++
++
++#define KEYCOLOR	GR_RGB(255, 0, 255)
++
++static GR_WINDOW_ID win;
++static int rx, ry, rw = 160, rh = 120, visible = 1;
++
++/* where is the window's client area on the screen? */
++static void read_rect(void)
++{
++	GR_WINDOW_INFO ci, pi;
++
++	GrGetWindowInfo(win, &ci);
++	GrGetWindowInfo(ci.parent, &pi);
++	if (ci.parent == GR_ROOT_WINDOW_ID) {
++		pi.x = 0;
++		pi.y = 0;
++		pi.mapped = 1;
++	}
++	rx = pi.x + ci.x;
++	ry = pi.y + ci.y;
++	rw = ci.width;
++	rh = ci.height;
++	visible = ci.mapped && pi.mapped;
++}
++
++/* viewport and projection for the current rectangle (the engine's y axis starts at the bottom) */
++static void set_view(void)
++{
++	int x1 = rx, x2 = rx + rw - 1, y1 = 191 - (ry + rh - 1), y2 = 191 - ry;
++	double h;
++
++	if (x1 < 0) x1 = 0;
++	if (x2 > 255) x2 = 255;
++	if (y1 < 0) y1 = 0;
++	if (y2 > 191) y2 = 191;
++	if (x2 <= x1 || y2 <= y1)
++		return;
++	h = (double)rh / (double)rw;
++	W(GX_VIEWPORT, x1 | (y1 << 8) | (x2 << 16) | (y2 << 24));
++	W(MTX_MODE, 0);
++	W(MTX_IDENTITY, 0);
++	frustum(-1.0, 1.0, -h, h, 5.0, 60.0);
++	flush_cmds();
++}
++
++int main(int argc, char **argv)
++{
++	GR_EVENT ev;
++	static struct gearmesh g[3];
++	int running = 1, dirty = 1;
++	double angle = 0.0, view_rotx = 20.0, view_roty = 30.0;
++
++	fb = open("/dev/fb0", O_RDWR);
++	if (fb < 0) {
++		perror("dsgl3d: /dev/fb0");
++		return 1;
++	}
++	if (GrOpen() < 0) {
++		fprintf(stderr, "dsgl3d: cannot connect to Nano-X\n");
++		return 1;
++	}
++	if (ioctl(fb, NDSFB_GX_SETUP, 1) < 0) {
++		perror("dsgl3d: NDSFB_GX_SETUP");
++		return 1;
++	}
++	gear(&g[0], 1.0, 4.0, 1.0, 20, 0.7);
++	gear(&g[1], 0.5, 2.0, 2.0, 10, 0.7);
++	gear(&g[2], 1.3, 2.0, 0.5, 10, 0.7);
++	g[0].color = RGB15(25, 3, 0);
++	g[1].color = RGB15(0, 25, 6);
++	g[2].color = RGB15(6, 6, 31);
++
++	win = GrNewWindowEx(GR_WM_PROPS_APPFRAME | GR_WM_PROPS_CAPTION | GR_WM_PROPS_CLOSEBOX, "3D gears",
++			    GR_ROOT_WINDOW_ID, 30, 8, 160, 120, KEYCOLOR);
++	GrSelectEvents(win, GR_EVENT_MASK_EXPOSURE | GR_EVENT_MASK_KEY_DOWN | GR_EVENT_MASK_CLOSE_REQ);
++	GrSelectEvents(GR_ROOT_WINDOW_ID, GR_EVENT_MASK_CHLD_UPDATE);	/* the window manager moved it */
++	GrMapWindow(win);
++
++	W(GX_CONTROL, 0);
++	W(GX_CLEARCOLOR, 0);		/* transparent rear plane */
++	W(GX_CLEARDEPTH, 0x7fff);
++	flush_cmds();
++
++	while (running) {
++		/* events: a round trip to the server, but only one per frame */
++		GrCheckNextEvent(&ev);
++		switch (ev.type) {
++		case GR_EVENT_TYPE_CLOSE_REQ:
++			running = 0;
++			break;
++		case GR_EVENT_TYPE_KEY_DOWN:
++			switch (ev.keystroke.ch) {
++			case MWKEY_ESCAPE:
++			case 'q':
++				running = 0;
++				break;
++			case MWKEY_LEFT:
++				view_roty += 5.0;
++				break;
++			case MWKEY_RIGHT:
++				view_roty -= 5.0;
++				break;
++			case MWKEY_UP:
++				view_rotx += 5.0;
++				break;
++			case MWKEY_DOWN:
++				view_rotx -= 5.0;
++				break;
++			}
++			break;
++		case GR_EVENT_TYPE_EXPOSURE:
++		case GR_EVENT_TYPE_CHLD_UPDATE:
++			dirty = 1;
++			break;
++		}
++		if (dirty) {
++			read_rect();
++			set_view();
++			dirty = 0;
++		}
++		if (!visible) {		/* minimised: do not keep the engine busy */
++			usleep(100000);
++			dirty = 1;
++			continue;
++		}
++
++		W(MTX_MODE, 2);
++		W(MTX_IDENTITY, 0);
++		W(GX_LIGHTCOL, (0 << 30) | RGB15(31, 31, 31));
++		W(GX_LIGHTVEC, (0u << 30) | pack_dir(-5.0, -5.0, -10.0));
++		W(GX_POLYATTR, 1 | (3 << 6) | (31 << 16));
++		translate(0.0, 0.0, -45.0);
++		rotate(1, view_rotx);
++		rotate(2, view_roty);
++
++		W(MTX_PUSH, 0);
++		translate(-3.0, -2.0, 0.0);
++		rotate(3, angle);
++		draw_mesh(&g[0]);
++		W(MTX_POP, 1);
++
++		W(MTX_PUSH, 0);
++		translate(3.1, -2.0, 0.0);
++		rotate(3, -2.0 * angle - 9.0);
++		draw_mesh(&g[1]);
++		W(MTX_POP, 1);
++
++		W(MTX_PUSH, 0);
++		translate(-3.1, 4.2, 0.0);
++		rotate(3, -2.0 * angle - 25.0);
++		draw_mesh(&g[2]);
++		W(MTX_POP, 1);
++
++		W(GX_SWAP, 0);
++		flush_cmds();
++		angle += 2.0;
++	}
++	ioctl(fb, NDSFB_GX_SETUP, 0);
++	GrClose();
++	return 0;
++}
+diff --git a/user/microwin/src/include/device.h b/user/microwin/src/include/device.h
+index 5954568ec..c7ab71e43 100644
+--- a/user/microwin/src/include/device.h
++++ b/user/microwin/src/include/device.h
+@@ -484,8 +484,14 @@ typedef struct {
+ 
+ /* create 16 bit 5/5/5 format pixel from RGB triplet */
+ #if NDSDRIVER
++/*
++ * Nintendo DS: bit 15 set = opaque, bit 15 clear = transparent (the hardware 3D layer behind the frame buffer
++ * shows through). Every colour is opaque except the colour key magenta (255, 0, 255), which becomes pixel 0:
++ * a 3D application paints its window with it.
++ */
+ #define RGB2PIXEL555(r,g,b)	\
+-	((1 << 15) | (((b) & 0xf8) << 7) | (((g) & 0xf8) << 2) | (((r) & 0xf8) >> 3))
++	((((r) & 0xff) == 0xff && ((g) & 0xff) == 0 && ((b) & 0xff) == 0xff) ? 0 : \
++	 ((1 << 15) | (((b) & 0xf8) << 7) | (((g) & 0xf8) << 2) | (((r) & 0xf8) >> 3)))
+ #else
+ #define RGB2PIXEL555(r,g,b)	\
+ 	((((r) & 0xf8) << 7) | (((g) & 0xf8) << 2) | (((b) & 0xf8) >> 3))
+@@ -517,7 +523,8 @@ typedef struct {
+ /* In this format, alpha is ignored. */
+ #if NDSDRIVER
+ #define COLOR2PIXEL555(c)	\
+-	((((c) & 0xf8) >> 3) | (((c) & 0xf800) >> 6) | (((c) & 0xf80000) >> 9) | (1 << 15))
++	((((c) & 0xffffff) == 0xff00ff) ? 0 : \
++	 ((((c) & 0xf8) >> 3) | (((c) & 0xf800) >> 6) | (((c) & 0xf80000) >> 9) | (1 << 15)))
+ #else
+ #define COLOR2PIXEL555(c)	\
+ 	((((c) & 0xf8) << 7) | (((c) & 0xf800) >> 6) | (((c) & 0xf80000) >> 19))
+diff --git a/vendors/Nintendo/DSI/Makefile b/vendors/Nintendo/DSI/Makefile
+index 8f45c7312..c6ba772f8 100644
+--- a/vendors/Nintendo/DSI/Makefile
++++ b/vendors/Nintendo/DSI/Makefile
+@@ -160,6 +160,7 @@ finishrom:
+ 	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/dsnotes $(ROMFSDIR)/boot/dsnotes
+ 	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/dsfiles $(ROMFSDIR)/boot/dsfiles
+ 	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/dsbench $(ROMFSDIR)/boot/dsbench
++	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/dsgl3d $(ROMFSDIR)/boot/dsgl3d
+ 	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/dsgears $(ROMFSDIR)/boot/dsgears
+ 	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/dsgx $(ROMFSDIR)/boot/dsgx
+ 	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/madplay $(ROMFSDIR)/$(OPTDIR)
+-- 
+2.56.0
+
