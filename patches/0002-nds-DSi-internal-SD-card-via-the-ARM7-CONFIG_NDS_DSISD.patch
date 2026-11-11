@@ -1,0 +1,910 @@
+From a5362618244c258f423e39b5be2d4afb9a1bcc86 Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <noreply@example.invalid>
+Date: Tue, 10 Nov 2026 18:18:33 -0600
+Subject: [PATCH] nds: DSi internal SD card via the ARM7 (CONFIG_NDS_DSISD),
+ read-only by default
+
+ARM7: polling SD-card driver derived from profi200/dsi_sdmmc (MIT), reached through a
+shared request block and two new commands on the FIFO_FIRMWARE channel. ARM9: the DLDI
+block device (/dev/dldi) gets a DSISD backend instead of calling the DLDI blob.
+Writes are compiled out unless CONFIG_NDS_DSISD_WRITE. ARM7 IRQ stack 256 B -> 1 KB.
+---
+ linux-2.6.x/arch/arm/mach-nds/Kconfig        |  20 +
+ linux-2.6.x/arch/arm/mach-nds/Makefile       |   3 +-
+ linux-2.6.x/arch/arm/mach-nds/arm7/arm7.lds  |   2 +-
+ linux-2.6.x/arch/arm/mach-nds/arm7/main.c    |  14 +
+ linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c   | 501 +++++++++++++++++++
+ linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.h   |   9 +
+ linux-2.6.x/drivers/block/dldi_c.c           | 115 +++++
+ linux-2.6.x/include/asm-arm/arch-nds/dsisd.h |  45 ++
+ linux-2.6.x/include/asm-arm/arch-nds/fifo.h  |   8 +-
+ vendors/Nintendo/DSI/config.linux-2.6.x      |   2 +
+ 10 files changed, 716 insertions(+), 3 deletions(-)
+ create mode 100644 linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c
+ create mode 100644 linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.h
+ create mode 100644 linux-2.6.x/include/asm-arm/arch-nds/dsisd.h
+
+diff --git a/linux-2.6.x/arch/arm/mach-nds/Kconfig b/linux-2.6.x/arch/arm/mach-nds/Kconfig
+index d1352fbe7..097f1eccb 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/Kconfig
++++ b/linux-2.6.x/arch/arm/mach-nds/Kconfig
+@@ -14,6 +14,26 @@ config NDS_DSI
+ 	  A kernel built this way does NOT boot on a DS or a DSi in DS mode.
+ 	  If unsure, say N.
+ 
++config NDS_DSISD
++	bool "DSi internal SD card (replaces the DLDI card driver)"
++	depends on ARCH_NDS && NDS_DSI && NDS_DLDI
++	default n
++	help
++	  Use the DSi's internal SD slot, through the ARM7, as the DLDI block
++	  device (/dev/dldi). The stock DLDI driver in the .nds only supports
++	  flash cards, not the DSi's SD slot. Needs a DSi in DSi mode.
++	  If unsure, say N.
++
++config NDS_DSISD_WRITE
++	bool "Allow writing to the DSi SD card"
++	depends on NDS_DSISD
++	default n
++	help
++	  Without this the card is read-only (writes fail with an I/O error),
++	  which is the safe default while the driver is young. A bug in a
++	  write path can corrupt the card's FAT, so use a spare or backed-up
++	  card when you say Y.
++
+ config NDS_TEXT_CONSOLE
+ 	bool "Nintendo DS text console"
+ 	depends on ARCH_NDS
+diff --git a/linux-2.6.x/arch/arm/mach-nds/Makefile b/linux-2.6.x/arch/arm/mach-nds/Makefile
+index 4b15022b8..c08595ad7 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/Makefile
++++ b/linux-2.6.x/arch/arm/mach-nds/Makefile
+@@ -23,6 +23,7 @@ extra-y += arm7/sound.o
+ extra-y += arm7/microphone.o
+ extra-y += arm7/wifi.o
+ extra-y += arm7/divide.o
++extra-y += arm7/sdmmc.o
+ extra-y += arm7.bin
+ 
+ # this does not seem to have any effect (why?):
+@@ -34,7 +35,7 @@ $(obj)/arm7.bin: $(obj)/arm7.elf
+ 	$(OBJCOPY) -O binary $(obj)/arm7.elf $(obj)/arm7.bin
+ 	rm -f $(obj)/head.o
+ 
+-arm7obj = $(obj)/arm7/head.o $(obj)/arm7/main.o $(obj)/arm7/time.o $(obj)/arm7/spi.o $(obj)/arm7/sound.o $(obj)/arm7/microphone.o $(obj)/arm7/wifi.o $(obj)/arm7/divide.o
++arm7obj = $(obj)/arm7/head.o $(obj)/arm7/main.o $(obj)/arm7/time.o $(obj)/arm7/spi.o $(obj)/arm7/sound.o $(obj)/arm7/microphone.o $(obj)/arm7/wifi.o $(obj)/arm7/divide.o $(obj)/arm7/sdmmc.o
+ 
+ $(obj)/arm7.elf: $(arm7obj) $(src)/arm7/arm7.lds
+ 	$(LD) -nostartfiles -nostdlib -o $(obj)/arm7.elf $(arm7obj) -T $(src)/arm7/arm7.lds
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/arm7.lds b/linux-2.6.x/arch/arm/mach-nds/arm7/arm7.lds
+index 2ee3d4451..d324185db 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/arm7/arm7.lds
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/arm7.lds
+@@ -3,7 +3,7 @@ ENTRY(stext)
+ __iwram_start	=	0x03800000;
+ __iwram_end	=	0x0380FFF0;
+ __sp_irq	=	__iwram_end - 0x60;
+-__sp_usr	=	__sp_irq    - 0x100;
++__sp_usr	=	__sp_irq    - 0x400;
+ 
+ SECTIONS
+ {
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/main.c b/linux-2.6.x/arch/arm/mach-nds/arm7/main.c
+index e4deafd0b..288a5aa6b 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/arm7/main.c
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/main.c
+@@ -5,18 +5,21 @@
+ #include "asm/arch/fifo.h"
+ #include "asm/arch/wifi.h"
+ #include "asm/arch/firmware.h"
++#include "asm/arch/dsisd.h"
+ 
+ #include "microphone.h"
+ #include "sound.h"
+ #include "arm7.h"
+ #include "spi.h"
+ #include "wifi.h"
++#include "sdmmc.h"
+ #include "time.h"
+ 
+ static s32 xscale, yscale;
+ static s32 xoffset, yoffset;
+ 
+ static struct nds_firmware_block *firmware_block;
++static struct nds_sd_block *sd_block;
+ 
+ int isDSPhat(void)
+ {
+@@ -52,6 +55,17 @@ static void recieveFIFOCommand(void)
+ 				    nds_fifo_send(FIFO_FIRMWARE_CMD(
+ 					FIFO_FIRMWARE_CMD_READ, 0));
+ 				break;
++			case FIFO_FIRMWARE_CMD_SD_ADDRESS:
++				sd_block = (struct nds_sd_block *)
++				    FIFO_FIRMWARE_DECODE_ADDRESS(
++					FIFO_FIRMWARE_GET_DATA(data));
++				break;
++			case FIFO_FIRMWARE_CMD_SD_REQUEST:
++				if (sd_block)
++					nds_sd_request(sd_block);
++				nds_fifo_send(FIFO_FIRMWARE_CMD(
++				    FIFO_FIRMWARE_CMD_SD_REQUEST, 0));
++				break;
+ 			}
+ 			break;
+ 		case FIFO_POWER:
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c b/linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c
+new file mode 100644
+index 000000000..3245f6b13
+--- /dev/null
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c
+@@ -0,0 +1,501 @@
++/*
++ * DSi internal SD card driver for the DSLinux ARM7 program.
++ *
++ * Polling, SD cards only, CPU transfers (no DMA, no interrupts). It runs from
++ * the ARM7's FIFO interrupt handler, so it keeps its stack use small and gives
++ * up after bounded loops instead of hanging the ARM7.
++ *
++ * Derived from profi200's "dsi_sdmmc" (https://github.com/profi200/dsi_sdmmc,
++ * arm7/source/tmio.c and arm7/source/mmc/sdmmc.c), reduced to the SD card
++ * init and sector read/write path and changed from interrupt driven to polling.
++ *
++ * SPDX-License-Identifier: MIT
++ * Copyright (c) 2023 profi200 (original code)
++ * Copyright (c) 2026 DSLinuxDSi project (port to the DSLinux ARM7)
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a copy
++ * of this software and associated documentation files (the "Software"), to deal
++ * in the Software without restriction, including without limitation the rights
++ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++ * copies of the Software, and to permit persons to whom the Software is
++ * furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be included in
++ * all copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
++ * SOFTWARE.
++ */
++
++#include "linux/config.h"
++#include "asm/types.h"
++#include "asm/arch/dsisd.h"
++
++#include "sdmmc.h"
++
++typedef volatile u16 vu16;
++typedef volatile u32 vu32;
++
++#define SCFG_EXT7	(*(vu32 *)0x04004008)
++
++/* TMIO controller 1 (SD card port 0), register offsets from the base */
++#define TMIO_BASE	0x04004800
++#define R16(o)		(*(vu16 *)(TMIO_BASE + (o)))
++#define R32(o)		(*(vu32 *)(TMIO_BASE + (o)))
++#define SD_CMD		0x000
++#define SD_PORTSEL	0x002
++#define SD_ARG		0x004
++#define SD_STOP		0x008
++#define SD_BLOCKCOUNT	0x00A
++#define SD_RESP(i)	(0x00C + 4 * (i))
++#define SD_STATUS	0x01C
++#define SD_STATUS_MASK	0x020
++#define SD_CLK_CTRL	0x024
++#define SD_BLOCKLEN	0x026
++#define SD_OPTION	0x028
++#define SDIO_MODE	0x034
++#define SDIO_STATUS_MASK 0x038
++#define DMA_EXT_MODE	0x0D8
++#define SOFT_RST	0x0E0
++#define REVISION	0x0E2
++#define EXT_SDIO_IRQ	0x0F4
++#define EXT_CDET_MASK	0x0FC
++#define EXT_CDET_DAT3_MASK 0x0FE
++#define FIFO32_CNT	0x100
++#define SD_BLOCKLEN32	0x104
++#define SD_BLOCKCOUNT32	0x108
++#define SD_FIFO32	0x10C
++
++#define TMIO_HCLK	33513982u
++
++/* command flags */
++#define CMD_ACMD	(1u << 6)
++#define CMD_RESP_NONE	(3u << 8)
++#define CMD_RESP_R1	(4u << 8)
++#define CMD_RESP_R1B	(5u << 8)
++#define CMD_RESP_R2	(6u << 8)
++#define CMD_RESP_R3	(7u << 8)
++#define CMD_RESP_MASK	CMD_RESP_R3
++#define CMD_DATA_EN	(1u << 11)
++#define CMD_DATA_R	(1u << 12)
++#define CMD_MULTI_DATA	(1u << 13)
++
++#define STOP_AUTO_STOP	(1u << 8)
++
++#define STATUS_RESP_END	(1u << 0)
++#define STATUS_DATA_END	(1u << 2)
++#define STATUS_DETECT	(1u << 5)
++#define STATUS_NO_WRPROT (1u << 7)
++#define STATUS_ERR_CMD_TIMEOUT (1u << 22)
++#define STATUS_SD_BUSY	(1u << 23)	/* 0 = card holds DAT0 low (busy) */
++#define STATUS_CMD_BUSY	(1u << 30)
++#define STATUS_MASK_DEFAULT ((1u << 27) | (1u << 25) | (1u << 24) | (1u << 9) | (1u << 8))
++#define STATUS_MASK_ALL	0xFFFFFFFFu
++
++#define SD_CLK_EN	(1u << 8)
++#define SD_CLK_PWR_SAVE	(1u << 9)
++
++#define OPTION_UNK14	(1u << 14)
++#define OPTION_BUS_WIDTH1 (1u << 15)
++#define OPTION_DEFAULT_TIMINGS ((11u << 4) | 8u)
++
++#define FIFO32_EN	(1u << 1)
++#define FIFO32_FULL	(1u << 8)
++#define FIFO32_NOT_EMPTY (1u << 9)
++#define FIFO32_CLEAR	(1u << 10)
++
++/* SD commands (index only; response/data flags are added at the call) */
++#define SD_GO_IDLE	0
++#define SD_ALL_SEND_CID	2
++#define SD_SEND_REL_ADDR 3
++#define SD_SELECT_CARD	7
++#define SD_SEND_IF_COND	8
++#define SD_SEND_CSD	9
++#define SD_READ_SINGLE	17
++#define SD_READ_MULTI	18
++#define SD_WRITE_SINGLE	24
++#define SD_WRITE_MULTI	25
++#define SD_APP_CMD	55
++
++/* The status bits that mean "this command failed" (STATUS_MASK_ERR upstream):
++ * ILL_ACC(31), CMD_TIMEOUT(22), TX_UNDERF(21), RX_OVERF(20), DATA_TIMEOUT(19),
++ * STOP_BIT(18), CRC(17), CMD_IDX(16). Bit 23 is the busy line, not an error. */
++#define ERR_BITS	((1u << 31) | (1u << 22) | (1u << 21) | (1u << 20) | \
++			 (1u << 19) | (1u << 18) | (1u << 17) | (1u << 16))
++
++#define SD_IF_COND_ARG	((1u << 8) | 0xAAu)	/* 2.7-3.6 V, check pattern */
++#define OCR_3_2_3_3V	(1u << 20)
++#define OCR_CCS		(1u << 30)
++#define OCR_READY	(1u << 31)
++#define ACMD41_HCS	(1u << 30)
++
++/* failing init step, reported in info[2] on NDS_SD_ERR_INIT */
++#define STEP_CMD0	1
++#define STEP_CMD8	2
++#define STEP_CMD8_ECHO	3
++#define STEP_ACMD41	4
++#define STEP_ACMD41_TMO	5
++#define STEP_CMD2	6
++#define STEP_CMD3	7
++#define STEP_CMD9	8
++#define STEP_CMD7	9
++#define STEP_ACMD42	10
++#define STEP_ACMD6	11
++#define STEP_VOLT	12
++
++static u32 g_status;
++static u32 g_resp[4];
++static u16 g_clk_ctrl;
++static u16 g_option;
++static u32 g_rca;
++static int g_inited;	/* 0 = no, 1 = SDSC (byte addressing), 2 = SDHC */
++static u32 g_sectors;
++
++static void delay_loops(u32 n)
++{
++	volatile u32 i;
++	for (i = 0; i < n; i++)
++		;
++}
++
++/* roughly n milliseconds at 33.5 MHz; it only needs to be "at least about" */
++#define DELAY_MS(n)	delay_loops(4000u * (n))
++
++static u16 clk_div(u32 clk)
++{
++	u32 shift = 1;
++	while (clk < (TMIO_HCLK >> shift))
++		++shift;
++	return (u16)((1u << shift) >> 2);
++}
++
++/* Same effect as upstream's interrupt handler: collect status, acknowledge */
++static void poll_status(void)
++{
++	g_status |= R32(SD_STATUS);
++	R32(SD_STATUS) = STATUS_CMD_BUSY;	/* never acknowledge CMD_BUSY */
++}
++
++static void set_port(void)
++{
++	R16(SD_PORTSEL) = 0;
++	R16(SD_CLK_CTRL) = g_clk_ctrl;
++	R16(SD_BLOCKLEN) = 512;
++	R16(SD_OPTION) = g_option;
++	R16(SD_BLOCKLEN32) = 512;
++}
++
++static void get_response(u16 cmd)
++{
++	if ((cmd & CMD_RESP_MASK) != CMD_RESP_R2) {
++		g_resp[0] = R32(SD_RESP(0));
++	} else {
++		u32 r0 = R32(SD_RESP(0)), r1 = R32(SD_RESP(1));
++		u32 r2 = R32(SD_RESP(2)), r3 = R32(SD_RESP(3));
++		g_resp[0] = r3 << 8 | r2 >> 24;
++		g_resp[1] = r2 << 8 | r1 >> 24;
++		g_resp[2] = r1 << 8 | r0 >> 24;
++		g_resp[3] = r0 << 8;
++	}
++}
++
++/* Returns 0 on success, else the TMIO status bits (error bits set).
++ * A software timeout reports bit 0 set in the low byte (0xFFFFFFFF). */
++static u32 tmio_cmd(u16 cmd, u32 arg, u16 blocks, void *buf)
++{
++	u32 cap;
++	u32 *p = (u32 *)buf;
++
++	g_status = 0;
++	set_port();
++	R16(SD_BLOCKCOUNT) = blocks;
++	R16(SD_STOP) = STOP_AUTO_STOP;
++	R32(SD_ARG) = arg;
++	R16(FIFO32_CNT) = FIFO32_CLEAR | FIFO32_EN;
++	R16(SD_CMD) = (blocks > 1) ? (CMD_MULTI_DATA | cmd) : cmd;
++
++	for (cap = 0; cap < 3000000; cap++) {
++		poll_status();
++		if (g_status & STATUS_RESP_END)
++			break;
++	}
++	if (cap == 3000000)
++		return 0xFFFFFFFFu;
++	get_response(cmd);
++
++	if (cmd & CMD_DATA_EN) {
++		u32 left = blocks;
++		u32 words, i;
++
++		cap = 0;
++		while (!(g_status & ERR_BITS) && left > 0) {
++			if (++cap > 6000000)
++				return 0xFFFFFFFFu;
++			poll_status();
++			if (cmd & CMD_DATA_R) {
++				if (R16(FIFO32_CNT) & FIFO32_FULL) {
++					for (i = 0, words = 128; i < words; i++)
++						*p++ = R32(SD_FIFO32);
++					left--;
++					cap = 0;
++				}
++			} else {
++				if (!(R16(FIFO32_CNT) & FIFO32_NOT_EMPTY)) {
++					for (i = 0, words = 128; i < words; i++)
++						R32(SD_FIFO32) = *p++;
++					left--;
++					cap = 0;
++				}
++			}
++		}
++		for (cap = 0; cap < 6000000; cap++) {
++			poll_status();
++			if (g_status & STATUS_DATA_END)
++				break;
++		}
++		if (cap == 6000000)
++			return 0xFFFFFFFFu;
++	}
++	return g_status & ERR_BITS;
++}
++
++static u32 app_cmd(u16 cmd, u32 arg, u32 rca)
++{
++	u32 res = tmio_cmd(CMD_RESP_R1 | SD_APP_CMD, rca, 0, 0);
++	if (res == 0)
++		res = tmio_cmd(cmd, arg, 0, 0);
++	return res;
++}
++
++static u32 extract_bits(const u32 *resp, u32 start, u32 size)
++{
++	u32 mask = (size < 32 ? 1u << size : 0u) - 1;
++	u32 off = 3 - (start / 32);
++	u32 shift = start & 31u;
++	u32 res = resp[off] >> shift;
++
++	if (size + shift > 32)
++		res |= resp[off - 1] << ((32u - shift) & 31u);
++	return res & mask;
++}
++
++static void tmio_reset(void)
++{
++	R16(FIFO32_CNT) = FIFO32_CLEAR | FIFO32_EN;
++	R16(SD_BLOCKLEN32) = 512;
++	R16(SD_BLOCKCOUNT32) = 1;
++	R16(DMA_EXT_MODE) = (1u << 1);
++	R16(SOFT_RST) = 0;
++	R16(SOFT_RST) = 1;
++	R16(SD_PORTSEL) = 0;
++	R16(SD_BLOCKCOUNT) = 1;
++	R32(SD_STATUS_MASK) = STATUS_MASK_DEFAULT;
++	R16(SD_CLK_CTRL) = clk_div(400000);
++	R16(SD_BLOCKLEN) = 512;
++	R16(SD_OPTION) = OPTION_BUS_WIDTH1 | OPTION_UNK14 | OPTION_DEFAULT_TIMINGS;
++	R16(EXT_CDET_MASK) = 0xFFFF;
++	R16(EXT_CDET_DAT3_MASK) = 0xFFFF;
++	R16(SDIO_MODE) = 0;
++	R16(SDIO_STATUS_MASK) = 0xFFFF;
++	R16(EXT_SDIO_IRQ) = (7u << 8);
++}
++
++static u32 card_init(struct nds_sd_block *b)
++{
++	u32 res, tries, ocr, op_arg;
++	u32 ccs = 0;
++
++	g_inited = 0;
++	b->info[0] = SCFG_EXT7;
++	b->info[1] = R16(REVISION);
++
++	tmio_reset();
++
++	/* wait for the card detect timer (about 8 ms after power-up) */
++	for (tries = 0; tries < 100; tries++) {
++		if (R32(SD_STATUS) & STATUS_DETECT)
++			break;
++		DELAY_MS(1);
++	}
++	if (!(R32(SD_STATUS) & STATUS_DETECT)) {
++		b->info[2] = R32(SD_STATUS);
++		return NDS_SD_ERR_NOCARD;
++	}
++
++	/* clock on, wait for 74 clocks at 261 kHz */
++	g_clk_ctrl = SD_CLK_EN | clk_div(400000);
++	g_option = OPTION_BUS_WIDTH1 | OPTION_UNK14 | OPTION_DEFAULT_TIMINGS;
++	set_port();
++	DELAY_MS(2);
++
++	if (tmio_cmd(CMD_RESP_NONE | SD_GO_IDLE, 0, 0, 0)) {
++		b->info[2] = STEP_CMD0;
++		return NDS_SD_ERR_INIT;
++	}
++
++	res = tmio_cmd(CMD_RESP_R1 | SD_SEND_IF_COND, SD_IF_COND_ARG, 0, 0);
++	if (res == 0) {
++		if (g_resp[0] != SD_IF_COND_ARG) {
++			b->info[2] = STEP_CMD8_ECHO;
++			return NDS_SD_ERR_INIT;
++		}
++	} else if (res != STATUS_ERR_CMD_TIMEOUT) {
++		b->info[2] = STEP_CMD8;
++		return NDS_SD_ERR_INIT;
++	}
++
++	/* controller specific trick from upstream: a v1 card (CMD8 timed out)
++	 * gets an ACMD41 without the HCS bit */
++	op_arg = OCR_3_2_3_3V | ((res << 8) ^ ACMD41_HCS);
++	res = app_cmd(CMD_RESP_R3 | CMD_ACMD | 41, op_arg, 0);
++	if (res != 0) {
++		b->info[2] = STEP_ACMD41;
++		return NDS_SD_ERR_INIT;
++	}
++	tries = 200;
++	while (1) {
++		ocr = g_resp[0];
++		if (!--tries || (ocr & OCR_READY))
++			break;
++		DELAY_MS(5);
++		res = app_cmd(CMD_RESP_R3 | CMD_ACMD | 41, op_arg, 0);
++		if (res != 0) {
++			b->info[2] = STEP_ACMD41;
++			return NDS_SD_ERR_INIT;
++		}
++	}
++	if (tries == 0) {
++		b->info[2] = STEP_ACMD41_TMO;
++		return NDS_SD_ERR_INIT;
++	}
++	if (!(ocr & OCR_3_2_3_3V)) {
++		b->info[2] = STEP_VOLT;
++		return NDS_SD_ERR_INIT;
++	}
++	ccs = (ocr & OCR_CCS) ? 1 : 0;
++
++	/* identification clock */
++	g_clk_ctrl = SD_CLK_PWR_SAVE | SD_CLK_EN | clk_div(400000);
++
++	if (tmio_cmd(CMD_RESP_R2 | SD_ALL_SEND_CID, 0, 0, 0)) {
++		b->info[2] = STEP_CMD2;
++		return NDS_SD_ERR_INIT;
++	}
++	if (tmio_cmd(CMD_RESP_R1 | SD_SEND_REL_ADDR, 0, 0, 0)) {
++		b->info[2] = STEP_CMD3;
++		return NDS_SD_ERR_INIT;
++	}
++	g_rca = (g_resp[0] >> 16) << 16;
++
++	/* data clock, as upstream: <= 20 MHz */
++	g_clk_ctrl = SD_CLK_PWR_SAVE | SD_CLK_EN | clk_div(20000000);
++
++	if (tmio_cmd(CMD_RESP_R2 | SD_SEND_CSD, g_rca, 0, 0)) {
++		b->info[2] = STEP_CMD9;
++		return NDS_SD_ERR_INIT;
++	}
++	{
++		u32 structure = extract_bits(g_resp, 126, 2);
++
++		if (structure == 0) {
++			u32 read_bl_len = extract_bits(g_resp, 80, 4);
++			u32 c_size = extract_bits(g_resp, 62, 12);
++			u32 c_size_mult = extract_bits(g_resp, 47, 3);
++
++			g_sectors = (c_size + 1) <<
++				(c_size_mult + 2 + read_bl_len - 9);
++		} else {
++			g_sectors = (extract_bits(g_resp, 48, 28) + 1) << 10;
++		}
++	}
++
++	if (tmio_cmd(CMD_RESP_R1B | SD_SELECT_CARD, g_rca, 0, 0)) {
++		b->info[2] = STEP_CMD7;
++		return NDS_SD_ERR_INIT;
++	}
++
++	/* remove the DAT3 pull-up, then 4 bit bus */
++	if (app_cmd(CMD_RESP_R1 | CMD_ACMD | 42, 0, g_rca)) {
++		b->info[2] = STEP_ACMD42;
++		return NDS_SD_ERR_INIT;
++	}
++	if (app_cmd(CMD_RESP_R1 | CMD_ACMD | 6, 2, g_rca)) {
++		b->info[2] = STEP_ACMD6;
++		return NDS_SD_ERR_INIT;
++	}
++	g_option = OPTION_UNK14 | OPTION_DEFAULT_TIMINGS;	/* 4 bit */
++
++	g_inited = ccs ? 2 : 1;
++	b->sectors = g_sectors;
++	b->info[2] = g_inited;
++	return NDS_SD_OK;
++}
++
++static void wait_not_busy(void)
++{
++	u32 cap;
++
++	for (cap = 0; cap < 3000000; cap++)
++		if (R32(SD_STATUS) & STATUS_SD_BUSY)
++			break;
++}
++
++/* Handle one request block. The caller (main.c) sends the reply FIFO word. */
++void nds_sd_request(struct nds_sd_block *b)
++{
++	u32 res;
++	u32 sect;
++	u16 cmd;
++
++	switch (b->cmd) {
++	case NDS_SD_CMD_INIT:
++		b->result = card_init(b);
++		return;
++
++	case NDS_SD_CMD_READ:
++	case NDS_SD_CMD_WRITE:
++		if (!g_inited) {
++			b->result = NDS_SD_ERR_NOINIT;
++			return;
++		}
++		if (b->count == 0 || b->count > NDS_SD_MAX_SECTORS) {
++			b->result = NDS_SD_ERR_PARAM;
++			return;
++		}
++		sect = (g_inited == 1) ? b->sector * 512 : b->sector;
++		if (b->cmd == NDS_SD_CMD_READ) {
++			cmd = CMD_RESP_R1 | CMD_DATA_EN | CMD_DATA_R |
++				(b->count == 1 ? SD_READ_SINGLE : SD_READ_MULTI);
++		} else {
++#ifdef CONFIG_NDS_DSISD_WRITE
++			if (!(R32(SD_STATUS) & STATUS_NO_WRPROT)) {
++				b->result = NDS_SD_ERR_WRPROT;
++				return;
++			}
++			cmd = CMD_RESP_R1 | CMD_DATA_EN |
++				(b->count == 1 ? SD_WRITE_SINGLE : SD_WRITE_MULTI);
++#else
++			b->result = NDS_SD_ERR_WRPROT;	/* read-only build */
++			return;
++#endif
++		}
++		res = tmio_cmd(cmd, sect, (u16)b->count, b->data);
++		if (b->cmd == NDS_SD_CMD_WRITE)
++			wait_not_busy();
++		if (res) {
++			b->info[0] = res;
++			b->result = NDS_SD_ERR_RW;
++		} else {
++			b->result = NDS_SD_OK;
++		}
++		return;
++
++	default:
++		b->result = NDS_SD_ERR_PARAM;
++	}
++}
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.h b/linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.h
+new file mode 100644
+index 000000000..2dba5893d
+--- /dev/null
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.h
+@@ -0,0 +1,9 @@
++#ifndef _mach_nds_arm7_sdmmc_h_
++#define _mach_nds_arm7_sdmmc_h_
++
++struct nds_sd_block;
++
++/* Process one DSi SD request (init, read or write sectors); sets b->result. */
++extern void nds_sd_request(struct nds_sd_block *b);
++
++#endif
+diff --git a/linux-2.6.x/drivers/block/dldi_c.c b/linux-2.6.x/drivers/block/dldi_c.c
+index 9a5eba9ce..e55a588a1 100644
+--- a/linux-2.6.x/drivers/block/dldi_c.c
++++ b/linux-2.6.x/drivers/block/dldi_c.c
+@@ -23,6 +23,13 @@
+ #include <linux/bio.h>
+ #include <linux/workqueue.h>
+ 
++#ifdef CONFIG_NDS_DSISD
++#include <linux/wait.h>
++#include <asm/cacheflush.h>
++#include <asm/arch/fifo.h>
++#include <asm/arch/dsisd.h>
++#endif
++
+ MODULE_LICENSE("GPL");
+ 
+ /* Interface to dldi */
+@@ -93,6 +100,97 @@ struct dldi_dev {
+ 
+ static struct dldi_dev *Devices = NULL;
+ 
++#ifdef CONFIG_NDS_DSISD
++/*
++ * DSi internal SD card: instead of calling the DLDI driver on the ARM9, ask
++ * the ARM7 (which owns the SD controller) through a shared request block.
++ */
++static struct nds_sd_block sd_block;	/* 32 byte aligned, see dsisd.h */
++static DECLARE_WAIT_QUEUE_HEAD(sd_wait);
++static volatile int sd_done;
++static int dldi_xfer_err;
++
++static void sd_fifo_cb(u8 cmd)
++{
++	if (cmd == FIFO_FIRMWARE_CMD_SD_REQUEST) {
++		sd_done = 1;
++		wake_up(&sd_wait);
++	}
++}
++
++static struct fifo_cb sd_cb = {
++	.type = FIFO_FIRMWARE,
++	.handler.firmware_handler = sd_fifo_cb
++};
++
++/* Returns the ARM7's result code (0 = ok), or -1 if it did not answer. */
++static int sd_request(unsigned int cmd, unsigned int sector, unsigned int count)
++{
++	sd_block.cmd = cmd;
++	sd_block.sector = sector;
++	sd_block.count = count;
++	sd_block.result = 0xffffffff;
++	sd_done = 0;
++	/* write back our data, and drop stale lines so we see the ARM7's data */
++	dmac_flush_range((unsigned long)&sd_block,
++			 (unsigned long)&sd_block + sizeof(sd_block));
++	nds_fifo_send(FIFO_FIRMWARE_CMD(FIFO_FIRMWARE_CMD_SD_REQUEST, 0));
++	if (!wait_event_timeout(sd_wait, sd_done, 10 * HZ)) {
++		printk(KERN_ERR "dsisd: ARM7 did not answer (cmd %u)\n", cmd);
++		return -1;
++	}
++	dmac_flush_range((unsigned long)&sd_block,
++			 (unsigned long)&sd_block + sizeof(sd_block));
++	return (int)sd_block.result;
++}
++
++static int dsisd_start(void)
++{
++	int ret;
++
++	register_fifocb(&sd_cb);
++	nds_fifo_send(FIFO_FIRMWARE_CMD(FIFO_FIRMWARE_CMD_SD_ADDRESS,
++					(u32)&sd_block));
++	ret = sd_request(NDS_SD_CMD_INIT, 0, 0);
++	printk(KERN_INFO "dsisd: init result %d, SCFG_EXT %08x, TMIO rev %04x, "
++	       "info %08x, sectors %u\n", ret, sd_block.info[0],
++	       sd_block.info[1], sd_block.info[2], sd_block.sectors);
++	if (ret != NDS_SD_OK)
++		return -EIO;
++	nsectors = sd_block.sectors;
++	return 0;
++}
++
++static void dsisd_transfer(unsigned long sector, unsigned long nsect,
++			   char *buffer, int write)
++{
++	while (nsect > 0) {
++		unsigned int n = nsect;
++		int ret;
++
++		if (n > NDS_SD_MAX_SECTORS)
++			n = NDS_SD_MAX_SECTORS;
++		if (write)
++			memcpy(sd_block.data, buffer, n * SECTOR_SIZE);
++		ret = sd_request(write ? NDS_SD_CMD_WRITE : NDS_SD_CMD_READ,
++				 sector, n);
++		if (ret != NDS_SD_OK) {
++			printk(KERN_ERR "dsisd: %s sector %lu x%u failed: "
++			       "result %d, TMIO status %08x\n",
++			       write ? "write" : "read", sector, n, ret,
++			       sd_block.info[0]);
++			dldi_xfer_err = 1;
++			return;
++		}
++		if (!write)
++			memcpy(buffer, sd_block.data, n * SECTOR_SIZE);
++		sector += n;
++		nsect -= n;
++		buffer += n * SECTOR_SIZE;
++	}
++}
++#endif
++
+ 
+ /*
+  * Handle an I/O request.
+@@ -102,6 +200,10 @@ static void dldi_transfer(struct dldi_dev *dev, unsigned long sector,
+ {
+ 	int ret = 0;
+ 	unsigned long sectors;
++#ifdef CONFIG_NDS_DSISD
++	dsisd_transfer(sector, nsect, buffer, write);
++	return;
++#endif
+ 	while (nsect > 0) {
+ 		sectors = nsect;
+ 		if (sectors > (BUF_SIZE/SECTOR_SIZE))
+@@ -214,13 +316,20 @@ again:	while (1) {
+ 			}	
+ 		}	
+ 		/* do the transfer */
++#ifdef CONFIG_NDS_DSISD
++		dldi_xfer_err = 0;
++#endif
+ 		dldi_transfer(dev, sector, nr_sec, buffer, dir);
+  		/* send completion to all requests */
+ 		for (index = 0; index < REQ_SIZE; index++) {
+ 			req = requests[index];
+ 			if (!req)
+ 				break;
++#ifdef CONFIG_NDS_DSISD
++			end_request(req, blk_fs_request(req) && !dldi_xfer_err);
++#else
+ 			end_request(req, blk_fs_request(req));
++#endif
+ 		}
+ 		/* try the next request */
+ 		goto again;
+@@ -359,12 +468,18 @@ static int __init dldi_init(void)
+ 	int ret;
+ 
+ 	/* Start the interface */
++#ifdef CONFIG_NDS_DSISD
++	ret = dsisd_start();
++	if (ret)
++		return ret;
++#else
+ 	_param_dldi.function = _io_dldi.fn_startup;
+ 	ret = _call_dldi();
+ 	if (ret == 0) {
+ 		printk(KERN_ERR "dldi: fn_startup failure\n");
+ 		return -EIO;
+ 	}		
++#endif
+ 
+ 	/*
+ 	 * Get registered.
+diff --git a/linux-2.6.x/include/asm-arm/arch-nds/dsisd.h b/linux-2.6.x/include/asm-arm/arch-nds/dsisd.h
+new file mode 100644
+index 000000000..9d7eea553
+--- /dev/null
++++ b/linux-2.6.x/include/asm-arm/arch-nds/dsisd.h
+@@ -0,0 +1,45 @@
++/*
++ * include/asm-arm/arch-nds/dsisd.h
++ *
++ * Shared ARM9 <-> ARM7 request block for the Nintendo DSi internal SD card.
++ * The ARM7 owns the SD/MMC controller (TMIO at 0x04004800); the ARM9 kernel
++ * driver (drivers/block/dldi_c.c with CONFIG_NDS_DSISD) fills in this block,
++ * flushes its data cache and sends FIFO_FIRMWARE_CMD_SD_REQUEST; the ARM7
++ * answers with the same command after it has written the result.
++ *
++ * The block is 32 byte aligned and a multiple of 32 bytes so that the ARM9
++ * can flush/invalidate it without touching neighbouring data.
++ */
++#ifndef __ASM_ARCH_DSISD_H
++#define __ASM_ARCH_DSISD_H
++
++#define NDS_SD_SECTOR_SIZE	512
++#define NDS_SD_MAX_SECTORS	4	/* sectors per request (2048 bytes) */
++
++#define NDS_SD_CMD_INIT		0
++#define NDS_SD_CMD_READ		1
++#define NDS_SD_CMD_WRITE	2
++
++/* result codes, 0 = success */
++#define NDS_SD_OK		0
++#define NDS_SD_ERR_PARAM	1
++#define NDS_SD_ERR_NOCARD	2	/* controller not reachable or no card */
++#define NDS_SD_ERR_INIT		3	/* card init failed, info[3] has the step */
++#define NDS_SD_ERR_RW		4	/* command failed, info[3] has TMIO status */
++#define NDS_SD_ERR_NOINIT	5
++#define NDS_SD_ERR_WRPROT	6	/* write refused (read-only build/slider) */
++
++struct nds_sd_block {
++	unsigned int cmd;
++	unsigned int sector;
++	unsigned int count;
++	unsigned int result;
++	unsigned int sectors;	/* INIT: card capacity in 512 byte sectors */
++	unsigned int info[3];	/* INIT: [0] SCFG_EXT [1] TMIO revision reg
++				 *       [2] card type, 1=SDSC 2=SDHC
++				 * (on error info[2] = failing step, see sdmmc.c)
++				 * ERR_RW: [0] TMIO status bits */
++	unsigned char data[NDS_SD_MAX_SECTORS * NDS_SD_SECTOR_SIZE];
++} __attribute__((aligned(32)));
++
++#endif
+diff --git a/linux-2.6.x/include/asm-arm/arch-nds/fifo.h b/linux-2.6.x/include/asm-arm/arch-nds/fifo.h
+index e0aa5d6e1..07173397d 100644
+--- a/linux-2.6.x/include/asm-arm/arch-nds/fifo.h
++++ b/linux-2.6.x/include/asm-arm/arch-nds/fifo.h
+@@ -72,7 +72,13 @@ enum FIFO_POWER_CMDS {
+ 
+ enum FIFO_FIRMWARE_CMDS {
+ 	FIFO_FIRMWARE_CMD_BUFFER_ADDRESS,
+-	FIFO_FIRMWARE_CMD_READ
++	FIFO_FIRMWARE_CMD_READ,
++	/* DSi internal SD card (see asm/arch/dsisd.h). All 8 FIFO types are
++	 * taken, so these share the firmware type with distinct commands.
++	 * ARM9 -> ARM7: SD_ADDRESS carries the request block address, SD_REQUEST
++	 * starts it. ARM7 -> ARM9: SD_REQUEST means "block has been processed". */
++	FIFO_FIRMWARE_CMD_SD_ADDRESS,
++	FIFO_FIRMWARE_CMD_SD_REQUEST
+ };
+ 	
+ /* 
+diff --git a/vendors/Nintendo/DSI/config.linux-2.6.x b/vendors/Nintendo/DSI/config.linux-2.6.x
+index 7774c981e..bbbb9bbab 100644
+--- a/vendors/Nintendo/DSI/config.linux-2.6.x
++++ b/vendors/Nintendo/DSI/config.linux-2.6.x
+@@ -97,6 +97,8 @@ CONFIG_FLASH_SIZE=0x00800000
+ # Nintendo DS Options
+ #
+ CONFIG_NDS_DSI=y
++CONFIG_NDS_DSISD=y
++# CONFIG_NDS_DSISD_WRITE is not set
+ # CONFIG_NDS_TEXT_CONSOLE is not set
+ # CONFIG_NDS_FASTGBA is not set
+ # CONFIG_NDS_SOUNDTEST is not set
+-- 
+2.56.0
+

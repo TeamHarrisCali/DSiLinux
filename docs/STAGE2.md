@@ -39,3 +39,6 @@ I stopped running DSi mode and left the test to you.
 Files: `~/Documents/Claude/DSLinuxDSi/out/dsi-card/` (see its `README.txt`). In melonDS with your normal DSi setup, open `dslinux-dsi.nds`.
 For the userland, enable Config > Emu settings > DLDI, choose "Folder" or "Image": use the FAT image
 `out/dldi-img-dsi/dldi.img` (folder mode does not work with this build, see STAGE1). Use the on-screen keyboard (click) to type `cat /proc/meminfo`.
+
+## Real hardware (added after the user's photo)
+See [STAGE3.md](STAGE3.md): a Stage 2 build booted the kernel on a real DSi XL with the 16 MB RAM in use, then panicked in the DLDI driver that TWiLight patched in.

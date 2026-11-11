@@ -1,0 +1,42 @@
+# DSi mode with the DSi SD slot emulated from a test image (DLDI off). Replace $HOME before use.
+# The [DSi] paths point at the user's own dumps (opened by melonDS only; never read or copied by us).
+[DSi]
+NANDPath = "$HOME/Documents/Claude/TwoPaneDSi/DSINAND/nand.bin"
+BIOS7Path = "$HOME/Documents/Claude/TwoPaneDSi/dsidump/bios7i.bin"
+BIOS9Path = "$HOME/Documents/Claude/TwoPaneDSi/dsidump/bios9i.bin"
+FirmwarePath = "$HOME/Documents/Claude/TwoPaneDSi/dsidump/dsfirmware.bin"
+FullBIOSBoot = true
+
+[DSi.SD]
+Enable = true
+ImageSize = 0
+ImagePath = "$HOME/Documents/Claude/DSLinuxDSi/out/dsi-sd/dsisd.img"
+ReadOnly = true
+FolderSync = false
+FolderPath = ""
+
+[DLDI]
+Enable = false
+ImageSize = 0
+ImagePath = "dldi.bin"
+ReadOnly = false
+FolderSync = false
+FolderPath = ""
+
+[Emu]
+DirectBoot = true
+ExternalBIOSEnable = false
+ConsoleType = 1
+
+# GDB stub on the ARM9 (port 3333): scripts/klog.py reads the kernel log buffer from RAM through it,
+# so no screenshots of the desktop are needed.
+[Instance0.Gdb]
+Enabled = true
+
+[Instance0.Gdb.ARM9]
+Port = 3333
+BreakOnStartup = false
+
+[Instance0.Gdb.ARM7]
+Port = 3334
+BreakOnStartup = false
