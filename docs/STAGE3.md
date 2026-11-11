@@ -275,13 +275,10 @@ So the ARM7's FAT32 parser, the sector guard, the real write command (CMD24/25),
 Noise seen in that log, fixed in "s": `cp -a` of a folder always fails here ("not a directory") so tar did the copy, and tar printed a "time stamp ... in the future" warning per file (the console's clock is years behind the PC's).
 "s" (`out/dsi-mode/dslinux-dsimode-s-uc3.nds`, `-uc2`) uses `tar -xmf` only (no restored dates, no failing cp). Built; not run. The "r" ROMs are kept in `old/r-log-file-works/` as the known-good build.
 
-## 3c. Faster ARM9 clock, 3d. Wi-Fi/cameras/DSP
-Not started. 3c is small but needs the SD result first; 3d unchanged from the feasibility finding.
+## 3c. Faster ARM9 clock (compiled only)
+`CONFIG_NDS_DSI_FASTCPU` (default off, not part of the normal ROM): sets `SCFG_CLK` (0x04004004) bit 0 to run the ARM9 at 134 MHz instead of 67 MHz.
+It runs in the same early hook as the RAM test, only when that test proves real DSi mode, and before `calibrate_delay()` so `udelay()` loops are calibrated at the final speed.
+The kernel prints `NDS: ARM9 SCFG_CLK xxxx -> xxxx: 134 MHz requested and accepted` (or `NOT accepted`); the `Calibrating delay loop ... BogoMIPS` line (66.76 before) should roughly double.
+ROMs: `out/dsi-mode/dslinux-dsimode-t-fast-uc3.nds`, `-uc2` (the normal `s` ROM is the same tree with the option off). **Not run on any console.** The bus, timers and RAM stay at their normal speed, so only CPU-bound work gets faster.
+Risks not checked: stability at 134 MHz with this kernel's cache/ITCM setup. If it misbehaves, use the `s` ROM.
 
-## Process note: no emulator output for me
-- The screenshot scripts were removed from the repo: they captured the whole desktop (including private windows).
-- melonDS 1.1 exits right after boot when its GDB stub is enabled, so reading the kernel log through it does not work.
-- Capturing only the focused window does not work either: melonDS does not take focus, so the safeguard (reject anything that is not a small melonDS window) rejected every frame.
-- Net effect: I can launch melonDS but cannot see what the emulated DSLinux prints. Emulator results in this project therefore come from the user's screenshots.
-  Also, an emulator run cannot answer the open question (what mode the real console runs the ROM in).
-- Use `dmesg | egrep 'dsisd|NDS:'` on the console; this busybox `grep` has no `-E`.
