@@ -1,0 +1,28 @@
+From bc0aefbde29ac7ceec0e1981d56fcf23cdc97f26 Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 07:57:58 -0600
+Subject: [PATCH] rc: start autolog with a plain background command (msh ran 'a
+ && b &' in the foreground, so boot stopped after the log save)
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ vendors/Nintendo/DSI/rc | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/vendors/Nintendo/DSI/rc b/vendors/Nintendo/DSI/rc
+index 566dec447..1da30fc5a 100644
+--- a/vendors/Nintendo/DSI/rc
++++ b/vendors/Nintendo/DSI/rc
+@@ -54,4 +54,8 @@ mknod /var/run/ttypf c 3 15
+ # save the boot log into the one writable file on the card (sd:/linux/DSILOG.TXT), if it exists
+ [ -x /boot/savelog ] && /boot/savelog
+ # while testing: keep saving the log every 10 s (see /boot/autolog)
+-[ -x /boot/autolog ] && /boot/autolog > /dev/null 2>&1 &
++# (msh runs "a && b &" in the foreground, so start it with a plain command in an if)
++if [ -x /boot/autolog ]
++then
++	/boot/autolog &
++fi
+-- 
+2.56.0
+
