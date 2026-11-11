@@ -1,0 +1,133 @@
+From ecf164e89e4c44d5821e494f2ea60917e9c47e1a Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 08:24:55 -0600
+Subject: [PATCH] Voice memos: DC blocker and 3.5 kHz low-pass on the recording
+ (removes the steady 7.87 kHz tone the microphone has, about -67 dB on the
+ real memo, speech untouched); mic gain one step down (27.5 dB) because speech
+ reached full scale
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ .../arch/arm/mach-nds/arm7/microphone.c       |  2 +-
+ user/microwin/src/demos/nanox/Makefile        |  2 +-
+ user/microwin/src/demos/nanox/dsmemo.c        | 57 +++++++++++++++++++
+ 3 files changed, 59 insertions(+), 2 deletions(-)
+
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/microphone.c b/linux-2.6.x/arch/arm/mach-nds/arm7/microphone.c
+index 814f3f7cf..a211b1dbc 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/arm7/microphone.c
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/microphone.c
+@@ -29,7 +29,7 @@
+ #define CDC_ADC_VOL_FINE	0x52
+ #define CDC_MIC_BIAS		0x2E
+ #define CDC_MIC_GAIN		0x2F
+-#define DSI_MIC_GAIN		3	/* 0..3 = 15.5, 21.5, 27.5, 33.5 dB (libnds uses the highest) */
++#define DSI_MIC_GAIN		2	/* 0..3 = 15.5, 21.5, 27.5, 33.5 dB (libnds uses the highest; speech clipped at 33.5, so one step down) */
+ 
+ static s16 dsi_last;
+ 
+diff --git a/user/microwin/src/demos/nanox/Makefile b/user/microwin/src/demos/nanox/Makefile
+index aa2ab4b16..916a9b78b 100644
+--- a/user/microwin/src/demos/nanox/Makefile
++++ b/user/microwin/src/demos/nanox/Makefile
+@@ -199,7 +199,7 @@ $(TOP)/bin/dsgallery: dsgallery.o dsgx.h dsgx_win.h dsbmp.h $(NANOXCLIENTLIBS) $
+ 
+ $(TOP)/bin/dsmemo: dsmemo.o w95.h $(NANOXCLIENTLIBS) $(TOP)/config
+ 	@echo "Linking $@ ..."
+-	$(CC) $(CFLAGS) $(LDFLAGS) dsmemo.o -o $@ $(LD_NANOXCLIENTLIBS)
++	$(CC) $(CFLAGS) $(LDFLAGS) dsmemo.o -o $@ $(LD_NANOXCLIENTLIBS) $(LIBM)
+ 
+ $(TOP)/bin/dsplay: dsplay.o $(TOP)/config
+ 	@echo "Linking $@ ..."
+diff --git a/user/microwin/src/demos/nanox/dsmemo.c b/user/microwin/src/demos/nanox/dsmemo.c
+index 4ce5168d3..e9e3cd021 100644
+--- a/user/microwin/src/demos/nanox/dsmemo.c
++++ b/user/microwin/src/demos/nanox/dsmemo.c
+@@ -19,6 +19,7 @@
+ #include <sys/stat.h>
+ #include <sys/ioctl.h>
+ #include <sys/time.h>
++#include <math.h>
+ #include "nano-X.h"
+ #include "w95.h"
+ 
+@@ -272,6 +273,55 @@ static void redraw_all(void)
+ 	draw_buttons();
+ }
+ 
++/* ------------------------------------------------------------------ voice filter */
++/*
++ * The microphone has a steady tone at 7.87 kHz in every recording (found in the spectrum of the saved memos: present in silence,
++ * far above speech), and a small DC offset. Every recorded sample goes through a DC blocker (one pole, about 10 Hz) and a 33 tap
++ * windowed sinc low-pass at 3.5 kHz: voice stays, the tone is gone. Integer maths (Q14).
++ */
++#define NTAP	33
++static int fir_c[NTAP];
++static short fir_h[NTAP];
++static int fir_pos, hp_x1, hp_y1;
++
++static void filter_init(void)
++{
++	double fc = 3500.0 / (double)rec_rate, sum = 0.0, h[NTAP];
++	int i;
++
++	for (i = 0; i < NTAP; i++) {
++		double x = i - (NTAP - 1) / 2.0, w = 0.54 - 0.46 * cos(2.0 * M_PI * i / (NTAP - 1));
++
++		h[i] = (x == 0.0 ? 2.0 * fc : sin(2.0 * M_PI * fc * x) / (M_PI * x)) * w;
++		sum += h[i];
++	}
++	for (i = 0; i < NTAP; i++)
++		fir_c[i] = (int)(h[i] / sum * 16384.0 + (h[i] < 0 ? -0.5 : 0.5));
++	memset(fir_h, 0, sizeof(fir_h));
++	fir_pos = hp_x1 = hp_y1 = 0;
++}
++
++static short filter_sample(short x)
++{
++	long acc = 0;
++	int k, j, y;
++
++	y = x - hp_x1 + hp_y1 - (hp_y1 >> 8);		/* DC blocker */
++	hp_x1 = x;
++	hp_y1 = y;
++	fir_h[fir_pos] = y > 32767 ? 32767 : (y < -32768 ? -32768 : y);
++	j = fir_pos;
++	for (k = 0; k < NTAP; k++) {
++		acc += (long)fir_c[k] * fir_h[j];
++		if (--j < 0)
++			j = NTAP - 1;
++	}
++	if (++fir_pos >= NTAP)
++		fir_pos = 0;
++	acc >>= 14;
++	return acc > 32767 ? 32767 : (acc < -32768 ? -32768 : (short)acc);
++}
++
+ /* ------------------------------------------------------------------ scope input */
+ 
+ static void feed(const short *s, int step, int count)
+@@ -440,6 +490,7 @@ static void start_record(void)
+ 	fprintf(stderr, "dsmemo: recording to %s (dsp fd %d) at %d Hz, kept in memory until Stop\n", rec_path, dsp, rec_rate);
+ 	rec_bytes = 0;
+ 	msg[0] = 0;
++	filter_init();
+ 	memset(hist_min, 0, sizeof(hist_min));
+ 	memset(hist_max, 0, sizeof(hist_max));
+ 	acc_n = 0;
+@@ -554,6 +605,12 @@ static void tick(void)
+ 				rec_buf = nb;
+ 				rec_cap += 256 * 1024;
+ 			}
++			{
++				int q;
++
++				for (q = 0; q < n / 2; q++)
++					buf[q] = filter_sample(buf[q]);
++			}
+ 			memcpy(rec_buf + rec_bytes, buf, n);
+ 			rec_bytes += n;
+ 			feed(buf, 1, n / 2);
+-- 
+2.56.0
+
