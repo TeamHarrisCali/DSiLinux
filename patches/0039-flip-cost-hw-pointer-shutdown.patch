@@ -1,0 +1,703 @@
+From 7890498720af705095ff7d530848e9010533e51d Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 05:13:07 -0600
+Subject: [PATCH] DS desktop: cheaper page flips (async flip, copy only the
+ drawn area found by wrapping the screen draw functions), hardware sprite
+ pointer (OBJ in VRAM bank F), Start menu: Exit desktop and a real Shut down
+ (/boot/shutdown = sync; poweroff)
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ linux-2.6.x/drivers/video/ndsfb.c      | 135 ++++++++++---
+ user/microwin/src/demos/nanox/dsdesk.c |   3 +-
+ user/microwin/src/drivers/scr_fb.c     | 266 +++++++++++++++++++++++--
+ user/microwin/src/engine/devmouse.c    |  44 ++++
+ user/microwin/src/include/device.h     |   2 +
+ user/microwin/src/nanox/srvmain.c      |   3 +
+ vendors/Nintendo/DSI/Makefile          |   1 +
+ vendors/Nintendo/DSI/shutdown          |   5 +
+ 8 files changed, 419 insertions(+), 40 deletions(-)
+ create mode 100644 vendors/Nintendo/DSI/shutdown
+
+diff --git a/linux-2.6.x/drivers/video/ndsfb.c b/linux-2.6.x/drivers/video/ndsfb.c
+index 9c59cafd3..e3cdc283f 100644
+--- a/linux-2.6.x/drivers/video/ndsfb.c
++++ b/linux-2.6.x/drivers/video/ndsfb.c
+@@ -231,11 +231,17 @@ static int ndsfb_mmap(struct fb_info *info, struct file *file,
+ static int ndsfb_blank(int blank_mode, struct fb_info *info);
+ /*
+  * Page flipping for the main screen (fb0, 16 bit, 256x512 virtual): the two 256 row pages are shown by two
+- * bitmap layers, and scrolling by 256 rows swaps them. NDSFB_FLIP (argument: 0 or 256) makes that scroll take
+- * effect at the next vertical blank (no tearing) and returns once it has, so the caller may then draw on the
+- * page that was shown before. Not done by FBIOPAN_DISPLAY, because the console may call that where it cannot sleep.
++ * bitmap layers, and scrolling by 256 rows swaps them. The scroll registers are written by a vertical blank
++ * interrupt handler, so a flip never tears. Private ioctls (not FBIOPAN_DISPLAY, which the console may call
++ * where it cannot sleep):
++ *   NDSFB_FLIP       (arg 0 or 256) request the flip and wait until it happened
++ *   NDSFB_FLIP_ASYNC (arg 0 or 256) request the flip and return at once
++ *   NDSFB_FLIP_WAIT  wait until a requested flip happened (returns at once if none is pending)
+  */
+ #define NDSFB_FLIP	0x4e01
++#define NDSFB_FLIP_ASYNC	0x4e02
++#define NDSFB_FLIP_WAIT	0x4e03
++#define NDSFB_CURSOR	0x4e04
+ static DECLARE_WAIT_QUEUE_HEAD(ndsfb_flip_wq);
+ static volatile int ndsfb_flip_pending;
+ static int ndsfb_flip_y;
+@@ -253,6 +259,93 @@ static irqreturn_t ndsfb_vblank_irq(int irq, void *dev_id, struct pt_regs *regs)
+ 	return IRQ_HANDLED;
+ }
+ 
++static int ndsfb_flip_request(struct fb_info *info, int y)
++{
++	if (info->par != 0 || info->var.yres_virtual < 512 || info->var.bits_per_pixel != 16)
++		return -EINVAL;
++	if (y != 0 && y != 256)
++		return -EINVAL;
++	if (!ndsfb_irq_ready) {
++		if (request_irq(IRQ_VBLANK, ndsfb_vblank_irq, SA_SHIRQ, "ndsfb-flip", &ndsfb_flip_token))
++			return -EBUSY;
++		*(volatile u16 *)0x04000004 |= 1 << 3;	/* vblank interrupt enable in DISPSTAT */
++		ndsfb_irq_ready = 1;
++	}
++	ndsfb_flip_y = y;
++	info->var.yoffset = y;
++	ndsfb_flip_pending = 1;
++	return 0;
++}
++
++static void ndsfb_flip_wait(void)
++{
++	if (!ndsfb_flip_pending)
++		return;
++	if (!wait_event_timeout(ndsfb_flip_wq, !ndsfb_flip_pending, HZ / 10) && ndsfb_flip_pending) {
++		/* no vblank interrupt seen: scroll now */
++		BG2_CY = ndsfb_flip_y << 8;
++		BG3_CY = (ndsfb_flip_y - 256) << 8;
++		ndsfb_flip_pending = 0;
++	}
++}
++
++/*
++ * Hardware pointer: one 16x16 sprite on the main screen (OBJ in VRAM bank F, palette entries 1 and 2, OAM entry 0),
++ * so moving the pointer draws nothing into the frame buffer. NDSFB_CURSOR takes a struct ndsfb_cursor.
++ */
++struct ndsfb_cursor {
++	int x, y;			/* top left of the sprite on the screen (may be negative) */
++	int visible;
++	int set_shape;			/* 1: pal[] and tiles[] are new */
++	unsigned short pal[3];		/* OBJ palette entries 0..2, RGB555 (entry 0 is transparent) */
++	unsigned short tiles[64];	/* 16x16 pixels as four 8x8 tiles of 4 bit pixels, 1D order */
++};
++
++#define OBJ_PALETTE	((volatile u16 *)0x05000200)
++#define OAM		((volatile u16 *)0x07000000)
++#define OBJ_TILES	((volatile u16 *)0x06400000)
++static int ndsfb_cursor_ready;
++
++static void ndsfb_cursor_setup(void)
++{
++	int i;
++
++	writeb(VRAM_ENABLE | 2, VRAM_F_CR);	/* bank F: main screen OBJ memory at 0x06400000 */
++	for (i = 0; i < 128; i++) {		/* all sprites off */
++		OAM[i * 4 + 0] = 0x0200;
++		OAM[i * 4 + 1] = 0;
++		OAM[i * 4 + 2] = 0;
++	}
++	ndsfb_cursor_ready = 1;
++	DISPLAY_CR |= (1 << 12) | (1 << 4);	/* OBJ on, 1D tile layout */
++}
++
++static int ndsfb_cursor_ioctl(struct ndsfb_cursor __user *arg)
++{
++	struct ndsfb_cursor c;
++	int i;
++
++	if (copy_from_user(&c, arg, sizeof(c)))
++		return -EFAULT;
++	if (!ndsfb_cursor_ready)
++		ndsfb_cursor_setup();
++	if (c.set_shape) {
++		for (i = 0; i < 3; i++)
++			OBJ_PALETTE[i] = c.pal[i];
++		for (i = 0; i < 64; i++)
++			OBJ_TILES[i] = c.tiles[i];
++	}
++	/* attr0: y, normal, 16 colours, square; attr1: x, 16x16; attr2: tile 0, priority 0, palette 0 */
++	if (c.visible) {
++		OAM[0] = c.y & 0xff;
++		OAM[1] = (c.x & 0x1ff) | (1 << 14);
++		OAM[2] = 0;
++	} else {
++		OAM[0] = 0x0200;
++	}
++	return 0;
++}
++
+ static int ndsfb_open(struct fb_info *info, int user);
+ static int ndsfb_release(struct fb_info *info, int user);
+ static int ndsfb_ioctl(struct inode *inode, struct file *file,unsigned int cmd, unsigned long arg, struct fb_info *info);
+@@ -442,6 +535,8 @@ static int ndsfb_set_par(struct fb_info *info)
+ 		} else {
+ 			DISPLAY_CR = MODE_5_2D | DISPLAY_BG2_ACTIVE;
+ 		}
++		if (ndsfb_cursor_ready)
++			DISPLAY_CR |= (1 << 12) | (1 << 4);
+ 		writeb(VRAM_ENABLE | VRAM_A_MAIN_BG_0x6000000, VRAM_A_CR);
+ 		if (info->var.xres_virtual == 512)
+ 			if (info->fix.visual == FB_VISUAL_TRUECOLOR)
+@@ -522,32 +617,26 @@ static int ndsfb_ioctl(struct inode *inode, struct file *file,
+  
+ 	switch (cmd) {
+ 		case NDSFB_FLIP:
++		case NDSFB_FLIP_ASYNC:
+ 			{
+-				int y;
++				int y, err;
+ 
+-				if (info->par != 0 || info->var.yres_virtual < 512 || info->var.bits_per_pixel != 16)
+-					return -EINVAL;
+ 				if (get_user(y, (int __user *)argp))
+ 					return -EFAULT;
+-				if (y != 0 && y != 256)
+-					return -EINVAL;
+-				if (!ndsfb_irq_ready) {
+-					if (request_irq(IRQ_VBLANK, ndsfb_vblank_irq, SA_SHIRQ, "ndsfb-flip", &ndsfb_flip_token))
+-						return -EBUSY;
+-					*(volatile u16 *)0x04000004 |= 1 << 3;	/* vblank interrupt enable in DISPSTAT */
+-					ndsfb_irq_ready = 1;
+-				}
+-				ndsfb_flip_y = y;
+-				info->var.yoffset = y;
+-				ndsfb_flip_pending = 1;
+-				if (!wait_event_timeout(ndsfb_flip_wq, !ndsfb_flip_pending, HZ / 10) && ndsfb_flip_pending) {
+-					/* no vblank interrupt seen: scroll now */
+-					BG2_CY = y << 8;
+-					BG3_CY = (y - 256) << 8;
+-					ndsfb_flip_pending = 0;
+-				}
++				err = ndsfb_flip_request(info, y);
++				if (err)
++					return err;
++				if (cmd == NDSFB_FLIP)
++					ndsfb_flip_wait();
+ 				return 0;
+ 			}
++		case NDSFB_FLIP_WAIT:
++			ndsfb_flip_wait();
++			return 0;
++		case NDSFB_CURSOR:
++			if (info->par != 0)
++				return -EINVAL;
++			return ndsfb_cursor_ioctl((struct ndsfb_cursor __user *)argp);
+ 		case FBIOGET_VBLANK:
+ 			{
+ 				struct fb_vblank vblank;
+diff --git a/user/microwin/src/demos/nanox/dsdesk.c b/user/microwin/src/demos/nanox/dsdesk.c
+index 05ce7682d..1b302a472 100644
+--- a/user/microwin/src/demos/nanox/dsdesk.c
++++ b/user/microwin/src/demos/nanox/dsdesk.c
+@@ -26,7 +26,8 @@ static struct item items[] = {
+ 	{ "Clock", "/usr/bin/nxclock", NULL },
+ 	{ "Bench", "/boot/dsbench", NULL },
+ 	{ "Save log", "/boot/savelog", NULL },
+-	{ "Shut down", "/boot/desktop", "stop" },
++	{ "Exit desktop", "/boot/desktop", "stop" },
++	{ "Shut down", "/boot/shutdown", NULL },
+ };
+ #define NITEMS	(sizeof(items) / sizeof(items[0]))
+ 
+diff --git a/user/microwin/src/drivers/scr_fb.c b/user/microwin/src/drivers/scr_fb.c
+index 1de649a71..e25dd382e 100644
+--- a/user/microwin/src/drivers/scr_fb.c
++++ b/user/microwin/src/drivers/scr_fb.c
+@@ -17,6 +17,7 @@
+ #include <linux/vt.h>
+ #include <stdarg.h>
+ #include <stdio.h>
++#include <string.h>
+ #include <stdlib.h>
+ #include <sys/ioctl.h>
+ #include <sys/mman.h>
+@@ -87,23 +88,148 @@ static void	set_directcolor_palette(PSD psd);
+ 
+ #if NDSDRIVER
+ /*
+- * Page flipping on the Nintendo DS main screen. The 16 bit frame buffer is two 256 row pages, drawn on the one
+- * that is not shown; fb_nds_flip() (called by the server when it has nothing more to do) shows it and copies it
+- * onto the other, so every page the user sees is complete: no flicker while windows repaint. VRAM must be
+- * written in 16 or 32 bit units, so the copy is done by hand. NANOX_NODBUF=1 turns it off.
++ * Nintendo DS main screen, three helpers (all off with NANOX_NODBUF=1 / NANOX_SWCURSOR=1):
++ *
++ * 1. Page flipping. The 16 bit frame buffer is two 256 row pages; drawing goes to the one that is not shown.
++ *    When the server has nothing more to do it calls fb_nds_flip(): the drawn page is shown (the kernel swaps
++ *    them at the next vertical blank) and the server goes on. Before the next drawing fb_nds_sync() waits for
++ *    that swap and copies the area that was drawn onto the other page, so the two stay equal.
++ * 2. The drawn area is found by wrapping the screen's drawing functions, so only that area is copied.
++ * 3. The pointer is a hardware sprite (NDSFB_CURSOR), not drawn into the pages at all.
++ *
++ * VRAM must be written in 16 or 32 bit units, so copies are done by hand.
+  */
+-#define NDSFB_FLIP	0x4e01
++#define NDSFB_FLIP		0x4e01
++#define NDSFB_FLIP_ASYNC	0x4e02
++#define NDSFB_FLIP_WAIT		0x4e03
++#define NDSFB_CURSOR		0x4e04
++
++struct ndsfb_cursor {
++	int x, y, visible, set_shape;
++	unsigned short pal[3];
++	unsigned short tiles[64];
++};
++
+ static unsigned char *nds_page[2];
+ static int nds_linebytes, nds_rows;
+ static int nds_dbuf, nds_front;
++static PSD nds_psd;
++/* area drawn since the last flip, and the area drawn before the pending flip (empty when x1 > x2) */
++static int dirty_x1 = 1, dirty_y1, dirty_x2, dirty_y2;
++static int sync_pending, sync_x1, sync_y1, sync_x2, sync_y2;
++
++static void dirty_add(int x1, int y1, int x2, int y2)
++{
++	int t;
++
++	if (x1 > x2) { t = x1; x1 = x2; x2 = t; }
++	if (y1 > y2) { t = y1; y1 = y2; y2 = t; }
++	if (x1 < 0) x1 = 0;
++	if (y1 < 0) y1 = 0;
++	if (x2 > 255) x2 = 255;
++	if (y2 >= nds_rows) y2 = nds_rows - 1;
++	if (x1 > x2 || y1 > y2)
++		return;
++	if (dirty_x1 > dirty_x2) {
++		dirty_x1 = x1; dirty_y1 = y1; dirty_x2 = x2; dirty_y2 = y2;
++		return;
++	}
++	if (x1 < dirty_x1) dirty_x1 = x1;
++	if (y1 < dirty_y1) dirty_y1 = y1;
++	if (x2 > dirty_x2) dirty_x2 = x2;
++	if (y2 > dirty_y2) dirty_y2 = y2;
++}
++
++static void dirty_all(void)
++{
++	dirty_add(0, 0, 255, nds_rows - 1);
++}
++
++/* wrappers: note the area, then call the real drawing function */
++static void (*o_DrawPixel)(PSD, MWCOORD, MWCOORD, MWPIXELVAL);
++static MWPIXELVAL (*o_ReadPixel)(PSD, MWCOORD, MWCOORD);
++static void (*o_DrawHorzLine)(PSD, MWCOORD, MWCOORD, MWCOORD, MWPIXELVAL);
++static void (*o_DrawVertLine)(PSD, MWCOORD, MWCOORD, MWCOORD, MWPIXELVAL);
++static void (*o_FillRect)(PSD, MWCOORD, MWCOORD, MWCOORD, MWCOORD, MWPIXELVAL);
++static void (*o_Blit)(PSD, MWCOORD, MWCOORD, MWCOORD, MWCOORD, PSD, MWCOORD, MWCOORD, long);
++static void (*o_DrawArea)(PSD, driver_gc_t *, int);
++static void (*o_StretchBlit)(PSD, MWCOORD, MWCOORD, MWCOORD, MWCOORD, PSD, MWCOORD, MWCOORD, MWCOORD, MWCOORD, long);
++static void (*o_StretchBlitEx)(PSD, PSD, MWCOORD, MWCOORD, MWCOORD, MWCOORD, int, int, int, int, int, int, long);
++
++#define ONSCREEN(p)	((p)->flags & PSF_SCREEN)
++
++static void w_DrawPixel(PSD psd, MWCOORD x, MWCOORD y, MWPIXELVAL c)
++{
++	if (ONSCREEN(psd)) { if (psd->portrait) dirty_all(); else dirty_add(x, y, x, y); }
++	o_DrawPixel(psd, x, y, c);
++}
+ 
+-static void nds_copy(unsigned char *dst, unsigned char *src, int bytes)
++static void w_DrawHorzLine(PSD psd, MWCOORD x1, MWCOORD x2, MWCOORD y, MWPIXELVAL c)
+ {
+-	volatile unsigned long *d = (volatile unsigned long *)dst;
+-	volatile unsigned long *s = (volatile unsigned long *)src;
++	if (ONSCREEN(psd)) { if (psd->portrait) dirty_all(); else dirty_add(x1, y, x2, y); }
++	o_DrawHorzLine(psd, x1, x2, y, c);
++}
++
++static void w_DrawVertLine(PSD psd, MWCOORD x, MWCOORD y1, MWCOORD y2, MWPIXELVAL c)
++{
++	if (ONSCREEN(psd)) { if (psd->portrait) dirty_all(); else dirty_add(x, y1, x, y2); }
++	o_DrawVertLine(psd, x, y1, y2, c);
++}
+ 
+-	for (bytes /= 4; bytes > 0; bytes--)
+-		*d++ = *s++;
++static void w_FillRect(PSD psd, MWCOORD x1, MWCOORD y1, MWCOORD x2, MWCOORD y2, MWPIXELVAL c)
++{
++	if (ONSCREEN(psd)) { if (psd->portrait) dirty_all(); else dirty_add(x1, y1, x2, y2); }
++	o_FillRect(psd, x1, y1, x2, y2, c);
++}
++
++static void w_Blit(PSD dpsd, MWCOORD dx, MWCOORD dy, MWCOORD w, MWCOORD h, PSD spsd, MWCOORD sx, MWCOORD sy, long op)
++{
++	if (ONSCREEN(dpsd)) {
++		if (dpsd->portrait) dirty_all(); else dirty_add(dx, dy, dx + w - 1, dy + h - 1);
++	}
++	o_Blit(dpsd, dx, dy, w, h, spsd, sx, sy, op);
++}
++
++static void w_DrawArea(PSD psd, driver_gc_t *gc, int op)
++{
++	if (ONSCREEN(psd)) {
++		if (psd->portrait) dirty_all();
++		else dirty_add(gc->dstx, gc->dsty, gc->dstx + gc->dstw - 1, gc->dsty + gc->dsth - 1);
++	}
++	o_DrawArea(psd, gc, op);
++}
++
++static void w_StretchBlit(PSD dpsd, MWCOORD dx, MWCOORD dy, MWCOORD dw, MWCOORD dh, PSD spsd, MWCOORD sx,
++			  MWCOORD sy, MWCOORD sw, MWCOORD sh, long op)
++{
++	if (ONSCREEN(dpsd))
++		dirty_add(dx, dy, dx + dw - 1, dy + dh - 1);
++	o_StretchBlit(dpsd, dx, dy, dw, dh, spsd, sx, sy, sw, sh, op);
++}
++
++static void w_StretchBlitEx(PSD dpsd, PSD spsd, MWCOORD dx, MWCOORD dy, MWCOORD w, MWCOORD h, int xd, int yd,
++			    int sxf, int syf, int xsf, int ysf, long op)
++{
++	if (ONSCREEN(dpsd))
++		dirty_add(dx, dy, dx + w - 1, dy + h - 1);
++	o_StretchBlitEx(dpsd, spsd, dx, dy, w, h, xd, yd, sxf, syf, xsf, ysf, op);
++}
++
++static void nds_copy_rect(unsigned char *dst, unsigned char *src, int x1, int y1, int x2, int y2)
++{
++	int y, words;
++
++	x1 &= ~1;
++	x2 |= 1;
++	words = (x2 - x1 + 1) / 2;
++	for (y = y1; y <= y2; y++) {
++		volatile unsigned long *d = (volatile unsigned long *)(dst + y * nds_linebytes + x1 * 2);
++		volatile unsigned long *s = (volatile unsigned long *)(src + y * nds_linebytes + x1 * 2);
++		int n;
++
++		for (n = 0; n < words; n++)
++			*d++ = *s++;
++	}
+ }
+ 
+ static void nds_dbuf_init(PSD psd, int linebytes, int bpp, int yres, int yvirt)
+@@ -111,33 +237,131 @@ static void nds_dbuf_init(PSD psd, int linebytes, int bpp, int yres, int yvirt)
+ 	int y = 0;
+ 
+ 	nds_dbuf = 0;
+-	if (getenv("NANOX_NODBUF") || bpp != 16 || yvirt < 512)
++	if (getenv("NANOX_NODBUF") || bpp != 16 || yvirt < 512 || psd->portrait)
+ 		return;
+ 	if (ioctl(fb, NDSFB_FLIP, &y) < 0)	/* shows page 0 and proves the driver can flip */
+ 		return;
+ 	nds_linebytes = linebytes;
+ 	nds_rows = yres;
+ 	nds_page[0] = psd->addr;
+-	nds_page[1] = psd->addr + 256 * linebytes;
+-	nds_copy(nds_page[1], nds_page[0], nds_rows * nds_linebytes);
++	nds_page[1] = (unsigned char *)psd->addr + 256 * linebytes;
++	nds_copy_rect(nds_page[1], nds_page[0], 0, 0, 255, nds_rows - 1);
+ 	psd->addr = nds_page[1];		/* draw on the hidden page */
+ 	nds_front = 0;
+ 	nds_dbuf = 1;
++	nds_psd = psd;
++	dirty_x1 = 1;
++	dirty_x2 = 0;
++	sync_pending = 0;
++
++	/* from here on every pixel written to the screen is noted */
++	o_DrawPixel = psd->DrawPixel;		psd->DrawPixel = w_DrawPixel;
++	o_ReadPixel = psd->ReadPixel;
++	o_DrawHorzLine = psd->DrawHorzLine;	psd->DrawHorzLine = w_DrawHorzLine;
++	o_DrawVertLine = psd->DrawVertLine;	psd->DrawVertLine = w_DrawVertLine;
++	o_FillRect = psd->FillRect;		psd->FillRect = w_FillRect;
++	o_Blit = psd->Blit;			if (o_Blit) psd->Blit = w_Blit;
++	o_DrawArea = psd->DrawArea;		if (o_DrawArea) psd->DrawArea = w_DrawArea;
++	o_StretchBlit = psd->StretchBlit;	if (o_StretchBlit) psd->StretchBlit = w_StretchBlit;
++	o_StretchBlitEx = psd->StretchBlitEx;	if (o_StretchBlitEx) psd->StretchBlitEx = w_StretchBlitEx;
+ }
+ 
++/* show what was drawn since the last flip; the other page is brought up to date later, by fb_nds_sync() */
+ void fb_nds_flip(PSD psd)
+ {
+ 	int drawn = nds_front ^ 1, y;
+ 
+-	if (!nds_dbuf)
++	if (!nds_dbuf || sync_pending || dirty_x1 > dirty_x2)
+ 		return;
+ 	y = drawn ? 256 : 0;
+-	if (ioctl(fb, NDSFB_FLIP, &y) < 0)
++	if (ioctl(fb, NDSFB_FLIP_ASYNC, &y) < 0)
+ 		return;
+ 	nds_front = drawn;
+-	nds_copy(nds_page[drawn ^ 1], nds_page[drawn], nds_rows * nds_linebytes);
++	sync_x1 = dirty_x1; sync_y1 = dirty_y1; sync_x2 = dirty_x2; sync_y2 = dirty_y2;
++	sync_pending = 1;
++	dirty_x1 = 1;
++	dirty_x2 = 0;
+ 	psd->addr = nds_page[drawn ^ 1];
+ }
++
++/* must run before anything draws again: wait for the swap, then copy the drawn area to the page we draw on */
++void fb_nds_sync(void)
++{
++	if (!sync_pending)
++		return;
++	ioctl(fb, NDSFB_FLIP_WAIT, 0);
++	nds_copy_rect(nds_page[nds_front ^ 1], nds_page[nds_front], sync_x1, sync_y1, sync_x2, sync_y2);
++	sync_pending = 0;
++}
++
++/* ---- hardware pointer ---- */
++static int nds_hwcur;
++static struct ndsfb_cursor nds_cur;
++static int nds_shape_new;
++
++static unsigned short rgb555(unsigned long c)
++{
++	return (unsigned short)(((c & 0xff) >> 3) | (((c >> 8) & 0xff) >> 3) << 5 | (((c >> 16) & 0xff) >> 3) << 10);
++}
++
++/* same colour rule as the software pointer: image bit set = background colour, else foreground, only where masked */
++static int nds_hw_shape(int w, int h, const MWIMAGEBITS *image, const MWIMAGEBITS *mask, unsigned long fg,
++			unsigned long bg)
++{
++	unsigned char px[16][16];
++	int x, y, wpr = (w + 15) / 16, t, r, n;
++
++	memset(px, 0, sizeof(px));
++	for (y = 0; y < h && y < 16; y++)
++		for (x = 0; x < w && x < 16; x++) {
++			MWIMAGEBITS bit = 0x8000 >> (x % 16);
++
++			if (mask[y * wpr + x / 16] & bit)
++				px[y][x] = (image[y * wpr + x / 16] & bit) ? 1 : 2;
++		}
++	nds_cur.pal[0] = 0;
++	nds_cur.pal[1] = rgb555(bg);
++	nds_cur.pal[2] = rgb555(fg);
++	for (t = 0; t < 4; t++)
++		for (r = 0; r < 8; r++) {
++			int ox = (t & 1) * 8, oy = (t >> 1) * 8 + r;
++
++			for (n = 0; n < 2; n++) {
++				unsigned short v = 0;
++				int p;
++
++				for (p = 0; p < 4; p++)
++					v |= px[oy][ox + n * 4 + p] << (4 * p);
++				nds_cur.tiles[t * 16 + r * 2 + n] = v;
++			}
++		}
++	nds_shape_new = 1;
++	return 0;
++}
++
++static void nds_hw_move(int x, int y, int visible)
++{
++	nds_cur.x = x;
++	nds_cur.y = y;
++	nds_cur.visible = visible;
++	nds_cur.set_shape = nds_shape_new;
++	nds_shape_new = 0;
++	ioctl(fb, NDSFB_CURSOR, &nds_cur);
++}
++
++static void nds_hwcursor_init(void)
++{
++	struct ndsfb_cursor probe;
++
++	nds_hwcur = 0;
++	if (getenv("NANOX_SWCURSOR"))
++		return;
++	memset(&probe, 0, sizeof(probe));
++	if (ioctl(fb, NDSFB_CURSOR, &probe) < 0)	/* hidden sprite: also checks the driver and the screen */
++		return;
++	nds_hwcur = 1;
++	GdSetHardwareCursor(nds_hw_shape, nds_hw_move);
++}
+ #endif
+ 
+ /* init framebuffer*/
+@@ -341,6 +565,7 @@ fb_open(PSD psd)
+ 
+ #if NDSDRIVER
+ 	nds_dbuf_init(psd, fb_fix.line_length, fb_var.bits_per_pixel, fb_var.yres, fb_var.yres_virtual);
++	nds_hwcursor_init();
+ #endif
+ 
+ 	/* save original palette*/
+@@ -375,9 +600,18 @@ fb_close(PSD psd)
+ 	ioctl_setpalette(0, 16, saved_red, saved_green, saved_blue);
+   
+ #if NDSDRIVER
++	if (nds_hwcur) {
++		struct ndsfb_cursor off;
++
++		memset(&off, 0, sizeof(off));
++		ioctl(fb, NDSFB_CURSOR, &off);	/* sprite off */
++		GdSetHardwareCursor(NULL, NULL);
++		nds_hwcur = 0;
++	}
+ 	if (nds_dbuf) {
+ 		int y = 0;
+ 
++		ioctl(fb, NDSFB_FLIP_WAIT, 0);
+ 		ioctl(fb, NDSFB_FLIP, &y);	/* leave page 0 shown for the text console */
+ 		psd->addr = nds_page[0];
+ 		nds_dbuf = 0;
+diff --git a/user/microwin/src/engine/devmouse.c b/user/microwin/src/engine/devmouse.c
+index 0f08ef9bc..23fd3c771 100644
+--- a/user/microwin/src/engine/devmouse.c
++++ b/user/microwin/src/engine/devmouse.c
+@@ -56,6 +56,23 @@ static MWIMAGEBITS cursorcolor[MWMAX_CURSOR_BUFLEN];
+ 
+ extern int gr_mode;
+ 
++/*
++ * Optional hardware pointer: a screen driver that has one (the Nintendo DS main screen uses a sprite) registers
++ * two functions here. The pointer is then never drawn into the screen, so graphics operations do not have to
++ * hide and restore it, and moving it costs no drawing.
++ */
++static int (*hw_shape)(int w, int h, const MWIMAGEBITS *image, const MWIMAGEBITS *mask,
++		unsigned long fg, unsigned long bg);
++static void (*hw_move)(int x, int y, int visible);
++
++void
++GdSetHardwareCursor(int (*shape)(int, int, const MWIMAGEBITS *, const MWIMAGEBITS *, unsigned long,
++		unsigned long), void (*move)(int, int, int))
++{
++	hw_shape = shape;
++	hw_move = move;
++}
++
+ /* Advance declarations */
+ static int filter_relative(int, int, int, int *, int *, int, int);
+ static int filter_transform(int, int *, int *);
+@@ -322,6 +339,12 @@ GdMoveCursor(MWCOORD newx, MWCOORD newy)
+ 	curminy += shifty;
+ 	curmaxy += shifty;
+ 
++	if (hw_move) {
++		if (curvisible > 0)
++			hw_move(curminx, curminy, 1);
++		return;
++	}
++
+ 	/* Restore the screen under the mouse pointer*/
+ 	GdHideCursor(&scrdev);
+ 
+@@ -354,6 +377,14 @@ GdSetCursor(PMWCURSOR pcursor)
+ {
+ 	int	bytes;
+ 
++	if (hw_move && hw_shape) {
++		curmaxx = curminx + pcursor->width - 1;
++		curmaxy = curminy + pcursor->height - 1;
++		hw_shape(pcursor->width, pcursor->height, pcursor->image, pcursor->mask,
++			 (unsigned long)pcursor->fgcolor, (unsigned long)pcursor->bgcolor);
++		hw_move(curminx, curminy, curvisible > 0);
++		return;
++	}
+ 	GdHideCursor(&scrdev);
+ 	curmaxx = curminx + pcursor->width - 1;
+ 	curmaxy = curminy + pcursor->height - 1;
+@@ -391,6 +422,11 @@ GdShowCursor(PSD psd)
+ 	int 		oldmode;
+ 	int		prevcursor = curvisible;
+ 
++	if (hw_move) {
++		if (++curvisible == 1)
++			hw_move(curminx, curminy, 1);
++		return prevcursor;
++	}
+ 	if(++curvisible != 1)
+ 		return prevcursor;
+ 	oldmode = gr_mode;
+@@ -452,6 +488,12 @@ GdHideCursor(PSD psd)
+ 	int 		oldmode;
+ 	int		prevcursor = curvisible;
+ 
++	if (hw_move) {
++		curvisible--;
++		if (prevcursor == 1)
++			hw_move(curminx, curminy, 0);
++		return prevcursor;
++	}
+ 	if(curvisible-- <= 0)
+ 		return prevcursor;
+ 	oldmode = gr_mode;
+@@ -488,6 +530,8 @@ GdCheckCursor(PSD psd,MWCOORD x1,MWCOORD y1,MWCOORD x2,MWCOORD y2)
+ {
+ 	MWCOORD temp;
+ 
++	if (hw_move)
++		return;		/* the pointer is not in the frame buffer */
+ 	if (curvisible <= 0 || (psd->flags & PSF_SCREEN) == 0)
+ 		return;
+ 
+diff --git a/user/microwin/src/include/device.h b/user/microwin/src/include/device.h
+index faf315d19..5954568ec 100644
+--- a/user/microwin/src/include/device.h
++++ b/user/microwin/src/include/device.h
+@@ -879,6 +879,8 @@ void	GdSetAccelMouse(int newthresh, int newscale);
+ void	GdMoveMouse(MWCOORD newx, MWCOORD newy);
+ int	GdReadMouse(MWCOORD *px, MWCOORD *py, int *pb);
+ void	GdMoveCursor(MWCOORD x, MWCOORD y);
++void	GdSetHardwareCursor(int (*shape)(int, int, const MWIMAGEBITS *, const MWIMAGEBITS *, unsigned long,
++		unsigned long), void (*move)(int, int, int));
+ MWBOOL	GdGetCursorPos(MWCOORD *px, MWCOORD *py);
+ void	GdSetCursor(PMWCURSOR pcursor);
+ int 	GdShowCursor(PSD psd);
+diff --git a/user/microwin/src/nanox/srvmain.c b/user/microwin/src/nanox/srvmain.c
+index d56a9c65d..7453df7c2 100644
+--- a/user/microwin/src/nanox/srvmain.c
++++ b/user/microwin/src/nanox/srvmain.c
+@@ -72,6 +72,7 @@ GR_BUTTON	curbuttons;		/* current state of buttons */
+ int		nds_screen_dirty = 1;	/* something was drawn since the last page flip */
+ static int	nds_polling;		/* this select() is only a check whether more work is waiting */
+ extern void	fb_nds_flip(PSD psd);
++extern void	fb_nds_sync(void);
+ #endif
+ GR_CLIENT	*curclient;		/* client currently executing for */
+ GR_EVENT_LIST	*eventfree;		/* list of free events */
+@@ -567,6 +568,7 @@ GsSelect(GR_TIMEOUT timeout)
+ 	/* Wait for some input on any of the fds in the set or a timeout: */
+ 	if((e = select(setsize+1, &rfds, NULL, NULL, to)) > 0) {
+ #if NDSDRIVER
++		fb_nds_sync();		/* the hidden page must be up to date before anything draws */
+ 		nds_screen_dirty = 1;
+ #endif
+ 		/* If data is present on the mouse fd, service it: */
+@@ -619,6 +621,7 @@ GsSelect(GR_TIMEOUT timeout)
+ 			fb_nds_flip(rootwp->psd);
+ 			return;
+ 		}
++		fb_nds_sync();
+ 		nds_screen_dirty = 1;	/* a timer may draw */
+ #endif
+ #if NONETWORK
+diff --git a/vendors/Nintendo/DSI/Makefile b/vendors/Nintendo/DSI/Makefile
+index b59f8759f..d47c499bd 100644
+--- a/vendors/Nintendo/DSI/Makefile
++++ b/vendors/Nintendo/DSI/Makefile
+@@ -109,6 +109,7 @@ romfs:
+ 	$(ROMFSINST) -p +x /boot/savelog
+ 	$(ROMFSINST) -p +x /boot/desktop
+ 	$(ROMFSINST) -p +x /boot/desktop-apps
++	$(ROMFSINST) -p +x /boot/shutdown
+ 	$(ROMFSINST) /$(FATFS)/linux/etc/issue
+ 	# copy some Nintendo specific files to romfs
+ 	$(ROMFSINST) $(NDS_COMMON)/rc.common /$(FATFS)/linux/etc/rc.common
+diff --git a/vendors/Nintendo/DSI/shutdown b/vendors/Nintendo/DSI/shutdown
+new file mode 100644
+index 000000000..4fce4defb
+--- /dev/null
++++ b/vendors/Nintendo/DSI/shutdown
+@@ -0,0 +1,5 @@
++#!/bin/sh
++# Power the DS off (the Start menu's Shut down): write everything to the card, stop all programs, power off.
++# /boot/desktop stop only ends the desktop.
++sync
++poweroff
+-- 
+2.56.0
+
