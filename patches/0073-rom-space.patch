@@ -1,0 +1,50 @@
+From d794fa19fc4f44aae9913418ae934463d3f6f4aa Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 14:45:27 -0600
+Subject: [PATCH] ROM was full (the kernel image reached the .dsi section at
+ 0x02400000): dsgears (software 3D profiler, 360 KB) and dsgallery (old photo
+ viewer) are no longer copied into /boot
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ vendors/Nintendo/DSI/Makefile | 3 +--
+ vendors/Nintendo/DSI/gl       | 3 +--
+ 2 files changed, 2 insertions(+), 4 deletions(-)
+
+diff --git a/vendors/Nintendo/DSI/Makefile b/vendors/Nintendo/DSI/Makefile
+index 290e3b4ee..1cd8bf894 100644
+--- a/vendors/Nintendo/DSI/Makefile
++++ b/vendors/Nintendo/DSI/Makefile
+@@ -163,14 +163,13 @@ finishrom:
+ 	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/dsfiles $(ROMFSDIR)/boot/dsfiles
+ 	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/dsbench $(ROMFSDIR)/boot/dsbench
+ 	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/dsgl3d $(ROMFSDIR)/boot/dsgl3d
+-	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/dsgears $(ROMFSDIR)/boot/dsgears
++	# dsgears (the software 3D profiler, 360 KB) and dsgallery (the old photo viewer) are no longer put in the ROM: it was full
+ 	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/dsgx $(ROMFSDIR)/boot/dsgx
+ 	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/dsplay $(ROMFSDIR)/boot/dsplay
+ 	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/cmp $(ROMFSDIR)/boot/cmp
+ 	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/dsmemo $(ROMFSDIR)/boot/dsmemo
+ 	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/dssettings $(ROMFSDIR)/boot/dssettings
+ 	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/dscam $(ROMFSDIR)/boot/dscam
+-	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/dsgallery $(ROMFSDIR)/boot/dsgallery
+ 	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/landmine $(ROMFSDIR)/boot/landmine
+ 	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/ntetris $(ROMFSDIR)/boot/ntetris
+ 	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/madplay $(ROMFSDIR)/$(OPTDIR)
+diff --git a/vendors/Nintendo/DSI/gl b/vendors/Nintendo/DSI/gl
+index 0dc2de30a..2d1d73c1d 100644
+--- a/vendors/Nintendo/DSI/gl
++++ b/vendors/Nintendo/DSI/gl
+@@ -13,8 +13,7 @@ if [ "$1" = "hw" ] || [ "$1" = "tri" ] || [ "$1" = "cube" ]; then
+ 	echo "dsgx: the DS's hardware 3D engine. Esc or q to quit"
+ 	if [ "$1" = "tri" ] || [ "$1" = "cube" ]; then /boot/dsgx $1; else /boot/dsgx; fi
+ elif [ "$1" = "profile" ]; then
+-	echo "dsgears: 5 tests of 3 s, then a table of where a frame's time goes"
+-	/boot/dsgears
++	echo "gl profile: the software 3D profiler (dsgears) is no longer in the ROM"
+ else
+ 	echo "gears: Esc or q to quit"
+ 	/usr/bin/gears
+-- 
+2.56.0
+
