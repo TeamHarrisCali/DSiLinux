@@ -280,10 +280,8 @@ A boot of one of the tar-only builds: log lines `tar etc`, `bound etc`, `tar var
 `rc: done`. `dmesg | grep Cal` printed `Calibrating delay loop... 66.76 BogoMIPS (lpj=333824)`. That is the expected value for the normal `s` ROM; for `t-fast` it would mean the 134 MHz request was not accepted (or not made).
 Which file was run was not stated; the next step is `dmesg | grep SCFG_CLK`, which only the `t-fast` build prints.
 
-## 3c. Faster ARM9 clock (compiled only)
-`CONFIG_NDS_DSI_FASTCPU` (default off, not part of the normal ROM): sets `SCFG_CLK` (0x04004004) bit 0 to run the ARM9 at 134 MHz instead of 67 MHz.
-It runs in the same early hook as the RAM test, only when that test proves real DSi mode, and before `calibrate_delay()` so `udelay()` loops are calibrated at the final speed.
-The kernel prints `NDS: ARM9 SCFG_CLK xxxx -> xxxx: 134 MHz requested and accepted` (or `NOT accepted`); the `Calibrating delay loop ... BogoMIPS` line (66.76 before) should roughly double.
-ROMs: `out/dsi-mode/dslinux-dsimode-t-fast-uc3.nds`, `-uc2` (the normal `s` ROM is the same tree with the option off). **Not run on any console.** The bus, timers and RAM stay at their normal speed, so only CPU-bound work gets faster.
-Risks not checked: stability at 134 MHz with this kernel's cache/ITCM setup. If it misbehaves, use the `s` ROM.
+## 3c. Faster ARM9 clock: nothing to do (measured on the console)
+`CONFIG_NDS_DSI_FASTCPU` writes `SCFG_CLK` (0x04004004) bit 0 early in boot. On the console the t-fast ROM printed `NDS: ARM9 SCFG_CLK 0001 -> 0001: 134 MHz requested and accepted`: the register already held `0001` before the write, so the loader had
+already put the ARM9 at 134 MHz and the option changes nothing. All DSi-mode boots show `66.76 BogoMIPS (lpj=333824)`: with the ARM946E's delay loop taking about 4 cycles per iteration (sub plus a taken branch), 33.4 M iterations per second means roughly 134 MHz.
+That is an inference from the cycle count, not a direct measurement. The ARM7 has no comparable switch as far as I know. The option stays in the tree (default off); `t-fast` ROMs are in `out/dsi-mode/old/t-fast-noop/`.
 

@@ -24,18 +24,18 @@ the changes are in `patches/` (22 small patches, in order) and explained in `doc
 | Userland from the card, shell prompt | console | `/etc`, `/var`, `/home` get RAM copies at boot so the system can write while the card stays untouched (changes are lost at power-off) |
 | One writable file on the card: `sd:/linux/DSILOG.TXT` | console | See "Writing to the card" |
 | Boot self-test (RAM, SD, confinement) printed at the end of boot | console | `/boot/selftest` |
-| ARM9 at 134 MHz instead of 67 MHz | compiled only | Separate ROM (`t-fast`); the boot log's BogoMIPS and a `NDS: ARM9 SCFG_CLK` line say whether it took effect |
+| ARM9 at 134 MHz | console (nothing to change) | `SCFG_CLK` already reads `0001` (134 MHz) before the kernel touches it, so every DSi-mode build runs the ARM9 at 134 MHz; the boot log's `66.76 BogoMIPS` is consistent with that. The optional `CONFIG_NDS_DSI_FASTCPU` does nothing here |
 
 ## Not done, not verified, or out of scope
 
-- **Faster clock:** only compiled. If a console misbehaves with the `t-fast` ROM, use the normal one.
+- **Faster clock:** nothing to do, the loader already runs the ARM9 at 134 MHz in DSi mode. (The ARM7 has no equivalent switch as far as I know; it stays at about 33 MHz.)
 - **Wi-Fi:** the DS Wi-Fi driver is left out of the DSi build (the chip does not exist in DSi mode and its setup hung the boot). DSi Wi-Fi (an Atheros chip) is not attempted.
 - **Cameras, DSP, DSi-mode sound:** not attempted or not tested.
 - **Extra login terminals and `gpm`:** off by default (they stalled the first boots in 16 MB mode); `extra_terminals="YES"` in `/etc/rc.conf` turns them on, untested.
 - **`fwver` (DS firmware version at boot):** skipped by default; its firmware read could wait forever in DSi mode.
 - **General SD writing:** deliberately not provided (see below).
 - **DS and DS-Lite builds:** the original DSLinux builds are unchanged here; only the Stage 1 build was run (in melonDS).
-- The `t-fast` ROM has no confirmed console result yet. The `s` change (tar-only RAM copies, no time-stamp warnings) ran on the console: the log is clean and all self-test lines pass (photo: `tar etc`, `bound etc`, `Savelog: written`). It is not known whether that run was the `s` or the `t-fast` file.
+- The `s` change (tar-only RAM copies, no time-stamp warnings) ran on the console: the log is clean and all self-test lines pass (photo: `tar etc`, `bound etc`, `Savelog: written`). It is not known whether that run was the `s` or the `t-fast` file.
 
 ## Writing to the card (the only way it can happen)
 
@@ -58,7 +58,6 @@ All ROMs are built into `out/dsi-mode/` (git-ignored; rebuild with the scripts b
 
 - `dslinux-dsimode-s-uc3.nds`: the current build (DSi-only header). `-uc2` is the same with a "DS or DSi" header; use it only if uc3 will not launch.
 - `old/r-log-file-works/`: the last build that was confirmed on the console (boots to a prompt, writes the log). `s` differs only by quieter log output (`tar -m`); a photo of a run with that change shows a clean log and all checks passing.
-- `dslinux-dsimode-t-fast-uc3.nds`: `s` plus the 134 MHz clock. Experimental.
 
 ## Installing on the SD card
 
