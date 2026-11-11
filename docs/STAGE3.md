@@ -463,6 +463,18 @@ The first-person maze uses the DS 3D chip (about 100 boxes a frame) instead of a
 
 Verified: the game rules on a PC; the program builds and the ROM is 4.03 MB (limit 4 MiB). **Not yet run on the console**: drawing, input, frame rate, whether pointer motion events arrive while the touch screen is held (Paint and Life dragging depend on that).
 
+## 3b-gb. Game Boy emulator: `dsgb` (w97d)
+
+Start > Games > Game Boy. The core is [Peanut-GB](https://github.com/deltabeard/Peanut-GB) (`peanut_gb.h`, MIT licence, Mahyar Koshkouei, downloaded unchanged; sha256 `cf777706...cf728`), original Game Boy only. `dsgb_core.h` wraps it (ROM load, `.sav` file for cartridge RAM, four-shade palette, frame in DS pixels); `dsgb.c` is the desktop part; `dsgb_host.c` runs the same core on a PC (`cc -O2 -o dsgb_host dsgb_host.c && ./dsgb_host game.gb 120 0 out.ppm`). Fast LCD renderer, no sound, no Game Boy Color (a Color-only ROM is refused with a message; Color games that also run on the old Game Boy start in black and white).
+
+**Your ROMs**: put games you own into `/home/roms` inside `linux/ROOTFS.IMG` with the card in the PC: `scripts/add-roms.sh game.gb other.gb` (uses debugfs; the image has about 400 MB free, a game is 32 KB to 2 MB). Saves are written next to the ROM as `NAME.sav`. A test ROM of my own (`dsgb_test.gb`, from `scripts/make-testrom.py`: four shades of stripes, the d-pad scrolls them) is already in the image.
+
+**Buttons** (kernel, `button.c`): a program that holds `/proc/dskeys` open is in *game mode*: the driver stops giving the buttons to the input layer (no arrows, Enter or clicks reach the desktop) and the file reads as four hex digits with the raw state, presses *and releases*, which the keyboard path cannot give. Bits: 0 A, 1 B, 2 Select, 3 Start, 4 Right, 5 Left, 6 Up, 7 Down, 8 R, 9 L, 10 X, 11 Y. Closing the file (also when the program dies) ends game mode. In dsgb: A, B, Select, Start, d-pad are the Game Boy's; L + R together quit; X changes the palette; Y held = fast forward.
+
+**Speed**: frames are paced at 59.7 per second; when the DS falls behind, the picture of a frame is skipped but the game keeps its speed. Every two seconds the status line under the picture (and the log) shows "N fps shown, M run, K late". On the PC the test ROM takes 0.3 ms per frame; a real game is much heavier, and how many frames the 134 MHz ARM9 manages is **not yet measured on the console**.
+
+Verified: the core on a PC with my test ROM (four shades, d-pad scrolling, exact scroll distance); the program and the kernel change compile; the ROM is 4.11 MB (limit 4.19 MB, about 80 KB left). **Not yet run on the console**: the whole app, `/proc/dskeys`, drawing speed, with a real game.
+
 ## 3c. Faster ARM9 clock: nothing to do (measured on the console)
 `CONFIG_NDS_DSI_FASTCPU` writes `SCFG_CLK` (0x04004004) bit 0 early in boot. On the console the t-fast ROM printed `NDS: ARM9 SCFG_CLK 0001 -> 0001: 134 MHz requested and accepted`: the register already held `0001` before the write, so the loader had
 already put the ARM9 at 134 MHz and the option changes nothing. All DSi-mode boots show `66.76 BogoMIPS (lpj=333824)`: with the ARM946E's delay loop taking about 4 cycles per iteration (sub plus a taken branch), 33.4 M iterations per second means roughly 134 MHz.

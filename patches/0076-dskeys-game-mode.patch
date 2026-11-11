@@ -1,0 +1,133 @@
+From c93e9f02c058bae97ad2302956b215430b782647 Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 16:29:33 -0600
+Subject: [PATCH] button driver: /proc/dskeys game mode, raw button state
+ (presses and releases) for a program that holds it open; the desktop does not
+ see the buttons meanwhile
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ linux-2.6.x/arch/arm/mach-nds/button.c | 70 +++++++++++++++++++++++++-
+ 1 file changed, 69 insertions(+), 1 deletion(-)
+
+diff --git a/linux-2.6.x/arch/arm/mach-nds/button.c b/linux-2.6.x/arch/arm/mach-nds/button.c
+index 2c44adbd4..2e1af4930 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/button.c
++++ b/linux-2.6.x/arch/arm/mach-nds/button.c
+@@ -15,6 +15,8 @@
+ #include <linux/init.h> 
+ #include <linux/interrupt.h> 
+ 
++#include <linux/proc_fs.h>
++#include <asm/uaccess.h>
+ #include <asm/irq.h>
+ #include <asm/io.h>
+ #include <asm/arch/fifo.h>
+@@ -46,11 +48,24 @@ static short ndsbuttons2[] = {
+ extern void ndspad_buttons(int left, int right);
+ #endif
+ 
++/*
++ * Game mode: while a program has /proc/dskeys open, the buttons are not given to the input layer (so the desktop does not see
++ * arrows, Enter or clicks) and the program reads the raw state instead, presses AND releases, which the keyboard path cannot give.
++ * /proc/dskeys reads as four hex digits: bit 0 A, 1 B, 2 Select, 3 Start, 4 Right, 5 Left, 6 Up, 7 Down, 8 R, 9 L, 10 X, 11 Y
++ * (1 = held).
++ */
++static volatile u16 ndsbutton_raw;
++static int ndsbutton_game;
++
+ static irqreturn_t ndsbutton_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+ {
+ 	int i;
+ 	u16 state = readw(REG_KEYINPUT);
+ 
++	ndsbutton_raw = (ndsbutton_raw & 0xc00) | (~state & 0x3ff);
++	if (ndsbutton_game)
++		return IRQ_HANDLED;
++
+ 	for (i = 0 ; i < (sizeof(ndsbuttons)/sizeof(ndsbuttons[0])) ; i++)
+ 		input_report_key(&ndsbutton_dev, ndsbuttons[i], !((state >> i) & 1));
+ 
+@@ -74,9 +89,11 @@ static void ndsbutton_xkeys(u32 state)
+ 		nds_volume_msg(state);
+ 		return;
+ 	}
++	ndsbutton_raw = (ndsbutton_raw & 0x3ff) | ((~state & 3) << 10);
+ 	for (i = 0 ; i < (sizeof(ndsbuttons2)/sizeof(ndsbuttons2[0])) ; i++)
+ 	{
+-		input_report_key(&ndsbutton_dev, ndsbuttons2[i], !((state >> i) & 1));
++		if (!ndsbutton_game)
++			input_report_key(&ndsbutton_dev, ndsbuttons2[i], !((state >> i) & 1));
+ 	}
+        input_report_switch(&ndsbutton_dev, SW_0, ((state >> 7 )&1)); 
+        input_sync(&ndsbutton_dev);
+@@ -87,8 +104,55 @@ static struct fifo_cb ndsbutton_fifocb = {
+ 	.handler.button_handler = ndsbutton_xkeys
+ };
+ 
++static int dskeys_open(struct inode *inode, struct file *file)
++{
++	int i;
++
++	if (ndsbutton_game++ == 0) {		/* the desktop must not think a key is still held */
++		for (i = 0 ; i < (sizeof(ndsbuttons)/sizeof(ndsbuttons[0])) ; i++)
++			input_report_key(&ndsbutton_dev, ndsbuttons[i], 0);
++		for (i = 0 ; i < (sizeof(ndsbuttons2)/sizeof(ndsbuttons2[0])) ; i++)
++			input_report_key(&ndsbutton_dev, ndsbuttons2[i], 0);
++		input_sync(&ndsbutton_dev);
++#ifdef CONFIG_TOUCHSCREEN_NDS
++		ndspad_buttons(0, 0);
++#endif
++	}
++	return 0;
++}
++
++static int dskeys_release(struct inode *inode, struct file *file)
++{
++	ndsbutton_game--;
++	return 0;
++}
++
++static ssize_t dskeys_read(struct file *file, char __user *buf, size_t count, loff_t *ppos)
++{
++	char t[8];
++	int n = sprintf(t, "%04x\n", ndsbutton_raw);
++
++	if (*ppos >= n)
++		return 0;
++	if (count > n - *ppos)
++		count = n - *ppos;
++	if (copy_to_user(buf, t + *ppos, count))
++		return -EFAULT;
++	*ppos += count;
++	return count;
++}
++
++static struct file_operations dskeys_fops = {
++	.owner = THIS_MODULE,
++	.open = dskeys_open,
++	.release = dskeys_release,
++	.read = dskeys_read,
++};
++
+ static int __init ndsbutton_init(void)
+ {
++	struct proc_dir_entry *e;
++
+ 	int i;
+ 
+         if (request_irq(IRQ_VBLANK, ndsbutton_interrupt, SA_SHIRQ, "button", &ndsbutton_dev)) {
+@@ -109,6 +173,10 @@ static int __init ndsbutton_init(void)
+ 
+ 	register_fifocb( &ndsbutton_fifocb ) ;
+ 
++	e = create_proc_entry("dskeys", 0444, NULL);
++	if (e)
++		e->proc_fops = &dskeys_fops;
++
+ 	return 0;
+ }
+ 
+-- 
+2.56.0
+
