@@ -1,0 +1,206 @@
+From c016af2e3b54b40656691f4e0f81fc972bf273d4 Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 14:06:35 -0600
+Subject: [PATCH] Camera: the ARM7 gives up a camera command at the first I2C
+ bus timeout (a stuck bus made every later wait cost 20+ ms, thousands of
+ times: a hang), fewer retries, shorter waits, 6 s request timeout; dscam logs
+ key actions and frame errors; memos: playback loudness normalised (peak to
+ ~85%, max 8x)
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ linux-2.6.x/arch/arm/mach-nds/arm7/dsicam.c | 26 +++++++++++++++------
+ linux-2.6.x/drivers/block/dldi_c.c          |  2 +-
+ user/microwin/src/demos/nanox/dscam.c       |  9 ++++++-
+ user/microwin/src/demos/nanox/dsmemo.c      | 26 +++++++++++++++++++++
+ 4 files changed, 54 insertions(+), 9 deletions(-)
+
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/dsicam.c b/linux-2.6.x/arch/arm/mach-nds/arm7/dsicam.c
+index 2296b2339..2d93908fb 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/arm7/dsicam.c
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/dsicam.c
+@@ -34,16 +34,21 @@
+ #define DEV_CAM1	0x78
+ 
+ static u32 cam_err;
++static int cam_dead;			/* the I2C bus (or a sensor) stopped answering: everything else in this command gives up at once */
+ static u8 cam_active = 0xFF;
+ 
+ static int cwait(void)
+ {
+ 	int n = 200000;
+ 
++	if (cam_dead)
++		return 0;
+ 	while ((REG_I2CCNT & I2C_ENABLE) && --n)
+ 		;
+-	if (!n)
++	if (!n) {
+ 		cam_err |= 1;
++		cam_dead = 1;		/* a stuck bus: every later wait would cost 20+ ms each, thousands of times (the ARM7 would seem hung) */
++	}
+ 	return n;
+ }
+ 
+@@ -92,7 +97,7 @@ static int apt_write(u8 dev, u16 reg, u16 data)
+ {
+ 	int i;
+ 
+-	for (i = 0; i < 8; i++) {
++	for (i = 0; i < 3 && !cam_dead; i++) {
+ 		if (csel(dev, I2C_START) == 1 && creg(reg >> 8, I2C_NONE) == 1 && creg(reg & 0xFF, I2C_NONE) == 1) {
+ 			if (cdata(data >> 8, I2C_NONE) == 1 && cdata(data & 0xFF, I2C_STOP) == 1)
+ 				return 1;
+@@ -107,7 +112,7 @@ static u16 apt_read(u8 dev, u16 reg)
+ {
+ 	int i, hi, lo;
+ 
+-	for (i = 0; i < 8; i++) {
++	for (i = 0; i < 3 && !cam_dead; i++) {
+ 		if (csel(dev, I2C_START) == 1 && creg(reg >> 8, I2C_NONE) == 1 && creg(reg & 0xFF, I2C_STOP) == 1) {
+ 			if (csel(dev | 1, I2C_START) == 1) {
+ 				hi = cget(I2C_READ | I2C_ACK);
+@@ -122,13 +127,13 @@ static u16 apt_read(u8 dev, u16 reg)
+ 	return 0xFFFF;
+ }
+ 
+-#define WAIT_TRIES	1500	/* about a second at the worst */
++#define WAIT_TRIES	400	/* about 0.3 s at the worst */
+ 
+ static void apt_wait_clear(u8 dev, u16 reg, u16 mask)
+ {
+ 	int n;
+ 
+-	for (n = 0; n < WAIT_TRIES; n++)
++	for (n = 0; n < WAIT_TRIES && !cam_dead; n++)
+ 		if (!(apt_read(dev, reg) & mask))
+ 			return;
+ 	cam_err |= 2;
+@@ -138,7 +143,7 @@ static void apt_wait_set(u8 dev, u16 reg, u16 mask)
+ {
+ 	int n;
+ 
+-	for (n = 0; n < WAIT_TRIES; n++)
++	for (n = 0; n < WAIT_TRIES && !cam_dead; n++)
+ 		if ((apt_read(dev, reg) & mask) == mask)
+ 			return;
+ 	cam_err |= 2;
+@@ -170,7 +175,7 @@ static void mcu_wait_clear(u8 dev, u16 reg, u16 mask)
+ {
+ 	int n;
+ 
+-	for (n = 0; n < WAIT_TRIES; n++)
++	for (n = 0; n < WAIT_TRIES && !cam_dead; n++)
+ 		if (!(mcu_read(dev, reg) & mask))
+ 			return;
+ 	cam_err |= 2;
+@@ -318,6 +323,7 @@ unsigned int dsicam_cmd(unsigned int sub, unsigned int arg, unsigned int *err)
+ 	unsigned int ret = 1;
+ 
+ 	cam_err = 0;
++	cam_dead = 0;
+ 	switch (sub) {
+ 	case 0:
+ 		cam_init(DEV_CAM0);
+@@ -345,6 +351,12 @@ unsigned int dsicam_cmd(unsigned int sub, unsigned int arg, unsigned int *err)
+ 	default:
+ 		ret = 0;
+ 	}
++	if (cam_dead) {			/* leave the bus in a defined state for the next command */
++		cam_dead = 0;
++		REG_I2CCNT = I2C_ENABLE | I2C_IRQEN | I2C_ERROR | I2C_STOP;
++		cam_err |= 4;
++		ret = 0;
++	}
+ 	*err = cam_err;
+ 	return ret;
+ }
+diff --git a/linux-2.6.x/drivers/block/dldi_c.c b/linux-2.6.x/drivers/block/dldi_c.c
+index b7364b276..c6a0d39d2 100644
+--- a/linux-2.6.x/drivers/block/dldi_c.c
++++ b/linux-2.6.x/drivers/block/dldi_c.c
+@@ -201,7 +201,7 @@ int dsisd_camera_cmd(unsigned int sub, unsigned int arg, unsigned int *value, un
+ 
+ 	down(&sd_mutex);
+ 	save = sd_timeout;
+-	sd_timeout = 10 * HZ;
++	sd_timeout = 6 * HZ;
+ 	ret = sd_request_locked(NDS_SD_CMD_CAMERA, arg, sub);
+ 	sd_timeout = save;
+ 	*value = ret == NDS_SD_OK ? sd_block.info[0] : 0;
+diff --git a/user/microwin/src/demos/nanox/dscam.c b/user/microwin/src/demos/nanox/dscam.c
+index 336920f94..a06332a3a 100644
+--- a/user/microwin/src/demos/nanox/dscam.c
++++ b/user/microwin/src/demos/nanox/dscam.c
+@@ -148,16 +148,22 @@ int main(int argc, char **argv)
+ 				break;
+ 			case 'c':
+ 				if (ready) {
++					int rs;
++
+ 					cam = !cam;
+ 					got_frame = 0;
+-					cam_cmd(2, cam, &c);
++					rs = cam_cmd(2, cam, &c);
++					fprintf(stderr, "dscam: select camera %d: ret %d (errno %d) value %u error mask %x\n", cam, rs, rs < 0 ? errno : 0,
++						c.value, c.err & 0xff);
+ 					changed = 1;
+ 				}
+ 				break;
+ 			case 'f':
++				fprintf(stderr, "dscam: flip\n");
+ 				flipy = !flipy;
+ 				break;
+ 			case 'm':
++				fprintf(stderr, "dscam: mirror\n");
+ 				flipx = !flipx;
+ 				break;
+ 			case 'b':
+@@ -203,6 +209,7 @@ int main(int argc, char **argv)
+ 				gx_texture_load_vbl(0, small, sizeof(small));	/* the kernel loads it at the start of a screen refresh gap */
+ 				draw_picture(flipx, flipy);
+ 			} else if (++fails == 5) {
++				fprintf(stderr, "dscam: no frames: ioctl returned %d errno %d\n", r, errno);
+ 				sprintf(txt, "no frames (%d)", errno);
+ 				gxw_text(&w, 0, txt);
+ 			} else if (fails > 5) {
+diff --git a/user/microwin/src/demos/nanox/dsmemo.c b/user/microwin/src/demos/nanox/dsmemo.c
+index aace0715b..e22c58419 100644
+--- a/user/microwin/src/demos/nanox/dsmemo.c
++++ b/user/microwin/src/demos/nanox/dsmemo.c
+@@ -549,6 +549,32 @@ static int load_memo(const char *name)
+ 	}
+ 	close(f);
+ 	pcm_len &= ~3L;
++	if (pcm_len > 0) {
++		/* Memos are recorded quietly (loud speech peaks at a third of full scale): bring the loudest peak to about 85% of
++		 * full scale (at most 8 times) so the volume does not have to be at 100% (the speaker amplifier's own hiss and whine
++		 * are audible at full volume with a weak signal). */
++		short *p = (short *)pcm;
++		long i, ns = pcm_len / 2;
++		int peak = 0, gain;
++
++		for (i = 0; i < ns; i++) {
++			int v = p[i] < 0 ? -p[i] : p[i];
++
++			if (v > peak)
++				peak = v;
++		}
++		if (peak > 0 && peak < 27000) {
++			gain = 27800L * 256 / peak;
++			if (gain > 8 * 256)
++				gain = 8 * 256;
++			for (i = 0; i < ns; i++) {
++				long v = ((long)p[i] * gain) >> 8;
++
++				p[i] = v > 32767 ? 32767 : (v < -32768 ? -32768 : (short)v);
++			}
++			fprintf(stderr, "dsmemo: playback gain %d.%02d (peak was %d)\n", gain / 256, (gain % 256) * 100 / 256, peak);
++		}
++	}
+ 	return pcm_len > 0 ? 0 : -3;
+ }
+ 
+-- 
+2.56.0
+
