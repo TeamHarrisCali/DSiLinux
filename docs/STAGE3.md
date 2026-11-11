@@ -254,6 +254,19 @@ With `fwver` skipped the startup completes and the shell prompt appears. (The us
 `/tmp/rc.common.log` and shown. Logs to read at the prompt: `cat /tmp/rc.common.log`, `cat /tmp/ramcopy.log`, `dmesg | grep dsisd`. Built; not run.
 Not yet checked on the console: touch at the prompt, typing commands, what is on the card (`ls /usr/bin`, `free`), I/O errors during real use.
 
+## SD writes: one preallocated log file, nothing else ("r" build)
+User decision: logs should be writable to the card, but nothing may go outside `/linux`. General read-write FAT would also change the FAT tables and directory entries (outside the folder) with a never-run write path, so it was not done.
+Design:
+- A fixed-size file `sd:/linux/DSILOG.TXT` (1 MiB of zeros, short name `DSILOG.TXT`) is created on a PC (`scripts/make-logfile.sh`; a copy is at `out/dsi-card/sd-root/linux/DSILOG.TXT`).
+- At boot (`NDS_SD_CMD_LOGINIT`) the **ARM7** reads the card's FAT32 itself (MBR, boot sector, root directory, `LINUX` folder, the file's directory entry, its cluster chain) and keeps the file's sector extents.
+  **Every write the ARM7 does must lie entirely inside those extents; everything else is refused**, including raw writes to `/dev/dldi` from a root shell. There is no unrestricted write path in the build (`CONFIG_NDS_DSISD_WRITE` is unused).
+  The write-protect slider is honoured too. The file never grows, so no directory entry and no FAT entry is changed.
+- The ARM9 gets the extents back and offers `/dev/dsilog` (char 241:0, write-only): each open starts at the file's beginning, the last partial sector is zero padded on close.
+- `/boot/savelog` writes dmesg, `/tmp/rc.common.log` and `/tmp/ramcopy.log` into it at the end of every boot (and can be run by hand: `/boot/savelog`). Read `DSILOG.TXT` on a PC. The mount of the card stays read-only.
+Tested on the PC only: the ARM7's parser code was compiled with a host compiler against a test image with the same layout (MBR, FAT32, `linux/` folder): it found the file as one 2048-sector extent, the sector numbers point exactly at the first and last sector of the file
+(markers checked), the guard accepts only those sectors (rejects the neighbours, the MBR and the boot sector), and with the file missing it reports "not found" at the file step.
+**Not tested on the console**: the real write command (CMD24/25), the character device, and fragmented files (up to 32 extents are supported). Needs the SD card's write-protect slider open.
+
 ## 3c. Faster ARM9 clock, 3d. Wi-Fi/cameras/DSP
 Not started. 3c is small but needs the SD result first; 3d unchanged from the feasibility finding.
 
