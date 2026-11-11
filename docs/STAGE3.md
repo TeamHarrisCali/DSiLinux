@@ -67,7 +67,10 @@ Both SD builds boot on the console (no panic: the DLDI driver is no longer calle
 ## 3c. Faster ARM9 clock, 3d. Wi-Fi/cameras/DSP
 Not started. 3c is small but needs the SD result first; 3d unchanged from the feasibility finding.
 
-## Process note
-My desktop screenshots (used to read the emulator's console) captured unrelated windows of your desktop, including chat messages.
-I deleted every saved full-screen frame and crop under `out/`, and I will not take desktop screenshots again. The kernel log is read
-from emulator RAM through melonDS's GDB stub instead (`scripts/klog.py`, `scripts/melon-klog.sh`); that works only once a DSi-mode run can be started.
+## Process note: no emulator output for me
+- The screenshot scripts were removed from the repo: they captured the whole desktop (including private windows).
+- melonDS 1.1 exits right after boot when its GDB stub is enabled, so reading the kernel log through it does not work.
+- Capturing only the focused window does not work either: melonDS does not take focus, so the safeguard (reject anything that is not a small melonDS window) rejected every frame.
+- Net effect: I can launch melonDS but cannot see what the emulated DSLinux prints. Emulator results in this project therefore come from the user's screenshots.
+  Also, an emulator run cannot answer the open question (what mode the real console runs the ROM in).
+- Use `dmesg | egrep 'dsisd|NDS:'` on the console; this busybox `grep` has no `-E`.
