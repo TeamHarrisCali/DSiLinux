@@ -107,6 +107,17 @@ protocol, which gets no answer. Clearing the bit should keep the chip in DS-comp
 - If the loader ignores the flag, the fallback is a DSi-mode touch reader in the ARM7 (TSC2117 "codec" registers, see BlocksDS `nds/arm7/codec.h`); not started.
 - Side effect to expect: sound uses the same chip, so DSi-mode sound is untested either way.
 
+## Touchscreen in DSi mode (user: DSi mode still no touch with the flag cleared; DS mode works)
+So the loader leaves the touch/sound chip in its DSi register mode whatever header flag we set, and DSLinux's DS-style SPI touch commands get no answer.
+Fix (this commit): `arch/arm/mach-nds/arm7/dsitouch.c`, a port of the BlocksDS libnds codec touch code (zlib licence, credited in the file):
+when the ARM7 is in DSi mode (`SCFG_EXT` bit 31 readable) it sets up the codec touch scanner at start-up, asks the codec whether the pen is down, and reads five X/Y samples
+through the codec's data buffer, filtered (sort, average the middle three, reject noisy samples). DS mode still uses the old path (unchanged). In DSi mode the old start-up
+"dummy read" is skipped, because it would send DS touch bytes to a codec in register mode.
+- ROMs: `out/dsi-mode/dslinux-dsimode-d-uc3.nds` (and `-d-uc2`): header app-flags bit 0 = 1, which is what BlocksDS pairs with codec touch.
+  `-dz-uc3.nds`/`-dz-uc2.nds`: same kernel, flag 0, in case the loader behaves differently.
+- Status: builds clean; **not run anywhere**. In melonDS the codec is probably not emulated at all, so the console is the only real test.
+- Risks: the pen-down test and the register sequence are copied from libnds, not verified on this console. Calibration is the existing one. Sound uses the same chip and is untested.
+
 ## 3c. Faster ARM9 clock, 3d. Wi-Fi/cameras/DSP
 Not started. 3c is small but needs the SD result first; 3d unchanged from the feasibility finding.
 
