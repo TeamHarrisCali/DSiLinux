@@ -1,0 +1,116 @@
+From 78e0664a4d3dad8c3abf453ac77ddd7f4d21c304 Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 08:03:44 -0600
+Subject: [PATCH] Log fixes from the card log: ship cmp in the ROM (the root
+ image on the card lacks /usr/bin/cmp, savelog printed '-s: unknown error 2'
+ every 10 s); dsmemo starts capture explicitly (OSS trigger off/on) and logs
+ every sound call result and the first reads (the card log showed prepare
+ without trigger, errno 22)
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ user/microwin/src/demos/nanox/dsmemo.c | 45 ++++++++++++++++++++++----
+ vendors/Nintendo/DSI/Makefile          |  1 +
+ vendors/Nintendo/DSI/savelog           |  3 +-
+ 3 files changed, 42 insertions(+), 7 deletions(-)
+
+diff --git a/user/microwin/src/demos/nanox/dsmemo.c b/user/microwin/src/demos/nanox/dsmemo.c
+index 70e0dd135..2e9346c73 100644
+--- a/user/microwin/src/demos/nanox/dsmemo.c
++++ b/user/microwin/src/demos/nanox/dsmemo.c
+@@ -29,6 +29,9 @@
+ 
+ /* OSS ioctl numbers (linux/soundcard.h): the same on ARM */
+ #define SNDCTL_DSP_SETFRAGMENT	0xC004500A
++#define SNDCTL_DSP_SETTRIGGER	0x40045010
++#define PCM_ENABLE_INPUT	0x00000001
++#define PCM_ENABLE_OUTPUT	0x00000002
+ #define SNDCTL_DSP_SPEED	0xC0045002
+ #define SNDCTL_DSP_SETFMT	0xC0045005
+ #define SNDCTL_DSP_CHANNELS	0xC0045006
+@@ -306,12 +309,33 @@ static int dsp_open(int mode, int rate, int channels)
+ {
+ 	int fd = open("/dev/dsp", mode | O_NONBLOCK), frag = (8 << 16) | 10, fmt = AFMT_S16_LE, r = rate, c = channels;
+ 
+-	if (fd < 0)
++	int e1, e2, e3, e4;
++
++	if (fd < 0) {
++		fprintf(stderr, "dsmemo: open /dev/dsp failed, errno %d\n", errno);
+ 		return -1;
+-	ioctl(fd, SNDCTL_DSP_SETFRAGMENT, &frag);	/* 1 KB pieces: lively scope */
+-	ioctl(fd, SNDCTL_DSP_SETFMT, &fmt);
+-	ioctl(fd, SNDCTL_DSP_CHANNELS, &c);
+-	ioctl(fd, SNDCTL_DSP_SPEED, &r);
++	}
++	e1 = ioctl(fd, SNDCTL_DSP_SETFRAGMENT, &frag);	/* 1 KB pieces: lively scope */
++	e1 = e1 < 0 ? errno : 0;
++	e2 = ioctl(fd, SNDCTL_DSP_SETFMT, &fmt);
++	e2 = e2 < 0 ? errno : 0;
++	e3 = ioctl(fd, SNDCTL_DSP_CHANNELS, &c);
++	e3 = e3 < 0 ? errno : 0;
++	e4 = ioctl(fd, SNDCTL_DSP_SPEED, &r);
++	e4 = e4 < 0 ? errno : 0;
++	fprintf(stderr, "dsmemo: dsp %s: fragment errno %d, format %#x errno %d, channels %d errno %d, rate %d errno %d\n",
++		mode == O_RDONLY ? "capture" : "playback", e1, fmt, e2, c, e3, r, e4);
++	if (mode == O_RDONLY) {
++		/* OSS recipe for starting a recording by hand: trigger off, then input on */
++		int t = 0, rc1, rc2, er1, er2;
++
++		rc1 = ioctl(fd, SNDCTL_DSP_SETTRIGGER, &t);
++		er1 = rc1 < 0 ? errno : 0;
++		t = PCM_ENABLE_INPUT;
++		rc2 = ioctl(fd, SNDCTL_DSP_SETTRIGGER, &t);
++		er2 = rc2 < 0 ? errno : 0;
++		fprintf(stderr, "dsmemo: trigger off %d errno %d, trigger input on %d errno %d\n", rc1, er1, rc2, er2);
++	}
+ 	return fd;
+ }
+ 
+@@ -468,7 +492,16 @@ static void tick(void)
+ 		short buf[512];
+ 		int n, loops = 0;
+ 
+-		while (loops++ < 8 && (n = read(dsp, buf, sizeof(buf))) > 0) {
++		static int nlog;
++
++		while (loops++ < 8) {
++			n = read(dsp, buf, sizeof(buf));
++			if (nlog < 12 && (n <= 0 || nlog < 3)) {
++				fprintf(stderr, "dsmemo: read returned %d (errno %d)\n", n, n < 0 ? errno : 0);
++				nlog++;
++			}
++			if (n <= 0)
++				break;
+ 			write(file, buf, n);
+ 			rec_bytes += n;
+ 			feed(buf, 1, n / 2);
+diff --git a/vendors/Nintendo/DSI/Makefile b/vendors/Nintendo/DSI/Makefile
+index a78858242..f302b7e78 100644
+--- a/vendors/Nintendo/DSI/Makefile
++++ b/vendors/Nintendo/DSI/Makefile
+@@ -166,6 +166,7 @@ finishrom:
+ 	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/dsgears $(ROMFSDIR)/boot/dsgears
+ 	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/dsgx $(ROMFSDIR)/boot/dsgx
+ 	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/dsplay $(ROMFSDIR)/boot/dsplay
++	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/cmp $(ROMFSDIR)/boot/cmp
+ 	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/dsmemo $(ROMFSDIR)/boot/dsmemo
+ 	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/dscam $(ROMFSDIR)/boot/dscam
+ 	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/dsgallery $(ROMFSDIR)/boot/dsgallery
+diff --git a/vendors/Nintendo/DSI/savelog b/vendors/Nintendo/DSI/savelog
+index a8580baf7..4b2687f9d 100644
+--- a/vendors/Nintendo/DSI/savelog
++++ b/vendors/Nintendo/DSI/savelog
+@@ -14,7 +14,8 @@ fi
+ B=/tmp/bootlog.body
+ L=/tmp/bootlog.txt
+ /bin/sh /boot/logbody > $B 2>&1
+-if [ $Q = 1 ] && [ -f $B.prev ] && /usr/bin/cmp -s $B $B.prev
++# cmp comes with the ROM (/boot/cmp): the root image on the card may be older than the build and lack it
++if [ $Q = 1 ] && [ -x /boot/cmp ] && [ -f $B.prev ] && /boot/cmp -s $B $B.prev
+ then
+ 	exit 0
+ fi
+-- 
+2.56.0
+
