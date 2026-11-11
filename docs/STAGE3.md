@@ -226,6 +226,12 @@ otherwise prints `RAM copy of /x is empty: not used.` and leaves the card's fold
   or `dsisd: ARM7 does not answer at all (stuck)` (5 s). The ARM7 also retries a failed read up to 3 times (CMD12 + controller reset), then re-initialises the card once and tries a last time.
 Built; not run.
 
+## "m" build on the console (user's photo): RAM copies work
+- `ls /tmp`: `etc home ramcopy.log var` (the RAM copies exist); `/etc/rc.common` found; `Creating default /etc/passwd` with **no** `cannot create` lines; RAM/SD/CONF all PASS.
+- `/usr/bin/head: not found`: my self-test used `head`, which is not in the card's `usr/bin`. Fixed in "n" (uses `cat`).
+- The photo ends at `Not starting ntpclient: network is down` with no prompt yet: either still booting (rc.common next starts extra terminals and `gpm` from the card) or stuck there. To be reported by the user. No `dsisd:`/I/O error lines were on screen at that moment.
+"n" ROMs: `out/dsi-mode/dslinux-dsimode-n-uc3.nds`, `-uc2`. Built; not run.
+
 ## 3c. Faster ARM9 clock, 3d. Wi-Fi/cameras/DSP
 Not started. 3c is small but needs the SD result first; 3d unchanged from the feasibility finding.
 

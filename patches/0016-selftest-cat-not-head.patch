@@ -1,0 +1,26 @@
+From 49edfafd6acc0f0ac50fc6897d528c33bd17e31c Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <noreply@example.invalid>
+Date: Tue, 10 Nov 2026 21:26:10 -0600
+Subject: [PATCH] selftest: show the RAM copy log with cat (head is not on the
+ card)
+
+---
+ vendors/Nintendo/DSI/selftest | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/vendors/Nintendo/DSI/selftest b/vendors/Nintendo/DSI/selftest
+index a2869fb83..41d80a8b2 100644
+--- a/vendors/Nintendo/DSI/selftest
++++ b/vendors/Nintendo/DSI/selftest
+@@ -33,7 +33,7 @@ fi
+ echo "RAM copies in /tmp:"
+ ls /tmp
+ ls /etc/rc.common
+-[ -f /tmp/ramcopy.log ] && /usr/bin/head -12 /tmp/ramcopy.log
++[ -f /tmp/ramcopy.log ] && /usr/bin/cat /tmp/ramcopy.log
+ dmesg | grep 'dsisd: init'
+ dmesg | grep 'dsisd: diag'
+ echo "======================================"
+-- 
+2.56.0
+
