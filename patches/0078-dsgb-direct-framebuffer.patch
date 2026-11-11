@@ -1,0 +1,297 @@
+From ad343374d6e959867fcf51e49aacc80f0c652f2f Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 16:52:57 -0600
+Subject: [PATCH] dsgb: write the picture straight into the screen memory (both
+ pages) instead of sending it through the Nano-X server, one frame per screen
+ refresh; longer ROM names
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ user/microwin/src/demos/nanox/dsgb.c | 184 +++++++++++++++++++--------
+ 1 file changed, 133 insertions(+), 51 deletions(-)
+
+diff --git a/user/microwin/src/demos/nanox/dsgb.c b/user/microwin/src/demos/nanox/dsgb.c
+index aac83ae4a..a2e709dbf 100644
+--- a/user/microwin/src/demos/nanox/dsgb.c
++++ b/user/microwin/src/demos/nanox/dsgb.c
+@@ -5,13 +5,16 @@
+  * Put ROMs (.gb, and .gbc games that also run on the original) in /home/roms; the save file is the ROM's name with .sav.
+  * While a game runs the buttons are read raw from /proc/dskeys (see button.c): the desktop does not see them, so A, B, Select, Start
+  * and the d-pad are the Game Boy's. L + R together quit the game, X changes the palette, Y held = fast forward.
+- * Frames are run at 59.7 per second; when the DS cannot keep up, pictures are skipped (the game stays at full speed).
++ * One frame per screen refresh (waits for the vertical blank); when the DS cannot keep up, pictures are skipped (the game stays at full speed).
+  */
+ #include <sys/time.h>
+ #include <unistd.h>
+ #include <dirent.h>
+ #include <fcntl.h>
+ #include <errno.h>
++#include <sys/ioctl.h>
++#include <sys/mman.h>
++#include <linux/fb.h>
+ #include <time.h>
+ #include "nano-X.h"
+ #include "w95.h"
+@@ -24,7 +27,7 @@
+ #define LINES		9
+ #define STATUSH		10
+ 
+-static char names[MAXROMS][40];
++static char names[MAXROMS][64];
+ static int nroms, sel, top;
+ static GR_WINDOW_ID win;
+ static GR_GC_ID gc;
+@@ -53,7 +56,7 @@ static void scan(void)
+ 		while ((e = readdir(d)) != NULL && nroms < MAXROMS) {
+ 			int n = strlen(e->d_name);
+ 
+-			if (n > 3 && n < 40 && (!strcmp(e->d_name + n - 3, ".gb") || !strcmp(e->d_name + n - 4, ".gbc") ||
++			if (n > 3 && n < 64 && (!strcmp(e->d_name + n - 3, ".gb") || !strcmp(e->d_name + n - 4, ".gbc") ||
+ 						!strcmp(e->d_name + n - 3, ".GB") || !strcmp(e->d_name + n - 4, ".GBC")))
+ 				strcpy(names[nroms++], e->d_name);
+ 		}
+@@ -65,6 +68,15 @@ static void scan(void)
+ }
+ 
+ /* ------------------------------------------------------------------ the list */
++static const char *shortname(int i)
++{
++	static char t[34];
++
++	strncpy(t, names[i], sizeof(t) - 1);
++	t[sizeof(t) - 1] = 0;
++	return t;
++}
++
+ static void draw_list(void)
+ {
+ 	int i;
+@@ -81,9 +93,9 @@ static void draw_list(void)
+ 
+ 		if (top + i == sel) {
+ 			w95_fill(win, gc, W95_NAVY, 6, y, LISTW - 12, 11);
+-			w95_text(win, gc, W95_LIGHT, 9, y + 1, names[top + i]);
++			w95_text(win, gc, W95_LIGHT, 9, y + 1, shortname(top + i));
+ 		} else {
+-			w95_text(win, gc, W95_DARK, 9, y + 1, names[top + i]);
++			w95_text(win, gc, W95_DARK, 9, y + 1, shortname(top + i));
+ 		}
+ 	}
+ 	w95_text(win, gc, msg[0] ? GR_RGB(200, 0, 0) : W95_SHADOW, 4, LISTH - 22, msg[0] ? msg : "Enter: play    Esc: quit");
+@@ -121,21 +133,79 @@ static int rawkeys(int fd)
+ 	return (int)strtol(t, NULL, 16);
+ }
+ 
+-/* the 160x144 picture goes to the window in strips (one big request is too much for the connection) */
+-static void blit(GR_WINDOW_ID w, GR_GC_ID g)
++/*
++ * The picture is NOT sent through the Nano-X server (at 60 pictures a second that is 3 MB/s of requests plus the server's page copies,
++ * and the whole desktop crawls). It is written straight into the screen memory, into the area of our window, on both screen pages
++ * (the server draws on one and shows the other, see scr_fb.c); the server only draws the frame and the status line. The window's
++ * place is read when the window manager says something moved. A pointer drawn by the hardware sprite is not in the way.
++ */
++#define NDSFB_VSYNC	0x4e07
++
++static int fbfd = -1, fb_lb, fb_pages;
++static unsigned char *fbmem;
++
++static int fb_open(void)
+ {
+-	int y;
++	struct fb_fix_screeninfo fix;
++	struct fb_var_screeninfo var;
+ 
+-	for (y = 0; y < GB_H; y += 16)
+-		GrArea(w, g, 0, y, GB_W, 16, &G.frame[y * GB_W], MWPF_TRUECOLOR555);
++	fbfd = open("/dev/fb0", O_RDWR);
++	if (fbfd < 0)
++		return -1;
++	if (ioctl(fbfd, FBIOGET_FSCREENINFO, &fix) < 0 || ioctl(fbfd, FBIOGET_VSCREENINFO, &var) < 0 || var.bits_per_pixel != 16) {
++		close(fbfd);
++		fbfd = -1;
++		return -1;
++	}
++	fb_lb = fix.line_length;
++	fb_pages = var.yres_virtual >= 512 ? 2 : 1;
++	fbmem = mmap(NULL, fb_lb * (fb_pages == 2 ? 512 : var.yres_virtual), PROT_READ | PROT_WRITE, MAP_SHARED, fbfd, 0);
++	if (fbmem == (unsigned char *)MAP_FAILED) {
++		close(fbfd);
++		fbfd = -1;
++		return -1;
++	}
++	return 0;
+ }
+ 
+-static void status(GR_WINDOW_ID w, GR_GC_ID g, const char *s)
++static void fb_blit(int rx, int ry)
+ {
+-	GrSetGCForeground(g, W95_FACE);
+-	GrFillRect(w, g, 0, GB_H, GB_W, STATUSH);
+-	GrSetGCForeground(g, W95_DARK);
+-	GrText(w, g, 2, GB_H + 1, (void *)s, -1, GR_TFASCII | GR_TFTOP);
++	int pg, y, x, x0 = rx < 0 ? -rx : 0, x1 = rx + GB_W > 256 ? 256 - rx : GB_W;
++
++	for (pg = 0; pg < fb_pages; pg++)
++		for (y = 0; y < GB_H; y++) {
++			int sy = ry + y;
++			volatile unsigned short *d;
++			const unsigned short *src = &G.frame[y * GB_W];
++
++			if (sy < 0 || sy >= 192)
++				continue;
++			d = (volatile unsigned short *)(fbmem + pg * 256 * fb_lb + sy * fb_lb) + rx;	/* VRAM: 16 bit writes only */
++			for (x = x0; x < x1; x++)
++				d[x] = src[x];
++		}
++}
++
++static void status(GR_WINDOW_ID w, const char *s)
++{
++	w95_fill(w, gc, W95_FACE, 0, GB_H, GB_W, STATUSH);
++	w95_text(w, gc, W95_DARK, 2, GB_H + 1, s);
++}
++
++/* where the window's client area is on the screen; returns 0 when it is not shown */
++static int window_rect(GR_WINDOW_ID w, int *rx, int *ry)
++{
++	GR_WINDOW_INFO ci, pi;
++
++	GrGetWindowInfo(w, &ci);
++	GrGetWindowInfo(ci.parent, &pi);
++	if (ci.parent == GR_ROOT_WINDOW_ID) {
++		pi.x = pi.y = 0;
++		pi.mapped = 1;
++	}
++	*rx = pi.x + ci.x;
++	*ry = pi.y + ci.y;
++	return ci.mapped && pi.mapped;
+ }
+ 
+ static void play(const char *name)
+@@ -143,10 +213,9 @@ static void play(const char *name)
+ 	char path[100], st[48];
+ 	const char *err;
+ 	GR_WINDOW_ID gw;
+-	GR_GC_ID gg;
+ 	GR_EVENT ev;
+-	int keys, fd, pal = 0, prev = 0, quit = 0, frames = 0, shown = 0, skipped = 0, fast, skip;
+-	long period = 16743, next, t_sec, now;
++	int keys, kfd, pal = 0, prev = 0, quit = 0, frames = 0, shown = 0, slow = 0, fast, skip = 0, rx = 0, ry = 0, vis = 0, dirty = 1;
++	long period = 16743, t_sec, t0, emu_us = 0;
+ 
+ 	sprintf(path, ROMDIR "/%s", name);
+ 	err = gbrun_open(path);
+@@ -155,21 +224,25 @@ static void play(const char *name)
+ 		gbrun_close();
+ 		return;
+ 	}
++	if (fb_open() < 0) {
++		strcpy(msg, "cannot open /dev/fb0");
++		gbrun_close();
++		return;
++	}
+ 	GrDestroyWindow(win);
+ 	gw = GrNewWindowEx(GR_WM_PROPS_APPFRAME | GR_WM_PROPS_CAPTION | GR_WM_PROPS_CLOSEBOX, (GR_CHAR *)G.title, GR_ROOT_WINDOW_ID,
+ 			   48, 4, GB_W, GB_H + STATUSH, W95_FACE);
+-	gg = GrNewGC();
+ 	GrSelectEvents(gw, GR_EVENT_MASK_EXPOSURE | GR_EVENT_MASK_CLOSE_REQ);
++	GrSelectEvents(GR_ROOT_WINDOW_ID, GR_EVENT_MASK_CHLD_UPDATE);	/* the window manager moved something */
+ 	GrMapWindow(gw);
+ 	GrSetFocus(gw);
+-	fd = open("/proc/dskeys", O_RDONLY);	/* game mode for as long as it is open */
+-	if (fd < 0)
++	kfd = open("/proc/dskeys", O_RDONLY);	/* game mode for as long as it is open */
++	if (kfd < 0)
+ 		fprintf(stderr, "dsgb: cannot open /proc/dskeys (%d): the buttons go to the desktop\n", errno);
+-	sprintf(st, "L+R quit  X palette  Y fast");
+-	next = usec();
+-	t_sec = next;
++	strcpy(st, "L+R quit  X palette  Y fast");
++	t_sec = usec();
+ 	while (!quit) {
+-		keys = rawkeys(fd);
++		keys = rawkeys(kfd);
+ 		if ((keys & 0x300) == 0x300)
+ 			quit = 1;
+ 		if ((keys & 0x400) && !(prev & 0x400)) {
+@@ -184,42 +257,51 @@ static void play(const char *name)
+ 				break;
+ 			if (ev.type == GR_EVENT_TYPE_CLOSE_REQ)
+ 				quit = 1;
+-			if (ev.type == GR_EVENT_TYPE_EXPOSURE)
+-				status(gw, gg, st);
++			if (ev.type == GR_EVENT_TYPE_EXPOSURE) {
++				dirty = 1;
++				status(gw, st);
++			}
++			if (ev.type == GR_EVENT_TYPE_CHLD_UPDATE)
++				dirty = 1;
+ 		}
+-		now = usec();
+-		if (now > next + period) {			/* behind: skip this picture, and forget a long stall */
+-			skipped++;
+-			if (now > next + 5 * period)
+-				next = now;
++		if (dirty) {
++			vis = window_rect(gw, &rx, &ry);
++			dirty = 0;
+ 		}
+-		skip = fast ? (frames & 3) != 0 : now > next + period / 2;
++		t0 = usec();
++		if (fast)
++			skip = (frames & 3) != 0;
+ 		if (gbrun_frame(keys, skip) < 0) {
+ 			sprintf(msg, "emulation error %d", G.error);
+ 			break;
+ 		}
+-		frames++;
+-		if (!skip) {
+-			blit(gw, gg);
++		emu_us = usec() - t0;
++		if (!fast)
++			ioctl(fbfd, NDSFB_VSYNC, 0);	/* one frame per screen refresh (59.8 Hz, the Game Boy's 59.7) */
++		if (!skip && vis) {
++			fb_blit(rx, ry);
+ 			shown++;
+ 		}
+-		if (frames % 300 == 0)
+-			gbrun_save();
+-		next += period;
+-		now = usec();
+-		if (now - t_sec >= 2000000L) {			/* a status line every two seconds */
+-			sprintf(st, "%d fps shown, %d run, %d late", (int)(shown * 1000000.0 / (now - t_sec) + 0.5),
+-				(int)(frames * 1000000.0 / (now - t_sec) + 0.5), skipped);
+-			fprintf(stderr, "dsgb: %s\n", st);
+-			status(gw, gg, st);
+-			t_sec = now;
+-			frames = shown = skipped = 0;
++		frames++;
++		/* too slow to also draw every picture: skip the next one (the game itself still runs at full speed) */
++		if (!fast)
++			skip = emu_us > period - 5000;
++		if (emu_us > period)
++			slow++;
++		t0 = usec();
++		if (t0 - t_sec >= 2000000L) {			/* a status line every two seconds */
++			sprintf(st, "%d fps shown, %d run, %d slow", (int)(shown * 1000000.0 / (t0 - t_sec) + 0.5),
++				(int)(frames * 1000000.0 / (t0 - t_sec) + 0.5), slow);
++			fprintf(stderr, "dsgb: %s, last frame %ld us\n", st, emu_us);
++			status(gw, st);
++			t_sec = t0;
++			frames = shown = slow = 0;
+ 		}
+-		if (!fast && next > now)
+-			usleep(next - now);
+ 	}
+-	if (fd >= 0)
+-		close(fd);
++	if (kfd >= 0)
++		close(kfd);
++	munmap(fbmem, fb_lb * (fb_pages == 2 ? 512 : 192));
++	close(fbfd);
+ 	gbrun_close();
+ 	GrDestroyWindow(gw);
+ 	win = GrNewWindowEx(GR_WM_PROPS_APPFRAME | GR_WM_PROPS_CAPTION | GR_WM_PROPS_CLOSEBOX, (GR_CHAR *)"Game Boy", GR_ROOT_WINDOW_ID,
+-- 
+2.56.0
+

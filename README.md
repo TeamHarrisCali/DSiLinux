@@ -5,7 +5,7 @@ its internal SD slot and its touchscreen, launched from TWiLight Menu++ through 
 
 This repository holds the notes, build scripts and patches. The source tree is a separate clone of
 [ipwndev/DSLinux](https://github.com/ipwndev/DSLinux) (GPL-2.0, a mirror of the official SVN) that you create in `work/dslinux`;
-the changes are in `patches/` (77 small patches, in order) and explained in `docs/`.
+the changes are in `patches/` (78 small patches, in order) and explained in `docs/`.
 
 ## What works, and how it was tested
 
@@ -34,7 +34,7 @@ the changes are in `patches/` (77 small patches, in order) and explained in `doc
 | Settings app (Start > System > Settings): brightness, pointer speed, desktop colour / pattern / wallpaper, clock, info; battery indicator in the taskbar | `w97a` (user report): Settings works |  Saved in `/home/settings.conf` (wallpapers: 256x192 24 bit BMP files in `/home/wallpapers`, or any photo) and re-applied at desktop start |
 | 3D game "3D Dodge" (Start > Games) | `w97b`: compiled, **not yet run** | Hardware 3D in a desktop window: a 3x3 tunnel, walls of blocks with a free path, d-pad / touch arrows to hop between cells |
 | Arcade (`dsarcade`): 3D Breakout, Tron, 3D Maze, 2048, Sokoban, Sudoku, Life, Paint | `w97c`: confirmed working on the console | Start > Games / Puzzles / Accessories; see docs/STAGE3.md "More games" |
-| Game Boy emulator (`dsgb`, Peanut-GB core, no sound, no Color) | `w97d`: core tested on a PC, app compiled, **not yet run on the console** | Start > Games > Game Boy; ROMs in `/home/roms` via `scripts/add-roms.sh`; `/proc/dskeys` raw buttons; see docs/STAGE3.md |
+| Game Boy emulator (`dsgb`, Peanut-GB core, no sound, no Color) | `w97e`: runs (test ROM seen on the console), desktop was too slow with w97d's output path; direct-framebuffer version **not yet tried** | Start > Games > Game Boy; ROMs in `/home/roms` via `scripts/add-roms.sh`; `/proc/dskeys` raw buttons; see docs/STAGE3.md |
 | Boot self-test (RAM, SD, confinement) printed at the end of boot | console | `/boot/selftest` |
 | ARM9 at 134 MHz | console (nothing to change) | The `u` build reads the clock register (read-only) and the self-test shows `CLK : PASS - ARM9 at 134 MHz (the fastest)`; the loader sets it. The optional `CONFIG_NDS_DSI_FASTCPU` writes the same bit and changes nothing |
 
