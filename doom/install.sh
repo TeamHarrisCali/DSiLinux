@@ -8,6 +8,7 @@ cd "$(dirname "$0")/.."
 [ -f "$IMG" ] || { echo "no image: $IMG (card not mounted?)"; exit 1; }
 [ -z "$WAD" ] || [ -f "$WAD" ] || { echo "no such WAD: $WAD"; exit 1; }
 [ -f out/doom-build/dsdoom ] || { echo "build first: doom/build.sh"; exit 1; }
+"$(dirname "$0")/../scripts/rootfs-check.sh" "$IMG" || exit 1
 CMDS=$(mktemp)
 cat > "$CMDS" <<EOT
 mkdir /home/doom

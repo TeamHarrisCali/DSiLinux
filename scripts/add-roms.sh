@@ -6,6 +6,7 @@ IMG=/run/media/sharris/1419-260A/linux/ROOTFS.IMG
 if [ "$1" = "-i" ]; then IMG="$2"; shift 2; fi
 [ -f "$IMG" ] || { echo "no image: $IMG (card not mounted?)"; exit 1; }
 [ $# -gt 0 ] || { echo "usage: $0 [-i ROOTFS.IMG] game.gb ..."; exit 1; }
+"$(dirname "$0")/rootfs-check.sh" "$IMG" || exit 1
 CMDS=$(mktemp)
 echo "mkdir /home/roms" > "$CMDS"
 for f in "$@"; do

@@ -7,6 +7,7 @@ if [ "$1" = "-i" ]; then IMG="$2"; shift 2; fi
 ESSID="$1"; WEP="$2"
 [ -n "$ESSID" ] || { echo "usage: $0 [-i ROOTFS.IMG] ESSID [wepkey]"; exit 1; }
 [ -f "$IMG" ] || { echo "no image: $IMG (card not mounted?)"; exit 1; }
+"$(dirname "$0")/rootfs-check.sh" "$IMG" || exit 1
 T=$(mktemp -d)
 cat > $T/rc.conf <<EOT
 # DSLinuxDSi: defaults come from /etc/rc.defaults; add overrides here.
