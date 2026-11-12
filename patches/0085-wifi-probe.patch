@@ -1,0 +1,240 @@
+From 0eabe30c63ebe05fe1b9743aa19681aa31554713 Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Thu, 12 Nov 2026 15:12:03 -0600
+Subject: [PATCH] Wi-Fi hardware probe: /proc/dsiwifi (ARM7 reads the DS chip
+ id after switching GPIO_WIFI to NTR mode and dumps the DSi SDIO controller;
+ no waits on the hardware), included in Save log
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ linux-2.6.x/arch/arm/mach-nds/Makefile        |  3 +-
+ linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c    |  7 ++
+ .../arch/arm/mach-nds/arm7/wifiprobe.c        | 64 +++++++++++++++++++
+ linux-2.6.x/arch/arm/mach-nds/volume.c        | 29 +++++++++
+ linux-2.6.x/drivers/block/dldi_c.c            | 19 ++++++
+ linux-2.6.x/include/asm-arm/arch-nds/dsisd.h  |  1 +
+ vendors/Nintendo/DSI/logbody                  |  2 +
+ 7 files changed, 124 insertions(+), 1 deletion(-)
+ create mode 100644 linux-2.6.x/arch/arm/mach-nds/arm7/wifiprobe.c
+
+diff --git a/linux-2.6.x/arch/arm/mach-nds/Makefile b/linux-2.6.x/arch/arm/mach-nds/Makefile
+index 761dde82e..3fa16f27a 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/Makefile
++++ b/linux-2.6.x/arch/arm/mach-nds/Makefile
+@@ -27,6 +27,7 @@ extra-y += arm7/sdmmc.o
+ extra-y += arm7/dsitouch.o
+ extra-y += arm7/dsivol.o
+ extra-y += arm7/dsicam.o
++extra-y += arm7/wifiprobe.o
+ extra-y += arm7.bin
+ 
+ # this does not seem to have any effect (why?):
+@@ -38,7 +39,7 @@ $(obj)/arm7.bin: $(obj)/arm7.elf
+ 	$(OBJCOPY) -O binary $(obj)/arm7.elf $(obj)/arm7.bin
+ 	rm -f $(obj)/head.o
+ 
+-arm7obj = $(obj)/arm7/head.o $(obj)/arm7/main.o $(obj)/arm7/time.o $(obj)/arm7/spi.o $(obj)/arm7/sound.o $(obj)/arm7/microphone.o $(obj)/arm7/wifi.o $(obj)/arm7/divide.o $(obj)/arm7/sdmmc.o $(obj)/arm7/dsitouch.o $(obj)/arm7/dsivol.o $(obj)/arm7/dsicam.o
++arm7obj = $(obj)/arm7/head.o $(obj)/arm7/main.o $(obj)/arm7/time.o $(obj)/arm7/spi.o $(obj)/arm7/sound.o $(obj)/arm7/microphone.o $(obj)/arm7/wifi.o $(obj)/arm7/divide.o $(obj)/arm7/sdmmc.o $(obj)/arm7/dsitouch.o $(obj)/arm7/dsivol.o $(obj)/arm7/dsicam.o $(obj)/arm7/wifiprobe.o
+ 
+ $(obj)/arm7.elf: $(arm7obj) $(src)/arm7/arm7.lds
+ 	$(LD) -nostartfiles -nostdlib -o $(obj)/arm7.elf $(arm7obj) -T $(src)/arm7/arm7.lds
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c b/linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c
+index b3cc9ac0b..f827e6d66 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c
+@@ -42,6 +42,8 @@
+ #include "dsivol.h"
+ #include "microphone.h"
+ 
++extern void wifi_probe(unsigned int *touch, unsigned int *diag, unsigned int *info);
++
+ typedef volatile u16 vu16;
+ typedef volatile u32 vu32;
+ 
+@@ -887,6 +889,11 @@ static void nds_sd_request_inner(struct nds_sd_block *b)
+ 		b->result = NDS_SD_OK;
+ 		return;
+ 
++	case NDS_SD_CMD_WIFIPROBE:
++		wifi_probe(b->touch, b->diag, b->info);
++		b->result = NDS_SD_OK;
++		return;
++
+ 	case NDS_SD_CMD_POWEROFF:
+ 		dsi_poweroff_diag(b->diag);
+ 		b->result = NDS_SD_OK;
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/wifiprobe.c b/linux-2.6.x/arch/arm/mach-nds/arm7/wifiprobe.c
+new file mode 100644
+index 000000000..637c2c8b9
+--- /dev/null
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/wifiprobe.c
+@@ -0,0 +1,64 @@
++/*
++ * wifiprobe.c - one look at the DSi's Wi-Fi hardware, for deciding which Wi-Fi driver the DSi build can have (ARM9: /proc/dsiwifi).
++ * It never waits for the hardware (fixed delays only), so a chip that is missing cannot hang the ARM7 (the old DS Wi-Fi init did).
++ *   1. read the DS Wi-Fi chip's ID register (W_ID, 0x04808000) as the console left things
++ *   2. power the Wi-Fi block (POWCNT2 bit 1) and select the DS chip (GPIO_WIFI bit 8 = NTR mode, as libnds / dswifi do), read the ID again
++ *   3. select the DSi chip (bit 8 clear) and dump the first registers of its SDIO controller (0x04004A00)
++ *   4. put GPIO_WIFI and the power bit back as they were
++ * A DS Wi-Fi chip answers with an ID like 0x1440 or 0xC340; no chip reads 0x0000 or 0xFFFF.
++ */
++#define R16(a)	(*(volatile unsigned short *)(a))
++#define R32(a)	(*(volatile unsigned int *)(a))
++
++#define GPIO_WIFI	0x04004C04
++#define POWCNT2		0x04000304
++#define W_ID		0x04808000
++#define SDIO2		0x04004A00
++
++static void pdelay(int n)
++{
++	int k;
++
++	for (k = 0; k < n; k++)
++		asm volatile("" ::: "memory");
++}
++
++/* touch[0..7], diag[0..7], info[0..2] go back to the ARM9 */
++void wifi_probe(unsigned int *touch, unsigned int *diag, unsigned int *info)
++{
++	unsigned short gpio0 = R16(GPIO_WIFI), pwr0 = R16(POWCNT2);
++	int i;
++
++	diag[7] = 1;
++	info[0] = gpio0 | ((unsigned int)pwr0 << 16);
++	info[1] = R32(0x04004008);				/* SCFG_EXT */
++	info[2] = 0;
++	touch[0] = R16(W_ID);					/* as left by the loader */
++
++	diag[7] = 2;
++	R16(POWCNT2) = pwr0 | 2;				/* power for the Wi-Fi block */
++	pdelay(60000);
++	R16(GPIO_WIFI) = gpio0 | 0x100;				/* DS (NTR) chip */
++	pdelay(60000);
++	diag[0] = R16(GPIO_WIFI);				/* did the bit stick? */
++	touch[1] = R16(W_ID);					/* W_ID */
++	touch[2] = R16(W_ID + 4) | ((unsigned int)R16(W_ID + 6) << 16);		/* W_MODE_RST, W_MODE_WEP */
++	touch[3] = R16(W_ID + 0x3C) | ((unsigned int)R16(W_ID + 0x3E) << 16);	/* W_POWERSTATE and a neighbour */
++
++	diag[7] = 3;
++	R16(GPIO_WIFI) = gpio0 & ~0x100;			/* DSi (TWL) chip */
++	pdelay(60000);
++	diag[1] = R16(GPIO_WIFI);
++	for (i = 0; i < 4; i++)					/* first 8 halfwords of the SDIO controller */
++		touch[4 + i] = R16(SDIO2 + i * 4) | ((unsigned int)R16(SDIO2 + i * 4 + 2) << 16);
++	diag[2] = R16(SDIO2 + 0x1C) | ((unsigned int)R16(SDIO2 + 0x1E) << 16);	/* status registers */
++	diag[3] = R32(0x04004020);				/* SCFG_WL (or whatever lives there) */
++
++	diag[7] = 4;
++	R16(GPIO_WIFI) = gpio0;
++	R16(POWCNT2) = pwr0;
++	diag[4] = R16(GPIO_WIFI);
++	diag[5] = R16(POWCNT2);
++	diag[6] = R16(W_ID);					/* after: with the original GPIO mode and power */
++	diag[7] = 5;						/* done */
++}
+diff --git a/linux-2.6.x/arch/arm/mach-nds/volume.c b/linux-2.6.x/arch/arm/mach-nds/volume.c
+index f26ddef69..a60a4fb0b 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/volume.c
++++ b/linux-2.6.x/arch/arm/mach-nds/volume.c
+@@ -38,6 +38,34 @@ static int vol_read_proc(char *page, char **start, off_t off, int count, int *eo
+ extern int dsisd_micdiag(unsigned int *out);
+ 
+ /* /proc/dsimic: the microphone's counters from the ARM7 (for finding out where the data stops) */
++extern int dsisd_wifiprobe(unsigned int *out);
++
++/* /proc/dsiwifi: what the ARM7 saw of the Wi-Fi hardware (probed once, at the first read) */
++static int wifi_read_proc(char *page, char **start, off_t off, int count, int *eof, void *data)
++{
++	static unsigned int d[19];
++	static int done = -1;
++	int len;
++
++	if (done < 0)
++		done = dsisd_wifiprobe(d);
++	if (done != 0) {
++		len = sprintf(page, "ARM7 did not answer the Wi-Fi probe (%d)\n", done);
++	} else {
++		len = sprintf(page, "gpio_wifi=%04x powcnt2=%04x scfg_ext=%08x (before)\n"
++			      "NTR chip id: before=%04x after_ntr_switch=%04x gpio_readback=%04x mode_rst/wep=%08x powerstate=%08x\n"
++			      "TWL sdio regs: %08x %08x %08x %08x status=%08x scfg_wl=%08x\n"
++			      "restored: gpio=%04x powcnt2=%04x id_after=%04x progress=%u\n",
++			      d[16] & 0xffff, d[16] >> 16, d[17], d[0] & 0xffff, d[1] & 0xffff, d[8] & 0xffff, d[2], d[3],
++			      d[4], d[5], d[6], d[7], d[10], d[11], d[12] & 0xffff, d[13] & 0xffff, d[14] & 0xffff, d[15]);
++	}
++	*eof = 1;
++	if (off >= len)
++		return 0;
++	*start = page + off;
++	return len - off;
++}
++
+ static int mic_read_proc(char *page, char **start, off_t off, int count, int *eof, void *data)
+ {
+ 	unsigned int d[19];
+@@ -122,6 +150,7 @@ static int __init nds_volume_init(void)
+ 		e->write_proc = settings_write_proc;
+ 	}
+ 	create_proc_read_entry("dsimic", 0444, NULL, mic_read_proc, NULL);
++	create_proc_read_entry("dsiwifi", 0444, NULL, wifi_read_proc, NULL);
+ 	create_proc_read_entry("dsivolume", 0444, NULL, vol_read_proc, NULL);
+ 	return 0;
+ }
+diff --git a/linux-2.6.x/drivers/block/dldi_c.c b/linux-2.6.x/drivers/block/dldi_c.c
+index 7fb695b48..b95357652 100644
+--- a/linux-2.6.x/drivers/block/dldi_c.c
++++ b/linux-2.6.x/drivers/block/dldi_c.c
+@@ -210,6 +210,25 @@ int dsisd_camera_cmd(unsigned int sub, unsigned int arg, unsigned int *value, un
+ 	return ret;
+ }
+ 
++/* The ARM7's one-time look at the Wi-Fi hardware (arm7/wifiprobe.c): out[0..7] touch, out[8..15] diag, out[16..18] info. 0 = ok. */
++int dsisd_wifiprobe(unsigned int *out)
++{
++	int ret, i;
++
++	down(&sd_mutex);
++	ret = sd_request_locked(NDS_SD_CMD_WIFIPROBE, 0, 0);
++	if (ret == NDS_SD_OK) {
++		for (i = 0; i < 8; i++) {
++			out[i] = sd_block.touch[i];
++			out[8 + i] = sd_block.diag[i];
++		}
++		for (i = 0; i < 3; i++)
++			out[16 + i] = sd_block.info[i];
++	}
++	up(&sd_mutex);
++	return ret;
++}
++
+ /* Power chip status (and the backlight): op 1 sets the backlight register to val (0..4). out[0] battery register, out[1] volume register,
+  * out[2] backlight register (0xffffffff = unreadable). 0 = ok. */
+ int dsisd_pm(unsigned int op, unsigned int val, unsigned int *out)
+diff --git a/linux-2.6.x/include/asm-arm/arch-nds/dsisd.h b/linux-2.6.x/include/asm-arm/arch-nds/dsisd.h
+index 5857a39cb..862ef4c62 100644
+--- a/linux-2.6.x/include/asm-arm/arch-nds/dsisd.h
++++ b/linux-2.6.x/include/asm-arm/arch-nds/dsisd.h
+@@ -19,6 +19,7 @@
+ #define NDS_SD_CMD_INIT		0
+ #define NDS_SD_CMD_READ		1
+ #define NDS_SD_CMD_WRITE	2
++#define NDS_SD_CMD_WIFIPROBE	12	/* not SD: look at the Wi-Fi hardware once (arm7/wifiprobe.c): touch[0..7], diag[0..7], info[0..2] */
+ #define NDS_SD_CMD_PM		11	/* not SD: power chip status and backlight. count 1 = also set the backlight register to sector (0..4); answer: info[0] battery reg 0x20, info[1] volume reg 0x40, info[2] backlight reg 0x41 (0xffffffff if unreadable) */
+ #define NDS_SD_CMD_MICDIAG	10	/* not SD: the microphone counters (touch[] events, diag[] settings), see arm7/microphone.c */
+ #define NDS_SD_CMD_CAMERA	9	/* not SD: camera sensor control; count = sub command, sector = argument, answer in info[0] (value) and info[1] (error mask), see arm7/dsicam.h */
+diff --git a/vendors/Nintendo/DSI/logbody b/vendors/Nintendo/DSI/logbody
+index 07667b7e9..b068440a4 100644
+--- a/vendors/Nintendo/DSI/logbody
++++ b/vendors/Nintendo/DSI/logbody
+@@ -12,6 +12,8 @@ echo "--- /home/doom/dsdoom.log ---"
+ [ -f /home/doom/dsdoom.log ] && /usr/bin/cat /home/doom/dsdoom.log
+ echo "--- /proc/dsimic (microphone counters) ---"
+ /usr/bin/cat /proc/dsimic 2>&1
++echo "--- /proc/dsiwifi (Wi-Fi hardware probe) ---"
++/usr/bin/cat /proc/dsiwifi 2>&1
+ echo "--- /proc/dsivolume ---"
+ /usr/bin/cat /proc/dsivolume 2>&1
+ echo "--- /proc/meminfo ---"
+-- 
+2.56.0
+

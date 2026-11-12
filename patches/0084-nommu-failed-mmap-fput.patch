@@ -1,0 +1,28 @@
+From e3b8bbfac7f9038d17d9be7d74498cb7ce5b6124 Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Thu, 12 Nov 2026 15:12:03 -0600
+Subject: [PATCH] nommu: a failed anonymous mmap no longer calls fput(NULL)
+ (kernel oops whenever a program asked for more contiguous memory than exists)
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ linux-2.6.x/mm/nommu.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/linux-2.6.x/mm/nommu.c b/linux-2.6.x/mm/nommu.c
+index d9d06732d..d7e17eda7 100644
+--- a/linux-2.6.x/mm/nommu.c
++++ b/linux-2.6.x/mm/nommu.c
+@@ -855,7 +855,8 @@ unsigned long do_mmap_pgoff(struct file *file,
+ 	up_write(&nommu_vma_sem);
+ 	kfree(vml);
+ 	if (vma) {
+-		fput(vma->vm_file);
++		if (vma->vm_file)		/* an anonymous mapping that could not be allocated has no file: fput(NULL) oopsed */
++			fput(vma->vm_file);
+ 		kfree(vma);
+ 	}
+ 	return ret;
+-- 
+2.56.0
+

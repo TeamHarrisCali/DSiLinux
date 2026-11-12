@@ -1,5 +1,5 @@
---- a/i_system.c	2026-11-11 17:49:43.902944872 -0600
-+++ b/i_system.c	2026-11-11 17:57:06.414367157 -0600
+--- a/i_system.c	2026-11-12 15:12:03.192668164 -0600
++++ b/i_system.c	2026-11-12 15:10:26.099388871 -0600
 @@ -55,8 +55,8 @@
  #include <CoreFoundation/CFUserNotification.h>
  #endif
@@ -7,11 +7,21 @@
 -#define DEFAULT_RAM 6 /* MiB */
 -#define MIN_RAM     6  /* MiB */
 +#define DEFAULT_RAM 4 /* MiB */
-+#define MIN_RAM     3  /* MiB */
++#define MIN_RAM     2  /* MiB */
  
  
  typedef struct atexit_listentry_s atexit_listentry_t;
---- a/doomgeneric.c	2026-11-11 17:49:43.899944845 -0600
+@@ -114,7 +114,8 @@
+ 
+         // Try to allocate the zone memory.
+ 
+-        *size = default_ram * 1024 * 1024;
++        // DSLinux (no MMU) hands out memory in blocks of 2^n pages: leave room for the C library's header so 4 MiB fits a 4 MiB block
++        *size = default_ram * 1024 * 1024 - 32768;
+ 
+         zonemem = malloc(*size);
+ 
+--- a/doomgeneric.c	2026-11-12 15:12:03.189668146 -0600
 +++ b/doomgeneric.c	2026-11-11 17:57:06.417495095 -0600
 @@ -18,7 +18,7 @@
  
