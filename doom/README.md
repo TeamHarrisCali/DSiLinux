@@ -16,3 +16,5 @@
   Start + Select leave at once.
 
 Build note: `dsdoom` lives in the ext2 root image, not in the ROM's romfs, so it must be linked with `-Wl,-elf2flt="-r ..."` (load into RAM); a default (execute in place) flat binary does not start from there.
+
+Build note 2: compile and link through `/work/tools/ucfront-gcc arm-linux-elf-gcc` (with `ROOTDIR`, `CONFIG_LIBCDIR=uClibc`, `CONFIG_DEFAULTS_LIBC_UCLIBC=y` set, as `build.sh` does). Plain `arm-linux-elf-gcc` picks the toolchain's own libc, whose start-up code is not PIC, and the program dies with a data abort in `__uClibc_init`.
