@@ -1,0 +1,267 @@
+From 6d6fd32c7180801e0804e8da91c5f3d66f4cd060 Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Thu, 12 Nov 2026 15:21:12 -0600
+Subject: [PATCH] DS Wi-Fi in the DSi build: GPIO_WIFI selects the DS chip (its
+ id reads 0xC340 on the DSi XL, w97j probe), bounded waits on the chip and in
+ the interrupt, no SPI power chip LED writes on the DSi, ARM9 waits for the
+ ARM7 have timeouts; CONFIG_NDS_WIFI=y
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ linux-2.6.x/arch/arm/mach-nds/arm7/wifi.c | 78 +++++++++++++++++------
+ linux-2.6.x/drivers/net/wireless/nds.c    | 16 +++--
+ vendors/Nintendo/DSI/config.linux-2.6.x   |  2 +-
+ 3 files changed, 69 insertions(+), 27 deletions(-)
+
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/wifi.c b/linux-2.6.x/arch/arm/mach-nds/arm7/wifi.c
+index 056dca905..98a460676 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/arm7/wifi.c
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/wifi.c
+@@ -40,6 +40,7 @@ SOFTWARE.
+ #include "arm7.h"
+ #include "spi.h"
+ #include "wifi.h"
++#include "dsitouch.h"
+ 
+ Wifi_Data wifi_data;
+ 
+@@ -81,12 +82,43 @@ static int ReadFlashHWord(int address)
+ 	return ReadFlashBytes(address, 2);
+ }
+ 
++/* the status LED is on the DS power chip (SPI); the DSi has a different one */
++static void wifi_led_write(u8 val)
++{
++	if (!dsitouch_active())
++		power_write(POWER_CONTROL, val);
++}
++
++/* the DS Wi-Fi chip on a DSi must be selected (GPIO_WIFI bit 8, as libnds does), and it takes a few ms to settle */
++static void wifi_dsi_select_ntr(void)
++{
++	int k;
++
++	if (!dsitouch_active())
++		return;
++	*(volatile u16 *)0x04004C04 |= 0x100;
++	for (k = 0; k < 60000; k++)
++		asm volatile("" ::: "memory");
++}
++
++/* The chip is waited for with a limit: a chip that does not answer must not hang the ARM7 (SD card, sound, touch all live here) */
++#define WIFI_SIO_TRIES	0x10000
++
+ /* some WIFI access utils */
+ static int Wifi_BBRead(int a)
+ {
+-	while (WIFI_BBSIOBUSY & 1) ;
++	int i = WIFI_SIO_TRIES;
++
++	while (WIFI_BBSIOBUSY & 1) {
++		if (!i--)
++			return 0;
++	}
+ 	WIFI_BBSIOCNT = a | 0x6000;
+-	while (WIFI_BBSIOBUSY & 1) ;
++	i = WIFI_SIO_TRIES;
++	while (WIFI_BBSIOBUSY & 1) {
++		if (!i--)
++			return 0;
++	}
+ 	return WIFI_BBSIOREAD;
+ }
+ 
+@@ -110,10 +142,19 @@ static int Wifi_BBWrite(int a, int b)
+ 
+ static void Wifi_RFWrite(int writedata)
+ {
+-	while (WIFI_RFSIOBUSY & 1) ;
++	int i = WIFI_SIO_TRIES;
++
++	while (WIFI_RFSIOBUSY & 1) {
++		if (!i--)
++			return;
++	}
+ 	WIFI_RFSIODATA1 = writedata;
+ 	WIFI_RFSIODATA2 = writedata >> 16;
+-	while (WIFI_RFSIOBUSY & 1) ;
++	i = WIFI_SIO_TRIES;
++	while (WIFI_RFSIOBUSY & 1) {
++		if (!i--)
++			return;
++	}
+ }
+ 
+ /* init stuff, but don't turn on device yet */
+@@ -330,8 +371,7 @@ static void wifi_try_to_associate(void)
+ 	wifi_data.state &= ~(WIFI_STATE_ASSOCIATED | WIFI_STATE_ASSOCIATING);
+ 
+ 	/* Slow LED flash when not associated */
+-	power_write(POWER_CONTROL,
+-		    (power_read(POWER_CONTROL) & ~POWER0_LED_FAST) |
++	wifi_led_write((power_read(POWER_CONTROL) & ~POWER0_LED_FAST) |
+ 		    POWER0_LED_BLINK);
+ 
+ 	for (i = 0; i < WIFI_MAX_AP; i++) {
+@@ -374,8 +414,7 @@ static void wifi_try_to_associate(void)
+ 		wifi_data.state |= WIFI_STATE_ASSOCIATED;
+ 
+ 		/* Fast LED flash when associated */
+-		power_write(POWER_CONTROL,
+-			    power_read(POWER_CONTROL) | POWER0_LED_BLINK |
++		wifi_led_write(power_read(POWER_CONTROL) | POWER0_LED_BLINK |
+ 			    POWER0_LED_FAST);
+ 	} else {
+ 		wifi_data.state &= ~WIFI_STATE_AUTHENTICATED;
+@@ -603,10 +642,10 @@ void wifi_open(void)
+ 	wifi_data.state &= ~(WIFI_STATE_ASSOCIATED | WIFI_STATE_ASSOCIATING);
+ 
+ 	/* Slow LED flash when not associated */
+-	power_write(POWER_CONTROL,
+-		    (power_read(POWER_CONTROL) & ~POWER0_LED_FAST) |
++	wifi_led_write((power_read(POWER_CONTROL) & ~POWER0_LED_FAST) |
+ 		    POWER0_LED_BLINK);
+ 
++	wifi_dsi_select_ntr();
+ 	POWERCNT7 |= 2;		// enable power for the wifi
+ 	*((volatile u16 *)0x04000206) = 0x30;	// ???
+ 
+@@ -672,8 +711,7 @@ void wifi_close(void)
+ 	POWERCNT7 &= ~2;
+ 
+ 	/* Stop flashing */
+-	power_write(POWER_CONTROL,
+-		    power_read(POWER_CONTROL) & ~(POWER0_LED_BLINK |
++	wifi_led_write(power_read(POWER_CONTROL) & ~(POWER0_LED_BLINK |
+ 						  POWER0_LED_FAST));
+ }
+ 
+@@ -1108,8 +1146,7 @@ static int Wifi_ProcessReassocResponse(int macbase, int framelen)
+ 		wifi_data.state |= WIFI_STATE_ASSOCIATED;
+ 
+ 		/* Fast LED flash when associated */
+-		power_write(POWER_CONTROL,
+-			    power_read(POWER_CONTROL) |
++		wifi_led_write(power_read(POWER_CONTROL) |
+ 			    POWER0_LED_BLINK | POWER0_LED_FAST);
+ 
+ 		wifi_data.state &=
+@@ -1229,8 +1266,7 @@ static int Wifi_ProcessDeAuthenticationFrame(int macbase, int framelen)
+ 		wifi_data.state &= ~(WIFI_STATE_ASSOCIATED);
+ 
+ 		/* Slow LED flash when not associated */
+-		power_write(POWER_CONTROL,
+-			    (power_read(POWER_CONTROL) &
++		wifi_led_write((power_read(POWER_CONTROL) &
+ 			     ~POWER0_LED_FAST) | POWER0_LED_BLINK);
+ 
+ 		Wifi_SendAssocPacket();
+@@ -1239,8 +1275,7 @@ static int Wifi_ProcessDeAuthenticationFrame(int macbase, int framelen)
+ 		    ~(WIFI_STATE_ASSOCIATED | WIFI_STATE_AUTHENTICATED);
+ 
+ 		/* Slow LED flash when not associated */
+-		power_write(POWER_CONTROL,
+-			    (power_read(POWER_CONTROL) &
++		wifi_led_write((power_read(POWER_CONTROL) &
+ 			     ~POWER0_LED_FAST) | POWER0_LED_BLINK);
+ 
+ 		Wifi_SendAuthPacket(WEPMODE_NONE);
+@@ -1342,6 +1377,7 @@ static void Wifi_Intr_RxEnd(void)
+ 	int cut;
+ 	int tIME;
+ 	int temp;
++	int guard = 0;
+ 
+ 	tIME = NDS_IME;
+ 
+@@ -1353,7 +1389,7 @@ static void Wifi_Intr_RxEnd(void)
+ 	wifi_data.stats[WIFI_STATS_DEBUG4] = WIFI_REG(0x5A);
+ */
+ 
+-	while (WIFI_REG(0x54) != WIFI_REG(0x5A)) {
++	while (WIFI_REG(0x54) != WIFI_REG(0x5A) && guard++ < 64) {
+ 		base = WIFI_REG(0x5A) << 1;
+ 		packetlen = Wifi_MACReadRx(base, 8);
+ 		full_packetlen = 12 + ((packetlen + 3) & (~3));
+@@ -1459,8 +1495,8 @@ static void Wifi_Intr_TxErr(void)
+ 
+ void wifi_interrupt(void)
+ {
+-	int wIF;
+-	while ((wIF = WIFI_IE & WIFI_IF) != 0) {
++	int wIF, rounds = 0;
++	while ((wIF = WIFI_IE & WIFI_IF) != 0 && rounds++ < 64) {
+ 		wifi_data.stats[WIFI_STATS_DEBUG6]++;
+ 		wifi_data.stats[WIFI_STATS_DEBUG1] = WIFI_IE;
+ 		wifi_data.stats[WIFI_STATS_DEBUG2] = WIFI_IF;
+diff --git a/linux-2.6.x/drivers/net/wireless/nds.c b/linux-2.6.x/drivers/net/wireless/nds.c
+index f58e43bca..54c92d03d 100644
+--- a/linux-2.6.x/drivers/net/wireless/nds.c
++++ b/linux-2.6.x/drivers/net/wireless/nds.c
+@@ -277,7 +277,13 @@ static int nds_dev_init(struct net_device *dev)
+ 	mac_query_complete = 0;
+ 	mac_query_output = (void *)dev->dev_addr;
+ 	nds_fifo_send(FIFO_WIFI_CMD(FIFO_WIFI_CMD_MAC_QUERY, 0));
+-	wait_event_interruptible(ndswifi_wait, mac_query_complete != 0);
++	wait_event_interruptible_timeout(ndswifi_wait, mac_query_complete != 0, 3 * HZ);
++	if (!mac_query_complete) {			/* the ARM7 did not answer: carry on with a made-up (locally administered) address */
++		static const u8 fake[6] = { 0x02, 0x44, 0x53, 0x4c, 0x69, 0x6e };
++
++		printk(KERN_WARNING "nds wifi: no answer from the ARM7, using a fixed MAC address\n");
++		memcpy(dev->dev_addr, fake, 6);
++	}
+ 	return 0;
+ }
+ 
+@@ -371,7 +377,7 @@ static int nds_get_mode(struct net_device *dev,
+ 
+ 	get_mode_completed = 0;
+ 	nds_fifo_send(FIFO_WIFI_CMD(FIFO_WIFI_CMD_GET_AP_MODE, 0));
+-	wait_event_interruptible(ndswifi_wait, get_mode_completed != 0);
++	wait_event_interruptible_timeout(ndswifi_wait, get_mode_completed != 0, 3 * HZ);
+ 	*uwrq =
+ 	    (mode_query_output ==
+ 	     WIFI_AP_ADHOC) ? IW_MODE_ADHOC : IW_MODE_INFRA;
+@@ -486,7 +492,7 @@ static int nds_set_scan(struct net_device *dev,
+ 
+ 	scan_complete = 0;
+ 	nds_fifo_send(FIFO_WIFI_CMD(FIFO_WIFI_CMD_SCAN, 0));
+-	wait_event_interruptible(ndswifi_wait, scan_complete != 0);
++	wait_event_interruptible_timeout(ndswifi_wait, scan_complete != 0, 3 * HZ);
+ 
+ 	return 0;
+ }
+@@ -513,7 +519,7 @@ static int nds_get_scan(struct net_device *dev,
+ 	/* stop ap list updates */
+ 	ap_query_complete = 0;
+ 	nds_fifo_send(FIFO_WIFI_CMD(FIFO_WIFI_CMD_AP_QUERY, 1));
+-	wait_event_interruptible(ndswifi_wait, ap_query_complete != 0);
++	wait_event_interruptible_timeout(ndswifi_wait, ap_query_complete != 0, 3 * HZ);
+ 
+ 	for (i = 0; i < WIFI_MAX_AP; i++) {
+ 		if (!aplist[i].channel)
+@@ -568,7 +574,7 @@ static int nds_get_scan(struct net_device *dev,
+ 	/* restart aplist updates */
+ 	ap_query_complete = 0;
+ 	nds_fifo_send(FIFO_WIFI_CMD(FIFO_WIFI_CMD_AP_QUERY, 0));
+-	wait_event_interruptible(ndswifi_wait, ap_query_complete != 0);
++	wait_event_interruptible_timeout(ndswifi_wait, ap_query_complete != 0, 3 * HZ);
+ 
+ 	/* Length of data */
+ 	dwrq->length = (current_ev - extra);
+diff --git a/vendors/Nintendo/DSI/config.linux-2.6.x b/vendors/Nintendo/DSI/config.linux-2.6.x
+index a5fdad893..66d1ad5e6 100644
+--- a/vendors/Nintendo/DSI/config.linux-2.6.x
++++ b/vendors/Nintendo/DSI/config.linux-2.6.x
+@@ -438,7 +438,7 @@ CONFIG_NET_RADIO=y
+ #
+ # Nintendo DS Wireless interface (802.11)
+ #
+-# CONFIG_NDS_WIFI is not set
++CONFIG_NDS_WIFI=y
+ # CONFIG_HOSTAP is not set
+ 
+ #
+-- 
+2.56.0
+

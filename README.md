@@ -5,7 +5,7 @@ its internal SD slot and its touchscreen, launched from TWiLight Menu++ through 
 
 This repository holds the notes, build scripts and patches. The source tree is a separate clone of
 [ipwndev/DSLinux](https://github.com/ipwndev/DSLinux) (GPL-2.0, a mirror of the official SVN) that you create in `work/dslinux`;
-the changes are in `patches/` (85 small patches, in order) and explained in `docs/`.
+the changes are in `patches/` (86 small patches, in order) and explained in `docs/`.
 
 ## What works, and how it was tested
 
@@ -42,7 +42,7 @@ the changes are in `patches/` (85 small patches, in order) and explained in `doc
 ## Not done, not verified, or out of scope
 
 - **Faster clock:** nothing to do, the loader already runs the ARM9 at 134 MHz in DSi mode. (The ARM7 has no equivalent switch as far as I know; it stays at about 33 MHz.)
-- **Wi-Fi:** the DS Wi-Fi driver is left out of the DSi build (the chip does not exist in DSi mode and its setup hung the boot). DSi Wi-Fi (an Atheros chip) is not attempted.
+- **Wi-Fi:** the DS Wi-Fi chip exists on the DSi XL (id 0xC340 in `/proc/dsiwifi`, w97j) and the driver is enabled again from w97k (open or WEP networks only, interface `nds`); not yet run on the console. The DSi's Atheros chip (WPA2) is not attempted.
 - **Cameras, DSP, DSi-mode sound:** not attempted or not tested.
 - **Extra login terminals and `gpm`:** off by default (they stalled the first boots in 16 MB mode); `extra_terminals="YES"` in `/etc/rc.conf` turns them on, untested.
 - **`fwver` (DS firmware version at boot):** skipped by default; its firmware read could wait forever in DSi mode.
