@@ -14,3 +14,5 @@
 * Picture 320x200 -> 256x192 (4:3), low detail, 9 screen blocks (`default.cfg`), zone memory 4 MB, no sound, no music.
 * Buttons: d-pad move/turn, A fire (Enter in menus), B use, L/R strafe, Y run, X next weapon ("y" in the quit question), Start menu, Select automap,
   Start + Select leave at once.
+
+Build note: `dsdoom` lives in the ext2 root image, not in the ROM's romfs, so it must be linked with `-Wl,-elf2flt="-r ..."` (load into RAM); a default (execute in place) flat binary does not start from there.
