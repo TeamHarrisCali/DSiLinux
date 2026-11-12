@@ -1,0 +1,49 @@
+From 84e01d58d8604b73eb125b4bf18f2d167f546fac Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Thu, 12 Nov 2026 15:41:41 -0600
+Subject: [PATCH] dsisd: hold the request-block mutex from filling
+ sd_block.data to copying the answer out (the root device took it only inside
+ sd_request: the log writer could overwrite the sector data in between, so log
+ text went into ext2 inode tables and ext2 data into the log)
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ linux-2.6.x/drivers/block/dldi_c.c | 12 +++++++++---
+ 1 file changed, 9 insertions(+), 3 deletions(-)
+
+diff --git a/linux-2.6.x/drivers/block/dldi_c.c b/linux-2.6.x/drivers/block/dldi_c.c
+index b95357652..a1782ac67 100644
+--- a/linux-2.6.x/drivers/block/dldi_c.c
++++ b/linux-2.6.x/drivers/block/dldi_c.c
+@@ -496,10 +496,18 @@ static void dsisd_transfer(unsigned long sector, unsigned long nsect,
+ 
+ 		if (n > NDS_SD_MAX_SECTORS)
+ 			n = NDS_SD_MAX_SECTORS;
++		/* The shared request block (sd_block.data included) belongs to one request at a time: the mutex must be held from filling
++		 * the data to copying the answer out. It was only taken inside sd_request(), so the log writer (savelog, every 10 s)
++		 * could overwrite the sector data between the copy and the request: log text was written into ext2 blocks (inode
++		 * tables!) and ext2 data into the log. */
++		down(&sd_mutex);
+ 		if (write)
+ 			memcpy(sd_block.data, buffer, n * SECTOR_SIZE);
+-		ret = sd_request(write ? NDS_SD_CMD_WRITE : NDS_SD_CMD_READ,
++		ret = sd_request_locked(write ? NDS_SD_CMD_WRITE : NDS_SD_CMD_READ,
+ 				 sector, n);
++		if (ret == NDS_SD_OK && !write)
++			memcpy(buffer, sd_block.data, n * SECTOR_SIZE);
++		up(&sd_mutex);
+ 		if (ret != NDS_SD_OK) {
+ 			printk(KERN_ERR "dsisd: %s sector %lu x%u failed: "
+ 			       "result %d, TMIO status %08x\n",
+@@ -525,8 +533,6 @@ static void dsisd_transfer(unsigned long sector, unsigned long nsect,
+ 			}
+ 			return;
+ 		}
+-		if (!write)
+-			memcpy(buffer, sd_block.data, n * SECTOR_SIZE);
+ 		sector += n;
+ 		nsect -= n;
+ 		buffer += n * SECTOR_SIZE;
+-- 
+2.56.0
+

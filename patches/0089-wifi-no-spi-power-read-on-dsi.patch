@@ -1,0 +1,34 @@
+From 308400a3e5de8793a7a550efc10c6a09dc9fce9a Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Thu, 12 Nov 2026 15:41:41 -0600
+Subject: [PATCH] ARM7 Wi-Fi: do not evaluate power_read() (SPI power chip) on
+ the DSi - it never finishes; found by the bring-up trace (hung right after
+ step 1)
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ linux-2.6.x/arch/arm/mach-nds/arm7/wifi.c | 8 +++-----
+ 1 file changed, 3 insertions(+), 5 deletions(-)
+
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/wifi.c b/linux-2.6.x/arch/arm/mach-nds/arm7/wifi.c
+index 0b366e80a..f2a3c8536 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/arm7/wifi.c
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/wifi.c
+@@ -83,11 +83,9 @@ static int ReadFlashHWord(int address)
+ }
+ 
+ /* the status LED is on the DS power chip (SPI); the DSi has a different one */
+-static void wifi_led_write(u8 val)
+-{
+-	if (!dsitouch_active())
+-		power_write(POWER_CONTROL, val);
+-}
++/* A macro, not a function: the argument reads the power chip over the SPI bus (power_read waits for the bus without a limit), and on the DSi
++ * that read never finishes - the first `ifconfig nds up` hung the ARM7 right after step 1 of the trace. So the argument is not even evaluated. */
++#define wifi_led_write(v)	do { if (!dsitouch_active()) power_write(POWER_CONTROL, (v)); } while (0)
+ 
+ /* the DS Wi-Fi chip on a DSi must be selected (GPIO_WIFI bit 8, as libnds does), and it takes a few ms to settle */
+ static void wifi_dsi_select_ntr(void)
+-- 
+2.56.0
+

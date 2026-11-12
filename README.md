@@ -5,7 +5,7 @@ its internal SD slot and its touchscreen, launched from TWiLight Menu++ through 
 
 This repository holds the notes, build scripts and patches. The source tree is a separate clone of
 [ipwndev/DSLinux](https://github.com/ipwndev/DSLinux) (GPL-2.0, a mirror of the official SVN) that you create in `work/dslinux`;
-the changes are in `patches/` (87 small patches, in order) and explained in `docs/`.
+the changes are in `patches/` (89 small patches, in order) and explained in `docs/`.
 
 ## What works, and how it was tested
 
