@@ -1,0 +1,151 @@
+From 11524e5d67b302b8500f1e107a55b844a4c4c4e3 Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Thu, 12 Nov 2026 15:27:36 -0600
+Subject: [PATCH] Wi-Fi bring-up trace: the ARM7 numbers the steps of
+ wifi_open() into the shared stats array, the ARM9 prints them (KERN_EMERG,
+ visible over the desktop) for 6 s after ifconfig nds up, with the chip
+ interrupt counters
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ linux-2.6.x/arch/arm/mach-nds/arm7/wifi.c | 25 +++++++++++++++++++++++
+ linux-2.6.x/drivers/net/wireless/nds.c    | 23 +++++++++++++++++++++
+ 2 files changed, 48 insertions(+)
+
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/wifi.c b/linux-2.6.x/arch/arm/mach-nds/arm7/wifi.c
+index 98a460676..0b366e80a 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/arm7/wifi.c
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/wifi.c
+@@ -101,6 +101,14 @@ static void wifi_dsi_select_ntr(void)
+ 		asm volatile("" ::: "memory");
+ }
+ 
++/* progress marker for the ARM9 (it prints it: a hang in wifi_open() otherwise leaves no trace) */
++#define WIFI_TRACE	WIFI_STATS_HW_1DC
++static void wtrace(u32 n)
++{
++	if (wifi_data.stats)
++		wifi_data.stats[WIFI_TRACE] = n;
++}
++
+ /* The chip is waited for with a limit: a chip that does not answer must not hang the ARM7 (SD card, sound, touch all live here) */
+ #define WIFI_SIO_TRIES	0x10000
+ 
+@@ -635,6 +643,7 @@ void wifi_open(void)
+ {
+ 	int i;
+ 
++	wtrace(1);
+ 	if (wifi_data.state & WIFI_STATE_UP)
+ 		return;
+ 
+@@ -645,17 +654,24 @@ void wifi_open(void)
+ 	wifi_led_write((power_read(POWER_CONTROL) & ~POWER0_LED_FAST) |
+ 		    POWER0_LED_BLINK);
+ 
++	wtrace(2);
+ 	wifi_dsi_select_ntr();
++	wtrace(3);
+ 	POWERCNT7 |= 2;		// enable power for the wifi
+ 	*((volatile u16 *)0x04000206) = 0x30;	// ???
++	wtrace(4);
+ 
+ 	// reset/shutdown wifi:
+ 	WIFI_REG(0x4) = 0xffff;
++	wtrace(5);
+ 	Wifi_Stop();
++	wtrace(6);
+ 	Wifi_Shutdown();	// power off wifi
++	wtrace(7);
+ 
+ 	for (i = 0x4000; i < 0x6000; i += 2)
+ 		WIFI_REG(i) = 0;
++	wtrace(8);
+ 
+ /*
+ 	for(i=0;i<400000;i++) i++;
+@@ -663,10 +679,14 @@ void wifi_open(void)
+ 
+ 	WIFI_IE = 0;
+ 	Wifi_WakeUp();
++	wtrace(9);
+ 
+ 	Wifi_MacInit();
++	wtrace(10);
+ 	Wifi_RFInit();
++	wtrace(11);
+ 	Wifi_BBInit();
++	wtrace(12);
+ 
+ 	// Set Default Settings
+ 	WIFI_MACADDR[0] = ((u16 *) wifi_data.MacAddr)[0];
+@@ -684,7 +704,9 @@ void wifi_open(void)
+ 		WIFI_WEPKEY3[i] = ((u16 *) wifi_data.wepkey[3])[i];
+ 	}
+ 
++	wtrace(13);
+ 	Wifi_SetChannel(wifi_data.reqChannel);
++	wtrace(14);
+ 
+ 	Wifi_BBWrite(0x13, 0x00);
+ 	Wifi_BBWrite(0x35, 0x1F);
+@@ -693,10 +715,13 @@ void wifi_open(void)
+ 	for(i=0;i<400000;i++) i++;
+ */
+ 
++	wtrace(15);
+ 	Wifi_Start();
++	wtrace(16);
+ 
+ 	if (wifi_data.ssid[0])
+ 		wifi_try_to_associate();
++	wtrace(99);
+ }
+ 
+ /* turn off the wifi device */
+diff --git a/linux-2.6.x/drivers/net/wireless/nds.c b/linux-2.6.x/drivers/net/wireless/nds.c
+index 54c92d03d..c85c50cf5 100644
+--- a/linux-2.6.x/drivers/net/wireless/nds.c
++++ b/linux-2.6.x/drivers/net/wireless/nds.c
+@@ -20,6 +20,7 @@
+ 
+ #include <linux/config.h>
+ #include <linux/module.h>
++#include <linux/delay.h>
+ #include <linux/kernel.h>
+ #include <linux/proc_fs.h>
+ #include <linux/ptrace.h>
+@@ -240,8 +241,30 @@ static int nds_open(struct net_device *dev)
+ {
+ 	DEBUG(7, "Called: %s\n", __func__);
+ 
++	arm7_stats[WIFI_STATS_HW_1DC] = 0;
++	dmac_clean_range((unsigned long)&arm7_stats[0], (unsigned long)&arm7_stats[WIFI_STATS_MAX]);
+ 	nds_fifo_send(FIFO_WIFI_CMD(FIFO_WIFI_CMD_UP, 0));
+ 
++	/* DSLinuxDSi: watch the ARM7 bring the chip up for a few seconds and say what it is doing on the console (KERN_EMERG is always
++	 * shown, over the desktop): if the ARM7 hangs, the last step number says where, and a runaway chip interrupt shows as counters */
++	{
++		u32 last = 0xffffffff, v;
++		int i;
++
++		for (i = 0; i < 40; i++) {
++			msleep(150);
++			dmac_inv_range((unsigned long)&arm7_stats[0], (unsigned long)&arm7_stats[WIFI_STATS_MAX]);
++			v = arm7_stats[WIFI_STATS_HW_1DC];
++			if (v != last) {
++				printk(KERN_EMERG "nds wifi: ARM7 step %u\n", v);
++				last = v;
++			}
++			if (i % 7 == 6)
++				printk(KERN_EMERG "nds wifi: step %u, chip irq rounds %u, ie %04x if %04x\n", v,
++				       arm7_stats[WIFI_STATS_DEBUG6], arm7_stats[WIFI_STATS_DEBUG1], arm7_stats[WIFI_STATS_DEBUG2]);
++		}
++	}
++
+ 	netif_start_queue(dev);
+ 
+ 	return 0;
+-- 
+2.56.0
+
