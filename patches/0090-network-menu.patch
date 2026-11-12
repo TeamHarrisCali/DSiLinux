@@ -1,0 +1,173 @@
+From b5375d4c4834b547ec66d548ddf59626bfb29cf3 Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Thu, 12 Nov 2026 15:52:53 -0600
+Subject: [PATCH] Start > Network: Wi-Fi scan / connect / status / SSH server
+ (scripts in /boot run in a terminal window; the network is kept in
+ /home/wifi.conf); Save log now includes ifconfig/iwconfig nds and the routes
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ user/microwin/src/demos/nanox/dsdesk.c |  7 ++++++
+ vendors/Nintendo/DSI/Makefile          |  4 ++++
+ vendors/Nintendo/DSI/logbody           |  7 ++++++
+ vendors/Nintendo/DSI/wifi-connect      | 33 ++++++++++++++++++++++++++
+ vendors/Nintendo/DSI/wifi-scan         |  8 +++++++
+ vendors/Nintendo/DSI/wifi-ssh          | 18 ++++++++++++++
+ vendors/Nintendo/DSI/wifi-status       |  7 ++++++
+ 7 files changed, 84 insertions(+)
+ create mode 100755 vendors/Nintendo/DSI/wifi-connect
+ create mode 100755 vendors/Nintendo/DSI/wifi-scan
+ create mode 100755 vendors/Nintendo/DSI/wifi-ssh
+ create mode 100755 vendors/Nintendo/DSI/wifi-status
+
+diff --git a/user/microwin/src/demos/nanox/dsdesk.c b/user/microwin/src/demos/nanox/dsdesk.c
+index 68d6afde4..5eea7051f 100644
+--- a/user/microwin/src/demos/nanox/dsdesk.c
++++ b/user/microwin/src/demos/nanox/dsdesk.c
+@@ -58,6 +58,12 @@ static const struct item puzzles[] = {
+ 	{ "Sudoku", "/boot/dsarcade", "sudoku" },
+ 	{ "Life", "/boot/dsarcade", "life" },
+ };
++static const struct item network_items[] = {
++	{ "Wi-Fi scan", "/boot/nxterm", "/boot/wifi-scan" },
++	{ "Wi-Fi connect", "/boot/nxterm", "/boot/wifi-connect" },
++	{ "Wi-Fi status", "/boot/nxterm", "/boot/wifi-status" },
++	{ "SSH server", "/boot/nxterm", "/boot/wifi-ssh" },
++};
+ static const struct item system_items[] = {
+ 	{ "Settings", "/boot/dssettings" },
+ 	{ "Bench", "/boot/dsbench" },
+@@ -71,6 +77,7 @@ static const struct item root_items[] = {
+ 	{ "Multimedia", NULL, NULL, multimedia, COUNT(multimedia) },
+ 	{ "Games", NULL, NULL, games, COUNT(games) },
+ 	{ "Puzzles", NULL, NULL, puzzles, COUNT(puzzles) },
++	{ "Network", NULL, NULL, network_items, COUNT(network_items) },
+ 	{ "System", NULL, NULL, system_items, COUNT(system_items) },
+ 	{ "Exit desktop", "/boot/desktop", "stop", NULL, 0, 1 },
+ 	{ "Shut down", "/boot/shutdown" },
+diff --git a/vendors/Nintendo/DSI/Makefile b/vendors/Nintendo/DSI/Makefile
+index 1637c9e37..37abc9124 100644
+--- a/vendors/Nintendo/DSI/Makefile
++++ b/vendors/Nintendo/DSI/Makefile
+@@ -109,6 +109,10 @@ romfs:
+ 	$(ROMFSINST) -p +x /boot/savelog
+ 	$(ROMFSINST) -p +x /boot/autolog
+ 	$(ROMFSINST) -p +x /boot/logbody
++	$(ROMFSINST) -p +x /boot/wifi-scan
++	$(ROMFSINST) -p +x /boot/wifi-connect
++	$(ROMFSINST) -p +x /boot/wifi-status
++	$(ROMFSINST) -p +x /boot/wifi-ssh
+ 	$(ROMFSINST) -p +x /boot/desktop
+ 	$(ROMFSINST) -p +x /boot/desktop-apps
+ 	$(ROMFSINST) -p +x /boot/shutdown
+diff --git a/vendors/Nintendo/DSI/logbody b/vendors/Nintendo/DSI/logbody
+index b068440a4..825479756 100644
+--- a/vendors/Nintendo/DSI/logbody
++++ b/vendors/Nintendo/DSI/logbody
+@@ -10,6 +10,13 @@ echo "--- desktop.log ---"
+ [ -f /tmp/desktop.log ] && /usr/bin/cat /tmp/desktop.log
+ echo "--- /home/doom/dsdoom.log ---"
+ [ -f /home/doom/dsdoom.log ] && /usr/bin/cat /home/doom/dsdoom.log
++echo "--- network (nds) ---"
++ifconfig nds 2>&1
++iwconfig nds 2>&1
++echo "--- /proc/net/route ---"
++/usr/bin/cat /proc/net/route 2>&1
++echo "--- /proc/net/arp ---"
++/usr/bin/cat /proc/net/arp 2>&1
+ echo "--- /proc/dsimic (microphone counters) ---"
+ /usr/bin/cat /proc/dsimic 2>&1
+ echo "--- /proc/dsiwifi (Wi-Fi hardware probe) ---"
+diff --git a/vendors/Nintendo/DSI/wifi-connect b/vendors/Nintendo/DSI/wifi-connect
+new file mode 100755
+index 000000000..ab23b4f0b
+--- /dev/null
++++ b/vendors/Nintendo/DSI/wifi-connect
+@@ -0,0 +1,33 @@
++#!/bin/sh
++# Start > Network > Wi-Fi connect: joins the network saved in /home/wifi.conf (asks for it the first time), then gets an address by DHCP.
++# To change the network: rm /home/wifi.conf and run this again. Plain commands only (the target shell is msh).
++if [ -f /home/wifi.conf ]
++then
++	. /home/wifi.conf
++fi
++if [ -z "$essid" ]
++then
++	echo "Network name (exactly as in the scan):"
++	read essid
++	echo "WEP key (s:text for a 5 or 13 character key, or hex; empty = open network):"
++	read wepkey
++	echo "essid=\"$essid\"" > /home/wifi.conf
++	echo "wepkey=\"$wepkey\"" >> /home/wifi.conf
++fi
++echo "Joining $essid"
++ifconfig nds up
++sleep 1
++iwconfig nds essid "$essid"
++if [ -n "$wepkey" ]
++then
++	iwconfig nds key "$wepkey"
++else
++	iwconfig nds key off
++fi
++sleep 3
++echo "Asking for an address (DHCP)"
++udhcpc -n -q -i nds
++ifconfig nds
++iwconfig nds
++echo "-- done. If there is an inet addr above you are online. --"
++exec /bin/sh
+diff --git a/vendors/Nintendo/DSI/wifi-scan b/vendors/Nintendo/DSI/wifi-scan
+new file mode 100755
+index 000000000..0dd7604b4
+--- /dev/null
++++ b/vendors/Nintendo/DSI/wifi-scan
+@@ -0,0 +1,8 @@
++#!/bin/sh
++# Start > Network > Wi-Fi scan: lists the networks the console can see (name and whether they are encrypted; the DS chip joins only open or WEP).
++echo "Wi-Fi scan (a few seconds)"
++ifconfig nds up
++sleep 2
++iwlist nds scan 2>&1 | grep -E "ESSID|Encryption"
++echo "-- end of list. Next: Start > Network > Wi-Fi connect --"
++exec /bin/sh
+diff --git a/vendors/Nintendo/DSI/wifi-ssh b/vendors/Nintendo/DSI/wifi-ssh
+new file mode 100755
+index 000000000..5b28dc065
+--- /dev/null
++++ b/vendors/Nintendo/DSI/wifi-ssh
+@@ -0,0 +1,18 @@
++#!/bin/sh
++# Start > Network > SSH server: starts Dropbear (makes the host key the first time, about a minute). With /home/.ssh/authorized_keys present
++# passwords are switched off (-s); without it a password login is possible, so use that only on a network you trust.
++if [ ! -f /etc/dropbear_rsa_host_key ]
++then
++	echo "Making the host key (about a minute)..."
++	dropbearkey -t rsa -f /etc/dropbear_rsa_host_key
++fi
++if [ -f /home/.ssh/authorized_keys ]
++then
++	dropbear -s -r /etc/dropbear_rsa_host_key
++	echo "SSH server started, key login only."
++else
++	dropbear -r /etc/dropbear_rsa_host_key
++	echo "SSH server started, PASSWORD login (no authorized_keys installed)."
++fi
++ifconfig nds
++exec /bin/sh
+diff --git a/vendors/Nintendo/DSI/wifi-status b/vendors/Nintendo/DSI/wifi-status
+new file mode 100755
+index 000000000..c954f6371
+--- /dev/null
++++ b/vendors/Nintendo/DSI/wifi-status
+@@ -0,0 +1,7 @@
++#!/bin/sh
++# Start > Network > Wi-Fi status
++ifconfig nds
++iwconfig nds
++echo "-- routes --"
++/usr/bin/cat /proc/net/route
++exec /bin/sh
+-- 
+2.56.0
+
