@@ -1,0 +1,72 @@
+From eda305f4e4298a431293b129467cce404d1078a8 Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Thu, 12 Nov 2026 14:47:21 -0600
+Subject: [PATCH] desktop: log whether a menu program started or why not
+ (/tmp/desktop.log); Save log also saves /home/doom/dsdoom.log
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ user/microwin/src/demos/nanox/dsdesk.c | 16 +++++++++++++++-
+ vendors/Nintendo/DSI/logbody           |  2 ++
+ 2 files changed, 17 insertions(+), 1 deletion(-)
+
+diff --git a/user/microwin/src/demos/nanox/dsdesk.c b/user/microwin/src/demos/nanox/dsdesk.c
+index 1f4ee5f6b..68d6afde4 100644
+--- a/user/microwin/src/demos/nanox/dsdesk.c
++++ b/user/microwin/src/demos/nanox/dsdesk.c
+@@ -12,6 +12,8 @@
+ #include <unistd.h>
+ #include <signal.h>
+ #include <time.h>
++#include <errno.h>
++#include <string.h>
+ #include <sys/types.h>
+ #include <sys/wait.h>
+ #include "nano-X.h"
+@@ -167,17 +169,29 @@ static void reap(int sig)
+ 		;
+ }
+ 
++static volatile int exec_errno;
++
++/* the result goes to the log (/tmp/desktop.log, which Save log puts on the card): a program that does not start says why */
+ static void launch(const char *prog, const char *arg)
+ {
+-	pid_t pid = vfork();
++	pid_t pid;
+ 
++	exec_errno = 0;
++	pid = vfork();
+ 	if (pid == 0) {
+ 		if (arg)
+ 			execl(prog, prog, arg, (char *)NULL);
+ 		else
+ 			execl(prog, prog, (char *)NULL);
++		exec_errno = errno;		/* the parent waits in vfork until this child has exec'd or exited */
+ 		_exit(127);
+ 	}
++	if (pid < 0)
++		fprintf(stderr, "dsdesk: cannot start %s: fork failed (%d)\n", prog, errno);
++	else if (exec_errno)
++		fprintf(stderr, "dsdesk: cannot start %s: %s (%d)\n", prog, strerror(exec_errno), exec_errno);
++	else
++		fprintf(stderr, "dsdesk: started %s %s\n", prog, arg ? arg : "");
+ }
+ 
+ /*
+diff --git a/vendors/Nintendo/DSI/logbody b/vendors/Nintendo/DSI/logbody
+index 1c8279389..07667b7e9 100644
+--- a/vendors/Nintendo/DSI/logbody
++++ b/vendors/Nintendo/DSI/logbody
+@@ -8,6 +8,8 @@ echo "--- ramcopy.log ---"
+ [ -f /tmp/ramcopy.log ] && /usr/bin/cat /tmp/ramcopy.log
+ echo "--- desktop.log ---"
+ [ -f /tmp/desktop.log ] && /usr/bin/cat /tmp/desktop.log
++echo "--- /home/doom/dsdoom.log ---"
++[ -f /home/doom/dsdoom.log ] && /usr/bin/cat /home/doom/dsdoom.log
+ echo "--- /proc/dsimic (microphone counters) ---"
+ /usr/bin/cat /proc/dsimic 2>&1
+ echo "--- /proc/dsivolume ---"
+-- 
+2.56.0
+

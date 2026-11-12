@@ -10,7 +10,7 @@
 * `doom/install.sh doom1.wad` copies binary, WAD and `default.cfg` to `/home/doom` in `linux/ROOTFS.IMG` (card in the PC). It is not in the ROM (the ROM
   is full); Start > Games > DOOM starts `/home/doom/dsdoom`.
 * `doom/doomgeneric-ds.patch` (apply to the doomgeneric sources before building): zone 4 MB (minimum 3 MB) instead of 6 MB, and a 64 KB instead of 256 KB picture buffer, because the console had only about 6.4 MB free next to the desktop.
-* dsdoom writes everything it prints (free memory, start-up messages, errors) to `/home/doom/dsdoom.log` in the image: read it on the PC with `debugfs -R "cat /home/doom/dsdoom.log" ROOTFS.IMG` after a try.
+* dsdoom writes everything it prints (free memory, start-up messages, errors) to `/home/doom/dsdoom.log` in the image: it is part of `DSILOG.TXT` on the card (from w97i; DSLinux cannot write to `ROOTFS.IMG`, so the file itself never reaches the card), together with the desktop's `dsdesk: started / cannot start` lines.
 * Picture 320x200 -> 256x192 (4:3), low detail, 9 screen blocks (`default.cfg`), zone memory 4 MB, no sound, no music.
 * Buttons: d-pad move/turn, A fire (Enter in menus), B use, L/R strafe, Y run, X next weapon ("y" in the quit question), Start menu, Select automap,
   Start + Select leave at once.
