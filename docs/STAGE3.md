@@ -621,3 +621,14 @@ w97u adds counters to tell these apart (patch 0097): transmit-end and transmit-e
 register, frames from the chosen access point, frames addressed to this console, authentication frames seen. And `/proc/dswifi` gives each
 network's rate class from its beacon: `b` (1-2 Mbit/s basic rates), `b11` (5.5/11 basic), `g` (an 802.11g rate is required: the DS chip can
 never join). The Wi-Fi window tags `g` networks "11g".
+
+### w97u results: frames "sent", never answered; send at once (w97v)
+
+w97u on the console, same hotspot: `auth 40`, `tx-done 40 tx-err 0`, `tbtt 379` (about one every 100 ms over the attempt), `rx from-ap 156`
+(the hotspot's beacons, sent at 1 Mbit/s, so the hotspot does use 802.11b), `to-us 0`, `auth-frames 0`. The chip reports every frame as
+transmitted, the hotspot is heard, and nothing at all comes back to the console. The driver never started a transmission itself: the
+`W_TXREQ` writes (0xAE) were commented out ("delay for beacon") and the beacon-time interrupt started queued frames, i.e. each frame left
+exactly when the access point beacons, which is the likeliest reason it was never received. w97v (patch 0098) starts every frame at once,
+as BlocksDS dswifi does, and records the transmit buffer's header after each send (the chip writes the result there) and the chip's
+counters 0x1B0-0x1DE (0x1C0 = transmit errors) in `/proc/dswifistat`. Listening with the PC's Wi-Fi is not possible here: it is the PC's
+only network link and sits on a 5 GHz channel.

@@ -1,0 +1,114 @@
+From 74a7caafd24a9f2743fdaa3bab6d72246f439888 Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Fri, 13 Nov 2026 00:48:38 -0600
+Subject: [PATCH] Wi-Fi: start transmissions at once, record transmit results
+
+- Write W_TXREQ (0xAE) right after queuing a frame (data and management),
+  as dswifi does; before, only the beacon-time interrupt started queued
+  frames, so they left exactly when the access point beacons.
+- After each transmit end, keep the management buffer's header words
+  (status written back by the chip); stats queries also snapshot the chip
+  counters 0x1B0-0x1DE. /proc/dswifistat prints both.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ linux-2.6.x/arch/arm/mach-nds/arm7/wifi.c   | 18 +++++++++++++-----
+ linux-2.6.x/drivers/net/wireless/nds.c      |  8 +++++++-
+ linux-2.6.x/include/asm-arm/arch-nds/wifi.h |  2 ++
+ 3 files changed, 22 insertions(+), 6 deletions(-)
+
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/wifi.c b/linux-2.6.x/arch/arm/mach-nds/arm7/wifi.c
+index d5968c3e6..63dd0de8f 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/arm7/wifi.c
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/wifi.c
+@@ -782,9 +782,17 @@ void wifi_mac_query(void)
+ 				     (((u16 *) wifi_data.MacAddr)[2]))));
+ }
+ 
++static void Wifi_Intr_CntOverflow(void);
++
+ /* handle a query from kernel for wifi address */
+ void wifi_stats_query(void)
+ {
++	{		/* the chip's own counters (0x1B0-0x1DE) into the stats; the last word doubles as the open() trace: keep it */
++		u32 trace = wifi_data.stats[WIFI_TRACE];
++
++		Wifi_Intr_CntOverflow();
++		wifi_data.stats[WIFI_TRACE] = trace;
++	}
+ 	wifi_data.stats[WIFI_STATS_DEBUG3] = WIFI_REG(0xA0);
+ 	wifi_data.stats[WIFI_STATS_DEBUG4] = WIFI_REG(0xB8);
+ 
+@@ -1524,6 +1532,8 @@ static void Wifi_Intr_TxEnd(void)
+ {
+ 	wifi_data.stats[WIFI_STATS_TX_DONE]++;
+ 	wifi_data.stats[WIFI_STATS_TXSTAT] = WIFI_REG(0xB8);
++	wifi_data.stats[WIFI_STATS_TXHDR] = WIFI_REG(TX2_MAC_START) | ((u32)WIFI_REG(TX2_MAC_START + 2) << 16);
++	wifi_data.stats[WIFI_STATS_TXHDR2] = WIFI_REG(TX2_MAC_START + 4) | ((u32)WIFI_REG(TX2_MAC_START + 6) << 16);
+ 	/* signal that current packet has been transmitted */
+ 	if ((wifi_data.state & WIFI_STATE_TXPENDING)
+ 	    && !(WIFI_REG(0xA0) & 0x8000)) {
+@@ -1714,9 +1724,9 @@ void wifi_send_ether_packet(u16 length, u_char * data)
+ 	/* Scheduled to be sent */
+ 	wifi_data.state |= WIFI_STATE_TXPENDING;
+ 	WIFI_REG(0x80A0) = TX1_SETUP_VAL;
+-/* XOXOXO -- delay for beacon
++	/* send now. The original driver left this out ("delay for beacon") and let the beacon-time interrupt start it: the frame then went
++	 * out at the very moment the access point sends its beacon. On the DSi not one of 40 authentication frames got an answer (w97u). */
+ 	WIFI_REG(0x80AE) = 1;
+-*/
+ 
+ 	/* stats update */
+ 	wifi_data.stats[WIFI_STATS_TXPACKETS]++;
+@@ -1732,9 +1742,7 @@ static void wifi_send_raw(u16 length, u_char * data)
+ 
+ 	/* Scheduled to be sent */
+ 	WIFI_REG(0x80A4) = TX2_SETUP_VAL;
+-/* XOXOXO -- delay for beacon
+-	WIFI_REG(0x80AE) = 4;
+-*/
++	WIFI_REG(0x80AE) = 4;	/* send now (see wifi_send_ether_packet) */
+ 
+ 	/* stats update */
+ 	wifi_data.stats[WIFI_STATS_TXPACKETS]++;
+diff --git a/linux-2.6.x/drivers/net/wireless/nds.c b/linux-2.6.x/drivers/net/wireless/nds.c
+index 5b03eca1b..a8854aed1 100644
+--- a/linux-2.6.x/drivers/net/wireless/nds.c
++++ b/linux-2.6.x/drivers/net/wireless/nds.c
+@@ -1304,13 +1304,19 @@ static int dswifistat_read_proc(char *page, char **start, off_t off, int count,
+ 			len += sprintf(page + len, " %s", names[i]);
+ 	js = arm7_stats[WIFI_STATS_JOIN_STATUS];
+ 	len += sprintf(page + len, "\nauth %u assoc %u status %d %d\nchannel %u wanted %u rate %u rx %u tx-bytes %u\n"
+-		       "tx-done %u tx-err %u tbtt %u txstat %04x\nrx from-ap %u to-us %u auth-frames %u\n",
++		       "tx-done %u tx-err %u tbtt %u txstat %04x txhdr %08x %08x\nrx from-ap %u to-us %u auth-frames %u\n",
+ 		       arm7_stats[WIFI_STATS_AUTH_TRIES], arm7_stats[WIFI_STATS_ASSOC_TRIES],
+ 		       (js & 0xffff) == 0xffff ? -1 : (int)(js & 0xffff), (js >> 16) == 0xffff ? -1 : (int)(js >> 16),
+ 		       arm7_stats[WIFI_STATS_CHANNELS] & 0xff, (arm7_stats[WIFI_STATS_CHANNELS] >> 8) & 0xff,
+ 		       arm7_stats[WIFI_STATS_CHANNELS] >> 16, arm7_stats[WIFI_STATS_RXRAWPACKETS], arm7_stats[WIFI_STATS_TXBYTES],
+ 		       arm7_stats[WIFI_STATS_TX_DONE], arm7_stats[WIFI_STATS_TX_ERR], arm7_stats[WIFI_STATS_TBTT], arm7_stats[WIFI_STATS_TXSTAT] & 0xffff,
++		       arm7_stats[WIFI_STATS_TXHDR], arm7_stats[WIFI_STATS_TXHDR2],
+ 		       arm7_stats[WIFI_STATS_RX_FROM_AP], arm7_stats[WIFI_STATS_RX_TO_US], arm7_stats[WIFI_STATS_RX_AUTH]);
++	/* the chip's counters 0x1B0..0x1DE, 16 bit each (0x1C0: transmit errors) */
++	len += sprintf(page + len, "hw");
++	for (i = WIFI_STATS_HW_1B0; i < WIFI_STATS_HW_1DC; i++)
++		len += sprintf(page + len, " %04x %04x", arm7_stats[i] & 0xffff, arm7_stats[i] >> 16);
++	len += sprintf(page + len, "\n");
+ 	*eof = 1;
+ 	return len;
+ }
+diff --git a/linux-2.6.x/include/asm-arm/arch-nds/wifi.h b/linux-2.6.x/include/asm-arm/arch-nds/wifi.h
+index 079e60dfc..b7ee82d81 100644
+--- a/linux-2.6.x/include/asm-arm/arch-nds/wifi.h
++++ b/linux-2.6.x/include/asm-arm/arch-nds/wifi.h
+@@ -63,6 +63,8 @@ enum WIFI_STATS {
+ 	WIFI_STATS_RX_TO_US,	/* frames addressed to this console */
+ 	WIFI_STATS_RX_AUTH,	/* authentication frames, whoever they are for */
+ 	WIFI_STATS_TXSTAT,	/* the transmit status register (0xB8) at the last transmit end */
++	WIFI_STATS_TXHDR,	/* words 0 and 1 of the management transmit buffer's header after the last transmit end (status written back by the chip) */
++	WIFI_STATS_TXHDR2,	/* words 2 and 3 */
+ 
+ 	WIFI_STATS_MAX
+ };
+-- 
+2.56.0
+
