@@ -1,0 +1,706 @@
+From a3ad6bb17b49f01beb23b63be3ac5ac08c897880 Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Fri, 13 Nov 2026 11:35:12 -0600
+Subject: [PATCH] DSi Wi-Fi chip: wlan0 net device, connect to an open network,
+ data path
+
+Step 5 of docs/ATHEROS-PLAN.md:
+- wlan0 (registered at boot, down): "ifconfig wlan0 up" uploads the
+  firmware, connects the HTC services, waits for WMI ready, scans, and
+  keeps the chip up with the antenna on it; "ifconfig wlan0 down"
+  disconnects and gives the antenna back. Refused while nds is up.
+- A kernel thread does every ARM7 request: queued Ethernet frames go out
+  as mailbox data packets on endpoint 2 (word 0x2008; dst, src, length,
+  LLC/SNAP, EtherType, data); every 20 ms it fetches up to 8 packets (WMI
+  events, data -> netif_rx_ni).
+- "echo connect [name] > /proc/dsiwifi2" joins an open network from the
+  scan (the strongest without a name) with dswifi's sequence (BSS filter,
+  scan/channel params, synchronize, power mode, pstream, WSC, disconnect
+  timeout, keepalive, connect); carrier on the connect event, off on
+  disconnect; "echo disconnect".
+- WMI events the driver does not know are logged (12 at most).
+- ARM7: a receive with 0 ms looks once.
+- wifi-dsi-test: wlan0 up, connect, DHCP, ifconfig, ping 8.8.8.8 and
+  google.com, all in /tmp/wlan0-test.log (in the card log).
+- The firmware part tables are static: gcc 4.0.4 crashed (unrecognizable
+  insn) compiling upload() with them on the stack.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ linux-2.6.x/arch/arm/mach-nds/arm7/twlwifi.c |   6 +-
+ linux-2.6.x/arch/arm/mach-nds/dsiwifi.c      | 462 +++++++++++++++++--
+ vendors/Nintendo/DSI/logbody                 |   3 +
+ vendors/Nintendo/DSI/wifi-dsi-test           |  35 +-
+ 4 files changed, 453 insertions(+), 53 deletions(-)
+
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/twlwifi.c b/linux-2.6.x/arch/arm/mach-nds/arm7/twlwifi.c
+index 735bfafa3..cf79f345c 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/arm7/twlwifi.c
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/twlwifi.c
+@@ -443,15 +443,13 @@ static u32 mbox_recv(u8 *out, u32 ms)
+ {
+ 	u32 t, hdr, len, full, i;
+ 
+-	for (t = 0; t < ms * 4; t++) {			/* about 250 us per look */
++	for (t = 0; ; t++) {				/* about 250 us per look; ms = 0: look once */
+ 		if (rd8(1, F1_HOST_INT_STATUS) & 1)
+ 			break;
+-		if (st & 4)
++		if ((st & 4) || t >= ms * 4)
+ 			return 0;
+ 		tdelay(400);
+ 	}
+-	if (t == ms * 4)
+-		return 0;
+ 	hdr = rd32(1, F1_RX_LOOKAHEAD0);
+ 	len = hdr >> 16;
+ 	if (len > 2048 - 6)				/* nonsense: drop four bytes so the FIFO moves on */
+diff --git a/linux-2.6.x/arch/arm/mach-nds/dsiwifi.c b/linux-2.6.x/arch/arm/mach-nds/dsiwifi.c
+index d922764e2..0f60c227f 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/dsiwifi.c
++++ b/linux-2.6.x/arch/arm/mach-nds/dsiwifi.c
+@@ -6,7 +6,10 @@
+  *   /proc/dsiwifi2     write "1": one bring-up run. write "upload": a run, then (when the chip has no firmware, as after Unlaunch) the
+  *                      firmware from /proc/dsiwifi2fw, then start it. write "clear": forget the firmware. read: the last results and the
+  *                      upload log (the card log includes it).
+- * Both refuse while the DS Wi-Fi (nds) is up: the two chips share the antenna.
++ *   wlan0              "ifconfig wlan0 up": firmware upload, HTC/WMI, a scan; the chip stays up. Then "echo connect [name] >
++ *                      /proc/dsiwifi2" joins an open network (the strongest one without a name), "echo disconnect"; "ifconfig wlan0
++ *                      down" gives the antenna back. A kernel thread moves the packets (every ARM7 request happens there).
++ * All of them refuse while the DS Wi-Fi (nds) is up: the two chips share the antenna.
+  *
+  * The firmware file (dsibrew "WiFi Firmware"): 0x00 RSA signature, 0x80 SHA-1, then at 0xA0 an entry header (byte 0xA2 = number of
+  * entries) and entries of 0x20 bytes from 0xA4: offset, length, ID, SHA-1. Each entry is a blob for some chips. A blob starts with a
+@@ -28,6 +31,12 @@
+ #include <linux/string.h>
+ #include <linux/slab.h>
+ #include <linux/netdevice.h>
++#include <linux/etherdevice.h>
++#include <linux/skbuff.h>
++#include <linux/sched.h>
++#include <linux/delay.h>
++#include <linux/wait.h>
++#include <linux/completion.h>
+ #include <asm/uaccess.h>
+ 
+ extern int dsisd_twlwifi(unsigned int *out, int report);
+@@ -160,6 +169,16 @@ static void write_part(const char *name, unsigned int addr, const unsigned char
+ #define HTC_MSG_CONN_SVC	2
+ #define HTC_MSG_CONN_SVC_RESP	3
+ #define HTC_MSG_SETUP_COMPLETE	4
++#define WMI_CONNECT_CMD		0x0001
++#define WMI_DISCONNECT_CMD	0x0003
++#define WMI_SYNCHRONIZE_CMD	0x0004
++#define WMI_CREATE_PSTREAM_CMD	0x0005
++#define WMI_SET_DISCONNECT_TIMEOUT_CMD 0x000D
++#define WMI_SET_POWER_MODE_CMD	0x0012
++#define WMI_SET_KEEPALIVE_CMD	0x003D
++#define WMI_SET_WSC_STATUS_CMD	0x0041
++#define WMI_CONNECT_EVENT	0x1002
++#define WMI_DISCONNECT_EVENT	0x1003
+ #define WMI_START_SCAN_CMD	0x0007
+ #define WMI_SET_SCAN_PARAMS_CMD	0x0008
+ #define WMI_SET_BSS_FILTER_CMD	0x0009
+@@ -187,7 +206,7 @@ static int nnets;
+ static unsigned char mac[6];
+ static int wmi_ready, reg_domain, scan_done;
+ 
+-static void mbox_out(int endpoint, int ack, unsigned int id, const void *data, unsigned int len, int *bad)
++static void mbox_out_x(int endpoint, int ack, unsigned int word, unsigned int id, const void *data, unsigned int len, int *bad)
+ {
+ 	unsigned int full = (len + 8 + 0x7F) & ~0x7Fu;
+ 
+@@ -196,6 +215,8 @@ static void mbox_out(int endpoint, int ack, unsigned int id, const void *data, u
+ 	pkt[1] = ack;
+ 	pkt[2] = (len + 2) & 0xff;
+ 	pkt[3] = (len + 2) >> 8;
++	pkt[4] = word & 0xff;
++	pkt[5] = word >> 8;
+ 	pkt[6] = id & 0xff;
+ 	pkt[7] = id >> 8;
+ 	if (len)
+@@ -203,6 +224,11 @@ static void mbox_out(int endpoint, int ack, unsigned int id, const void *data, u
+ 	op(11, 0, full, pkt, full, bad);
+ }
+ 
++static void mbox_out(int endpoint, int ack, unsigned int id, const void *data, unsigned int len, int *bad)
++{
++	mbox_out_x(endpoint, ack, 0, id, data, len, bad);
++}
++
+ static int wifi_mhz_to_channel(unsigned int mhz)
+ {
+ 	return mhz == 2484 ? 14 : 1 + (int)(mhz - 2412) / 5;
+@@ -253,16 +279,115 @@ static void bss_info(const unsigned char *d, int len)
+ 		nets[nnets++] = n;
+ }
+ 
+-/* receive and handle packets until "want" happened or ms ran out; returns 1 if it happened */
++/* wlan0 (step 5): the net device, its state and the data path */
++static struct net_device *wdev;
++static struct net_device_stats wstats;
++static int session;		/* the chip runs its firmware and holds the antenna */
++static int connected;
++static int unknown_logged;
++
++/* a received data packet (endpoint 2..5): rssi, 0, dst[6], src[6], length (BE), LLC/SNAP AA AA 03 00 00 00, EtherType, data */
++static void rx_data(const unsigned char *p, int len)
++{
++	struct sk_buff *skb;
++	int dl = len - 24;
++
++	if (!wdev || !connected || dl < 0 || dl > 1600)
++		return;
++	if (p[16] != 0xAA || p[17] != 0xAA || p[18] != 0x03 || p[19] || p[20] || p[21]) {
++		wstats.rx_frame_errors++;
++		return;
++	}
++	skb = dev_alloc_skb(dl + 14 + 2);
++	if (!skb) {
++		wstats.rx_dropped++;
++		return;
++	}
++	skb_reserve(skb, 2);
++	memcpy(skb_put(skb, 6), p + 2, 6);		/* destination */
++	memcpy(skb_put(skb, 6), p + 8, 6);		/* source */
++	memcpy(skb_put(skb, 2), p + 22, 2);		/* EtherType */
++	memcpy(skb_put(skb, dl), p + 24, dl);
++	skb->dev = wdev;
++	skb->protocol = eth_type_trans(skb, wdev);
++	wstats.rx_packets++;
++	wstats.rx_bytes += dl + 14;
++	netif_rx_ni(skb);
++}
++
++/* one received packet (in rx[], header word hdr); "flag" is set when the event it stands for arrives */
++static void handle_pkt(unsigned int hdr, int *ev_scan_done)
++{
++	unsigned int len = hdr >> 16, alen, id, ep = hdr & 0xff;
++
++	alen = (hdr >> 8) & 0xff ? rx[4] : 0;		/* trailer (acknowledgements, lookahead) */
++	if (len < alen + 2 || len > 2040)
++		return;
++	len -= alen;
++	if (ep >= 2 && ep <= 5) {			/* data */
++		rx_data(rx + 6, len);
++		return;
++	}
++	id = rx[6] | (rx[7] << 8);
++	if (ep == 0) {					/* HTC */
++		if (id == HTC_MSG_READY)
++			lg("  HTC ready (%u bytes: credits %u of %u bytes)\n", len - 2, rx[8] | (rx[9] << 8), rx[10] | (rx[11] << 8));
++		else if (id == HTC_MSG_CONN_SVC_RESP)
++			lg("  HTC service connected: service %04x status %u endpoint %u\n", rx[8] | (rx[9] << 8), rx[10], rx[11]);
++		return;
++	}
++	if (ep != 1)
++		return;
++	switch (id) {					/* WMI */
++	case WMI_READY_EVENT:
++		memcpy(mac, rx + 8, 6);
++		wmi_ready = 1;
++		lg("  WMI ready, MAC %02x:%02x:%02x:..\n", mac[0], mac[1], mac[2]);
++		break;
++	case WMI_REG_DOMAIN_EVENT:
++		reg_domain = 1;
++		lg("  WMI regulatory domain %08x\n", w32(rx + 8), 0, 0);
++		break;
++	case WMI_BSS_INFO_EVENT:
++		bss_info(rx + 8, len - 2);
++		break;
++	case WMI_SCAN_COMPLETE_EVENT:
++		scan_done = 1;
++		if (ev_scan_done)
++			*ev_scan_done = 1;
++		break;
++	case WMI_CMD_ERROR_EVENT:
++		lg("  WMI command error: command %04x error %u\n", rx[8] | (rx[9] << 8), rx[10], 0);
++		break;
++	case WMI_CONNECT_EVENT:				/* u16 channel (MHz), bssid[6], ... */
++		connected = 1;
++		lg("  CONNECTED on channel %u, BSSID ..:%02x:%02x\n", wifi_mhz_to_channel(rx[8] | (rx[9] << 8)), rx[14], rx[15]);
++		if (wdev)
++			netif_carrier_on(wdev);
++		break;
++	case WMI_DISCONNECT_EVENT:			/* u16 protocol reason, bssid[6], u8 reason */
++		connected = 0;
++		lg("  disconnected: reason %u (protocol reason %u)\n", rx[16], rx[8] | (rx[9] << 8), 0);
++		if (wdev)
++			netif_carrier_off(wdev);
++		break;
++	default:
++		if (unknown_logged < 12) {		/* what else the firmware says (the scan question of w98m) */
++			unknown_logged++;
++			lg("  WMI event %04x (%u bytes)\n", id, len - 2, 0);
++		}
++	}
++}
++
++/* receive and handle packets until *flag is set or no packet came within ms; returns *flag */
+ static int pump(int ms, int *flag, int *bad)
+ {
+ 	int rounds;
+ 
+ 	for (rounds = 0; rounds < 200 && !*flag; rounds++) {
+-		unsigned int out[19], hdr, len, alen, id;
+-		int b2 = 0, r = dsisd_twlop_rx(12, 0, ms, 0, 0, out, rx);
++		unsigned int out[19];
++		int r = dsisd_twlop_rx(12, 0, ms, 0, 0, out, rx);
+ 
+-		(void)b2;
+ 		if (r != 0) {
+ 			lg("  receive: request failed (%d)\n", r, 0, 0);
+ 			*bad = 1;
+@@ -270,34 +395,7 @@ static int pump(int ms, int *flag, int *bad)
+ 		}
+ 		if (out[1] == 5)			/* nothing within ms */
+ 			return *flag;
+-		hdr = out[0];
+-		len = hdr >> 16;
+-		alen = (hdr >> 8) & 0xff ? rx[4] : 0;	/* trailer (acknowledgements, lookahead) */
+-		if (len < alen + 2 || len > 2040)
+-			continue;
+-		len -= alen;
+-		id = rx[6] | (rx[7] << 8);
+-		if ((hdr & 0xff) == 0) {		/* HTC */
+-			if (id == HTC_MSG_READY)
+-				lg("  HTC ready (%u bytes: credits %u of %u bytes)\n", len - 2, rx[8] | (rx[9] << 8), rx[10] | (rx[11] << 8));
+-			else if (id == HTC_MSG_CONN_SVC_RESP)
+-				lg("  HTC service connected: service %04x status %u endpoint %u\n", rx[8] | (rx[9] << 8), rx[10], rx[11]);
+-		} else if ((hdr & 0xff) == 1) {		/* WMI */
+-			if (id == WMI_READY_EVENT) {
+-				memcpy(mac, rx + 8, 6);
+-				wmi_ready = 1;
+-				lg("  WMI ready, MAC %02x:%02x:%02x:..\n", mac[0], mac[1], mac[2]);
+-			} else if (id == WMI_REG_DOMAIN_EVENT) {
+-				reg_domain = 1;
+-				lg("  WMI regulatory domain %08x\n", w32(rx + 8), 0, 0);
+-			} else if (id == WMI_BSS_INFO_EVENT) {
+-				bss_info(rx + 8, len - 2);
+-			} else if (id == WMI_SCAN_COMPLETE_EVENT) {
+-				scan_done = 1;
+-			} else if (id == WMI_CMD_ERROR_EVENT) {
+-				lg("  WMI command error: command %04x error %u\n", rx[8] | (rx[9] << 8), rx[10], 0);
+-			}
+-		}
++		handle_pkt(out[0], flag);
+ 	}
+ 	return *flag;
+ }
+@@ -393,11 +491,15 @@ static void htc_wmi(unsigned int hi, int *bad)
+ 	wmi_scan(bad);
+ }
+ 
+-static void upload(void)
++/* the firmware parts of the chosen blob (static: gcc 4.0.4 crashed compiling upload() with them on the stack) */
++static const unsigned char *part[6];
++static unsigned int paddr[6], psize[6];
++
++static void upload(int keep)
+ {
+ 	unsigned int *g = twl_d + 8, *in = twl_d + 16, chip, ver, n, i, k;
+-	const unsigned char *blob = 0, *part[6];
+-	unsigned int paddr[6], psize[6], ptype1 = 0, hi;
++	const unsigned char *blob = 0;
++	unsigned int ptype1 = 0, hi;
+ 	int bad = 0;
+ 
+ 	ulog_len = 0;
+@@ -518,6 +620,11 @@ static void upload(void)
+ 		if (g[5] == 1) {
+ 			bad = 0;
+ 			htc_wmi(hi, &bad);
++			if (keep && reg_domain && !bad) {	/* wlan0: keep the chip up and the antenna on it */
++				session = 1;
++				lg("chip up for wlan0 (antenna kept)\n", 0, 0, 0);
++				return;
++			}
+ 		}
+ 	}
+ release:
+@@ -525,6 +632,244 @@ release:
+ 	lg("antenna back to the DS chip\n", 0, 0, 0);
+ }
+ 
++/* the worker thread: every SD request (ARM7 operation) for wlan0 happens here, never in the network stack's own context */
++static DECLARE_WAIT_QUEUE_HEAD(thr_wait);
++static DECLARE_COMPLETION(thr_done);
++static struct sk_buff_head txq;
++static volatile int thr_run;
++static char conn_req[33];
++static volatile int conn_pending, disc_pending;
++
++static int wifi_channel_to_mhz(int ch)
++{
++	return ch == 14 ? 2484 : 2412 + (ch - 1) * 5;
++}
++
++/* dswifi's wmi_connect() for an open network */
++static void do_connect(void)
++{
++	unsigned char b[64];
++	struct net2 *n = 0;
++	int i, bad = 0;
++
++	for (i = 0; i < nnets; i++) {
++		if (strcmp(nets[i].sec, "open"))
++			continue;
++		if (conn_req[0] && strcmp(nets[i].ssid, conn_req))
++			continue;
++		if (!n || nets[i].rssi > n->rssi)
++			n = &nets[i];
++	}
++	if (!n) {
++		lg(conn_req[0] ? "connect: no open network of that name in the scan\n" : "connect: no open network in the scan\n", 0, 0, 0);
++		return;
++	}
++	lg("connect: channel %u, signal %d, %u-character name\n", n->channel, n->rssi, strlen(n->ssid));
++	lgs("  name: ");
++	lgs(n->ssid);
++	lgs("\n");
++	memset(b, 0, sizeof(b));
++	b[0] = 4;						/* BSS filter: the current beacon */
++	mbox_out(1, 1, WMI_SET_BSS_FILTER_CMD, b, 8, &bad);
++	memset(b, 0, sizeof(b));				/* scan params 5, 200, 200, 200 */
++	for (i = 0; i < 6; i++)
++		b[i] = 0xFF;
++	b[6] = 200;
++	b[8] = 200;
++	b[10] = 3;
++	b[11] = 5;
++	b[12] = 200;
++	mbox_out(1, 1, WMI_SET_SCAN_PARAMS_CMD, b, 20, &bad);
++	memset(b, 0, sizeof(b));				/* channel params: 11g, the AP's channel */
++	b[2] = 2;
++	b[3] = 1;
++	b[4] = wifi_channel_to_mhz(n->channel) & 0xff;
++	b[5] = wifi_channel_to_mhz(n->channel) >> 8;
++	mbox_out(1, 1, WMI_SET_CHANNEL_PARAMS_CMD, b, 6, &bad);
++	b[0] = 0;
++	mbox_out_x(1, 1, 0x2008, WMI_SYNCHRONIZE_CMD, b, 1, &bad);
++	b[0] = 2;						/* power mode: maximum performance */
++	mbox_out(1, 1, WMI_SET_POWER_MODE_CMD, b, 1, &bad);
++	b[0] = 0;
++	mbox_out(1, 1, WMI_SYNCHRONIZE_CMD, b, 1, &bad);
++	{
++		/* create pstream: 13 words, 2 halfwords, 7 bytes (dswifi's values) */
++		static const unsigned int wv[13] = { 20, 20, 9999999, 0xFFFFFFFF, 0, 83200, 83200, 83200, 0, 0, 6000000, 8192, 0 };
++		unsigned char ps[63];
++		int k;
++
++		for (k = 0; k < 13; k++) {
++			ps[k * 4] = wv[k];
++			ps[k * 4 + 1] = wv[k] >> 8;
++			ps[k * 4 + 2] = wv[k] >> 16;
++			ps[k * 4 + 3] = wv[k] >> 24;
++		}
++		ps[52] = 0xD0; ps[53] = 0x80;			/* nominal MSDU 0x80D0 */
++		ps[54] = 0xD0; ps[55] = 0x00;			/* max MSDU 0x00D0 */
++		ps[56] = 0; ps[57] = 2; ps[58] = 0xFF; ps[59] = 1; ps[60] = 0; ps[61] = 5; ps[62] = 0;
++		mbox_out(1, 1, WMI_CREATE_PSTREAM_CMD, ps, 63, &bad);
++	}
++	b[0] = 0;
++	mbox_out(1, 1, WMI_SET_WSC_STATUS_CMD, b, 1, &bad);
++	b[0] = 5;						/* disconnect timeout 5 s */
++	mbox_out(1, 1, WMI_SET_DISCONNECT_TIMEOUT_CMD, b, 1, &bad);
++	b[0] = 0;
++	mbox_out(1, 1, WMI_SET_KEEPALIVE_CMD, b, 1, &bad);
++	/* connect: infrastructure, open, no auth, no ciphers, the name, channel (MHz), BSSID, control flags 0x20 (follow the AP's
++	 * channel switches) */
++	memset(b, 0, sizeof(b));
++	b[0] = 1; b[1] = 1; b[2] = 1; b[3] = 1; b[4] = 0; b[5] = 1; b[6] = 0;
++	b[7] = strlen(n->ssid);
++	memcpy(b + 8, n->ssid, b[7]);
++	b[40] = wifi_channel_to_mhz(n->channel) & 0xff;
++	b[41] = wifi_channel_to_mhz(n->channel) >> 8;
++	memcpy(b + 42, n->bssid, 6);
++	b[48] = 0x20;
++	mbox_out(1, 1, WMI_CONNECT_CMD, b, 52, &bad);
++	lg(bad ? "connect: sending the commands FAILED\n" : "connect: commands sent, waiting for the connect event\n", 0, 0, 0);
++}
++
++/* an Ethernet frame from the stack into a mailbox data packet (endpoint 2) */
++static void tx_one(struct sk_buff *skb)
++{
++	unsigned int dl, pl, full;
++	int bad = 0;
++
++	if (skb->len < 14) {
++		wstats.tx_errors++;
++		return;
++	}
++	dl = skb->len - 14;
++	pl = 24 + dl;
++	full = (6 + pl + 0x7F) & ~0x7Fu;
++	if (full > sizeof(pkt)) {
++		wstats.tx_dropped++;
++		return;
++	}
++	memset(pkt, 0, full);
++	pkt[0] = 2;					/* best effort data */
++	pkt[2] = pl & 0xff;
++	pkt[3] = pl >> 8;
++	pkt[4] = 0x08;					/* 0x2008, as dswifi's data_send_pkt_idk() */
++	pkt[5] = 0x20;
++	memcpy(pkt + 8, skb->data, 6);			/* destination */
++	memcpy(pkt + 14, skb->data + 6, 6);		/* source */
++	pkt[20] = (dl + 8) >> 8;			/* length after this field, big endian */
++	pkt[21] = (dl + 8) & 0xff;
++	pkt[22] = 0xAA; pkt[23] = 0xAA; pkt[24] = 0x03;
++	memcpy(pkt + 28, skb->data + 12, 2);		/* EtherType */
++	memcpy(pkt + 30, skb->data + 14, dl);
++	op(11, 0, full, pkt, full, &bad);
++	if (bad) {
++		wstats.tx_errors++;
++	} else {
++		wstats.tx_packets++;
++		wstats.tx_bytes += skb->len;
++	}
++}
++
++static int wthread(void *arg)
++{
++	daemonize("dsiwifi");
++	while (thr_run) {
++		struct sk_buff *skb;
++		int i, bad = 0;
++
++		while ((skb = skb_dequeue(&txq))) {
++			tx_one(skb);
++			dev_kfree_skb(skb);
++		}
++		if (wdev && netif_queue_stopped(wdev) && skb_queue_len(&txq) < 8)
++			netif_wake_queue(wdev);
++		if (conn_pending) {
++			conn_pending = 0;
++			do_connect();
++		}
++		if (disc_pending) {
++			disc_pending = 0;
++			mbox_out(1, 1, WMI_DISCONNECT_CMD, 0, 0, &bad);
++		}
++		for (i = 0; i < 8; i++) {			/* whatever arrived: at most 8 packets per round */
++			unsigned int out[19];
++
++			if (dsisd_twlop_rx(12, 0, 0, 0, 0, out, rx) != 0 || out[1] == 5)
++				break;
++			handle_pkt(out[0], 0);
++		}
++		wait_event_interruptible_timeout(thr_wait, !thr_run || skb_queue_len(&txq) || conn_pending || disc_pending, 2);
++	}
++	complete_and_exit(&thr_done, 0);
++	return 0;
++}
++
++static int w_xmit(struct sk_buff *skb, struct net_device *dev)
++{
++	if (!connected) {
++		wstats.tx_dropped++;
++		dev_kfree_skb(skb);
++		return 0;
++	}
++	skb_queue_tail(&txq, skb);
++	if (skb_queue_len(&txq) > 16)
++		netif_stop_queue(dev);
++	wake_up(&thr_wait);
++	return 0;
++}
++
++static int w_open(struct net_device *dev)
++{
++	if (nds_is_up())
++		return -EBUSY;				/* the DS Wi-Fi has the antenna */
++	if (fw_len < 0xC4)
++		return -ENOENT;				/* cat /usr/lib/firmware/dsi-wifi.bin > /proc/dsiwifi2fw first */
++	if (session)
++		return 0;
++	connected = 0;
++	unknown_logged = 0;
++	upload(1);
++	if (!session)
++		return -EIO;
++	memcpy(dev->dev_addr, mac, 6);
++	netif_carrier_off(dev);
++	thr_run = 1;
++	init_completion(&thr_done);
++	if (kernel_thread(wthread, NULL, CLONE_FS | CLONE_FILES) < 0) {
++		thr_run = 0;
++		return -ENOMEM;
++	}
++	netif_start_queue(dev);
++	return 0;
++}
++
++static int w_stop(struct net_device *dev)
++{
++	unsigned int out[19];
++	int bad = 0;
++
++	netif_stop_queue(dev);
++	if (thr_run) {
++		thr_run = 0;
++		wake_up(&thr_wait);
++		wait_for_completion(&thr_done);
++	}
++	skb_queue_purge(&txq);
++	if (session) {
++		if (connected)
++			mbox_out(1, 1, WMI_DISCONNECT_CMD, 0, 0, &bad);
++		dsisd_twlop(9, 0, 0, 0, 0, out);	/* antenna back to the DS chip */
++		session = 0;
++	}
++	connected = 0;
++	netif_carrier_off(dev);
++	lg("wlan0 down: antenna back to the DS chip\n", 0, 0, 0);
++	return 0;
++}
++
++static struct net_device_stats *w_stats(struct net_device *dev)
++{
++	return &wstats;
++}
++
+ static int twl_read_proc(char *page, char **start, off_t off, int count, int *eof, void *data)
+ {
+ 	unsigned int *t = twl_d, *g = twl_d + 8, *in = twl_d + 16;
+@@ -551,7 +896,9 @@ static int twl_read_proc(char *page, char **start, off_t off, int count, int *eo
+ 			      (in[2] & 4) ? "yes" : "no", (in[2] & 8) ? "timed out" : "answered",
+ 			      t[0] & 0xff, t[1], t[2] & 0xff, g[0], g[1], twl_chip(g[1]), t[4], g[2], g[3], g[4],
+ 			      g[5], t[6], t[5], g[6], g[7] & 0xff, t[7], in[1], t[3]);
+-	len += snprintf(page + len, PAGE_SIZE - len, "firmware file: %u bytes\n%s", fw_len, ulog);
++	len += snprintf(page + len, PAGE_SIZE - len, "wlan0: %s, %s; packets in %lu out %lu (dropped out %lu)\nfirmware file: %u bytes\n%s",
++			session ? "chip up" : "down", connected ? "CONNECTED" : "not connected", wstats.rx_packets, wstats.tx_packets,
++			wstats.tx_dropped, fw_len, ulog);
+ 	if (len > PAGE_SIZE - 1)
+ 		len = PAGE_SIZE - 1;
+ 	*eof = 1;
+@@ -563,7 +910,7 @@ static int twl_read_proc(char *page, char **start, off_t off, int count, int *eo
+ 
+ static int twl_write_proc(struct file *file, const char __user *buffer, unsigned long count, void *data)
+ {
+-	char cmd[16];
++	char cmd[48];
+ 	unsigned long n = count < sizeof(cmd) - 1 ? count : sizeof(cmd) - 1;
+ 
+ 	if (copy_from_user(cmd, buffer, n))
+@@ -577,8 +924,29 @@ static int twl_write_proc(struct file *file, const char __user *buffer, unsigned
+ 		twl_ret = -101;
+ 		return count;
+ 	}
++	if (!strncmp(cmd, "connect", 7) || !strncmp(cmd, "disconnect", 10)) {
++		if (!session)
++			return -ENOTCONN;		/* ifconfig wlan0 up first */
++		if (cmd[0] == 'd') {
++			disc_pending = 1;
++		} else {
++			char *nm = cmd + 7;
++			int k;
++
++			while (*nm == ' ')
++				nm++;
++			for (k = 0; nm[k] && nm[k] != '\n' && k < 32; k++)
++				conn_req[k] = nm[k];
++			conn_req[k] = 0;
++			conn_pending = 1;
++		}
++		wake_up(&thr_wait);
++		return count;
++	}
++	if (session)
++		return -EBUSY;				/* wlan0 is up: ifconfig wlan0 down first */
+ 	if (!strncmp(cmd, "upload", 6)) {
+-		upload();
++		upload(0);
+ 	} else {
+ 		ulog_len = 0;
+ 		ulog[0] = 0;
+@@ -624,6 +992,20 @@ static int __init dsiwifi_init(void)
+ {
+ 	struct proc_dir_entry *e;
+ 
++	skb_queue_head_init(&txq);
++	wdev = alloc_etherdev(0);		/* wlan0, down until "ifconfig wlan0 up" (which uploads the firmware) */
++	if (wdev) {
++		strcpy(wdev->name, "wlan%d");
++		wdev->open = w_open;
++		wdev->stop = w_stop;
++		wdev->hard_start_xmit = w_xmit;
++		wdev->get_stats = w_stats;
++		if (register_netdev(wdev)) {
++			free_netdev(wdev);
++			wdev = 0;
++		}
++	}
++
+ 	e = create_proc_entry("dsiwifi2", 0644, NULL);
+ 	if (e) {
+ 		e->read_proc = twl_read_proc;
+diff --git a/vendors/Nintendo/DSI/logbody b/vendors/Nintendo/DSI/logbody
+index a81be4379..c38684df8 100644
+--- a/vendors/Nintendo/DSI/logbody
++++ b/vendors/Nintendo/DSI/logbody
+@@ -13,6 +13,9 @@ echo "--- /home/doom/dsdoom.log ---"
+ echo "--- network (nds) ---"
+ ifconfig nds 2>&1
+ iwconfig nds 2>&1
++echo "--- wlan0 (DSi Wi-Fi chip) ---"
++ifconfig wlan0 2>&1
++[ -f /tmp/wlan0-test.log ] && /usr/bin/cat /tmp/wlan0-test.log
+ echo "--- /proc/dsiwifi2 (DSi Wi-Fi chip test) ---"
+ /usr/bin/cat /proc/dsiwifi2 2>&1
+ echo "--- /proc/dswifistat (joining) ---"
+diff --git a/vendors/Nintendo/DSI/wifi-dsi-test b/vendors/Nintendo/DSI/wifi-dsi-test
+index 93354296c..acf52f2fd 100644
+--- a/vendors/Nintendo/DSI/wifi-dsi-test
++++ b/vendors/Nintendo/DSI/wifi-dsi-test
+@@ -1,21 +1,38 @@
+ #!/bin/sh
+ # Start > Network > DSi Wi-Fi test: the DSi's own Wi-Fi chip (Atheros, docs/ATHEROS-PLAN.md). With the firmware in
+-# /usr/lib/firmware/dsi-wifi.bin (scripts/add-dsi-wifi-fw.sh on the PC) it is uploaded and started, else one bring-up run.
+-# The DS Wi-Fi is switched off first (both chips share the antenna). The result goes into the card log.
++# /usr/lib/firmware/dsi-wifi.bin (scripts/add-dsi-wifi-fw.sh on the PC): wlan0 up (firmware upload, scan), connect to the strongest open
++# network (or the one named as the first argument), DHCP, ping. Without it: one bring-up run. The DS Wi-Fi is switched off first (both
++# chips share the antenna). Everything goes into the card log. wlan0 stays up afterwards ("ifconfig wlan0 down" gives the antenna back).
+ F=/usr/lib/firmware/dsi-wifi.bin
++L=/tmp/wlan0-test.log
+ killall udhcpc 2>/dev/null
+ ifconfig nds down 2>/dev/null
+-echo "DSi Wi-Fi chip test (up to a minute)..."
+-if [ -f $F ]
++if [ ! -f $F ]
+ then
+-	echo clear > /proc/dsiwifi2
+-	cat $F > /proc/dsiwifi2fw
+-	echo upload > /proc/dsiwifi2
+-else
+ 	echo "(no firmware file $F: bring-up only)"
+ 	echo 1 > /proc/dsiwifi2
++	cat /proc/dsiwifi2
++	/bin/sh /boot/savelog
++	exec /bin/sh
+ fi
++echo "wlan0 test" > $L
++echo "DSi Wi-Fi: firmware upload and scan (up to a minute)..."
++ifconfig wlan0 down 2>/dev/null
++echo clear > /proc/dsiwifi2
++cat $F > /proc/dsiwifi2fw
++ifconfig wlan0 up >> $L 2>&1
++echo "connecting to ${1:-the strongest open network}..."
++echo "connect $1" > /proc/dsiwifi2
++sleep 10
++echo "DHCP..."
++udhcpc -n -q -i wlan0 >> $L 2>&1
++ifconfig wlan0 >> $L 2>&1
++/usr/bin/cat /proc/net/route >> $L 2>&1
++echo "ping..."
++ping -c 3 8.8.8.8 >> $L 2>&1
++ping -c 3 google.com >> $L 2>&1
++/usr/bin/cat $L
+ cat /proc/dsiwifi2
+ /bin/sh /boot/savelog
+ echo "-- saved in the card log (sd:/linux/DSILOG.TXT) --"
+-[ -n "$1" ] || exec /bin/sh
++exec /bin/sh
+-- 
+2.56.0
+

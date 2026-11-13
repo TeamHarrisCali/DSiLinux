@@ -833,3 +833,14 @@ mode 11ag (dswifi's value; the AR6013 is 2.4 GHz only) never left channel 1. w98
 w98m: no command refused, 8 networks (incl. ATTDtsFwBq, WPA2, -87 dBm, SNR 8, which the DS chip had also found on channel 1), but again all
 on channel 1 and no "scan complete" event within 6 s. The DS chip saw networks on channels 6 and 11 at the same place, so the scan still
 stays on channel 1 or its later results are not read. Unknown WMI events are not logged yet; the next build (step 5) logs them.
+
+### Step 5: wlan0 (w98n)
+
+w98n (patch 0115) makes the Atheros chip a network interface. `wlan0` is registered at boot and stays down; `ifconfig wlan0 up` runs
+the firmware upload, HTC/WMI and a scan, then keeps the chip up with the antenna on it, and starts a kernel thread that does every ARM7
+request: outgoing frames become mailbox data packets on endpoint 2 (dswifi's 24-byte header: 0, destination, source, big-endian length,
+LLC/SNAP, EtherType), and every 20 ms up to 8 received packets are handled (WMI events; data packets become Ethernet frames for the stack).
+`echo connect [name] > /proc/dsiwifi2` joins an open network from the scan (the strongest one when no name is given) with dswifi's command
+sequence; the connect event turns the carrier on. Unknown WMI events are now logged (for the scan's channel question). The test (Start >
+Network > DSi Wi-Fi test) does all of it and then DHCP and pings, with the output in the card log. gcc 4.0.4 crashed ("unrecognizable
+insn") on upload() until its part tables were made static.
