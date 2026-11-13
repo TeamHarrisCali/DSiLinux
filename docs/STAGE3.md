@@ -869,3 +869,11 @@ the first retry): the scan never stops reporting beacons, and the byte-by-byte r
 After the connect, data packets came in (33 passed to the network stack; the ring shows endpoint 2 packets). w98q (patch 0118): BSS filter
 "none" after the scan and during the connect, up to 16 packets per round without pausing while more wait, the test waits up to 90 s and
 retries DHCP once. gcc 4.0.4 crashed on upload() again until the helpers it calls were made noinline.
+
+### Step 5 verified: wlan0 on the internet through the DSi's own Wi-Fi chip (w98q)
+
+w98q on the console (/home/wlan0-test.log): connected to the open network GuestNet after about 50 s (again on the third connect command),
+**DHCP lease 192.168.1.2** on the first try (gateway 192.168.1.1, two DNS servers), **`ping 8.8.8.8`: 2 of 3 replies, 20-30 ms**, **`ping
+google.com`: resolved to 172.253.156.102, 2 of 3 replies, 20 ms**; 144 packets in, 13 out, firmware failure state 0. The BSS report flood
+is gone (only 5 packets between the connect retries). Still open: the connect is answered only after the third command (~35 s), the first
+ping of each run is lost (ARP), packets move byte by byte (CMD52), and only open networks (WPA2 is step 6).

@@ -32,7 +32,7 @@ This repository holds the patches, build scripts and notes. The source tree is a
 | DOOM (doomgeneric, shareware WAD) | console: runs, "a little sluggish" | Lives in `ROOTFS.IMG` (`/home/doom`), not in the ROM |
 | Wi-Fi (the DS chip: open or WEP networks, 802.11b) | **console: scan, join, DHCP and `ping google.com` work (w97y, phone hotspot)** | WEP and SSH not yet tried; w97z: Ctrl+C on the touch keyboard |
 | Power off | console | |
-| The DSi's Atheros Wi-Fi (WPA2), DSP | not attempted | |
+| The DSi's Atheros Wi-Fi (WPA2) | **console: firmware upload, scan (WPA2 networks listed), `wlan0` joins an open network, DHCP, ping 8.8.8.8 / google.com (w98q)** | WPA2 login not yet (step 6 of docs/ATHEROS-PLAN.md) |
 
 ## The SD card rule: nothing outside `/linux`
 
