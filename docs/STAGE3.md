@@ -763,3 +763,21 @@ interrupt-handler code; if the BIOS lets an interrupt in there, the nested entry
 elsewhere. A pending interrupt is likely at that moment: the antenna has just been switched away from the DS chip, whose interrupt is still
 enabled. w98h (patch 0109): the run writes the RTC itself with plain delay loops, and masks the DS Wi-Fi interrupt for the duration
 (acknowledged and restored at the end). Lesson for the ARM7: no BIOS calls in code that runs from the interrupt handler.
+
+### First contact with the Atheros chip; firmware upload (w98i)
+
+w98h's run finished: **4-bit SDIO bus, card already initialised, manufacturer 0x02010271, chip 0x0D000000 = AR6013, reset cause 2, boot
+ROM (BMI) version 0x23000024, firmware loaded: no.** So the RTC fix worked, and after Unlaunch the chip has no firmware: DSLinux must
+upload it. The DSi's firmware title HNCA (from the user's SDNAND backup, read with permission) was decoded: after the signature and SHA-1,
+an entry table at 0xA0 (2 entries; layout confirmed by dsibrew "WiFi Firmware") points at two blobs, both matching their SHA-1. Blob 1 is
+for the AR6002 (boot ROM 0x20000188), blob 2 for AR6013 and AR6014 with boot ROM 0x23000024. A blob header lists its parts: type 1 (LZ
+compressed, 0x2EEC bytes) for 0x524C00 (the start address at +0x40), type 2 (0xFC0) for 0x524C00, type 4 (0x312, the data patch) for
+0x53F040, type 5 (0x38, executed) for 0x527000; host interest 0x520000 at +0x58. dswifi's disabled upload code uses the same addresses
+for A/C/D. Read with the AR6000 host interest layout: +0x18 hi_dset_list_head, +0x54 hi_board_data, +0x58 hi_board_data_initialized,
++0x6C hi_mbox_io_block_sz, +0x74 hi_mbox_isr_yield_limit.
+w98i (patch 0110) uploads it: the ARM7 keeps the chip in BMI with the antenna on it and offers BMI operations; the ARM9 (new
+`arch/arm/mach-nds/dsiwifi.c`) takes the file through `/proc/dsiwifi2fw`, picks the blob by chip ID and boot ROM version, writes parts 2
+and 5, executes 5, LZ-streams part 1 (then closes the stream), sets the app start, writes part 4 and points +0x18 at it, starts the
+firmware and waits for +0x58, then gives the antenna back; every step is logged in `/proc/dsiwifi2`. `scripts/add-dsi-wifi-fw.sh`
+copies the user's own HNCA into ROOTFS.IMG as `/usr/lib/firmware/dsi-wifi.bin` (checked against its SHA-1 sums; never in the repo or ROM);
+done for this card. dswifi also wrote part 2 again after the firmware ("is D needed?"); left out for now.

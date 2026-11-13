@@ -1,0 +1,831 @@
+From f1ba041c61005f68447849e232301bb1a6803a6e Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Fri, 13 Nov 2026 11:01:23 -0600
+Subject: [PATCH] DSi Wi-Fi chip: firmware upload (BMI) from the DSi's own
+ firmware file
+
+w98h: the chip answers (AR6013, boot ROM 0x23000024, 4-bit bus) but has no
+firmware after Unlaunch. Upload it:
+- ARM7 (twlwifi.c): a run without firmware stays in BMI with the antenna on
+  the Atheros chip ("held"); request ops 2-9: write memory, LZ stream start,
+  LZ data, execute, set app start, write a word, finish (start + wait),
+  release.
+- ARM9 (new dsiwifi.c, /proc/dsiwifi2 moved from volume.c): /proc/dsiwifi2fw
+  takes the firmware file (title HNCA, WLFIRM); "echo upload > /proc/dsiwifi2"
+  runs, picks the blob for the chip ID and boot ROM version, writes parts 2
+  and 5, executes 5, LZ-streams part 1, sets the app start, writes part 4
+  and points hi_dset_list_head at it, starts the firmware, waits for
+  hi_board_data_initialized, releases the antenna; an upload log is shown.
+- wifi-dsi-test feeds /usr/lib/firmware/dsi-wifi.bin when present.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ linux-2.6.x/arch/arm/mach-nds/Makefile       |   2 +-
+ linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c   |   3 +
+ linux-2.6.x/arch/arm/mach-nds/arm7/twlwifi.c | 215 ++++++++++--
+ linux-2.6.x/arch/arm/mach-nds/dsiwifi.c      | 329 +++++++++++++++++++
+ linux-2.6.x/arch/arm/mach-nds/volume.c       |  78 -----
+ linux-2.6.x/drivers/block/dldi_c.c           |  31 ++
+ vendors/Nintendo/DSI/wifi-dsi-test           |  18 +-
+ 7 files changed, 560 insertions(+), 116 deletions(-)
+ create mode 100644 linux-2.6.x/arch/arm/mach-nds/dsiwifi.c
+
+diff --git a/linux-2.6.x/arch/arm/mach-nds/Makefile b/linux-2.6.x/arch/arm/mach-nds/Makefile
+index ecce9c3ea..39ee3cd32 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/Makefile
++++ b/linux-2.6.x/arch/arm/mach-nds/Makefile
+@@ -4,7 +4,7 @@
+ 
+ # Object file lists.
+ 
+-obj-y                += arch.o irq.o time.o button.o fifo.o rtc.o volume.o disable-itcm-writes.o
++obj-y                += arch.o irq.o time.o button.o fifo.o rtc.o volume.o dsiwifi.o disable-itcm-writes.o
+ 
+ obj-$(CONFIG_NDS_TEXT_CONSOLE) += console.o
+ obj-$(CONFIG_NDS_SOUNDTEST) += soundtest.o
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c b/linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c
+index c72fa62b2..5f092037d 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c
+@@ -45,6 +45,7 @@
+ extern void wifi_probe(unsigned int *touch, unsigned int *diag, unsigned int *info);
+ extern void twl_wifi_probe(u32 *touch, u32 *diag, u32 *info);
+ extern void twl_wifi_report(u32 *touch, u32 *diag, u32 *info);
++extern void twl_wifi_op(u32 op, u32 addr, u32 *touch, u32 *diag, u32 *info, const u8 *data);
+ 
+ typedef volatile u16 vu16;
+ typedef volatile u32 vu32;
+@@ -903,6 +904,8 @@ static void nds_sd_request_inner(struct nds_sd_block *b)
+ 		}
+ 		if (b->count == 1)			/* report the last run's results */
+ 			twl_wifi_report((u32 *)b->touch, (u32 *)b->diag, (u32 *)b->info);
++		else if (b->count >= 2)			/* firmware upload operations (twlwifi.c) */
++			twl_wifi_op(b->count, b->sector, (u32 *)b->touch, (u32 *)b->diag, (u32 *)b->info, b->data);
+ 		else
+ 			twl_wifi_probe((u32 *)b->touch, (u32 *)b->diag, (u32 *)b->info);
+ 		b->result = NDS_SD_OK;
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/twlwifi.c b/linux-2.6.x/arch/arm/mach-nds/arm7/twlwifi.c
+index d1a2f05ed..f089a7e81 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/arm7/twlwifi.c
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/twlwifi.c
+@@ -78,6 +78,11 @@
+ #define HI_AR601X	0x00520000
+ 
+ #define BMI_DONE		1
++#define BMI_WRITE_MEMORY	3
++#define BMI_EXECUTE		4
++#define BMI_SET_APP_START	5
++#define BMI_LZ_STREAM_START	0xD
++#define BMI_LZ_DATA		0xE
+ #define BMI_READ_SOC_REGISTER	6
+ #define BMI_WRITE_SOC_REGISTER	7
+ #define BMI_GET_TARGET_ID	8
+@@ -307,9 +312,166 @@ static void bmi_wr_reg(u32 addr, u32 val)
+  *   touch[0] CCCR revision, [1] OCR, [2] bus interface control, [3] error detail at the first failure, [4] host interest address,
+  *   [5] EEPROM address, [6] ready polls, [7] first RX lookahead word
+  */
+-/* the last run's results, kept here so the ARM9 can fetch them later (twl_wifi_report) even if it stopped waiting for the run */
+-static u32 r_touch[8], r_diag[8], r_info[3];
++/*
++ * Held in BMI: when the chip has no firmware, a run leaves the antenna on the Atheros chip (DS Wi-Fi interrupt still masked) so that the
++ * ARM9 can upload the firmware with the operations below, then "finish" (start it) and "release" (antenna and interrupt back).
++ */
++static u32 r_touch[8], r_diag[8], r_info[3];	/* the last run's (or finish's) results */
++static int held;
++static u16 h_gpio0, h_pwr0;
++static u32 h_ie0, h_hi;
++
++static void release(void)
++{
++	if (!held)
++		return;
++	R16(GPIO_WIFI) = h_gpio0;			/* antenna back to the DS chip, power as it was */
++	R16(POWCNT2) = h_pwr0;
++	tdelay(40000);
++	*(volatile u32 *)0x04000214 = 1u << 24;	/* drop a DS Wi-Fi interrupt latched meanwhile, then allow it again */
++	R32(0x04000210) = h_ie0;
++	held = 0;
++}
++
++/* a BMI message: command word, then 32-bit words, then bytes (zero padded to 4); the last byte goes to 0xFF */
++static void bmi_bytes(const u8 *p, u32 n)
++{
++	u32 al = (n + 3) & ~3u, i;
++
++	for (i = 0; i < al; i++)
++		wr8(1, i == al - 1 ? 0xFF : 0, i < n ? p[i] : 0);
++}
++
++static void bmi_write(u32 addr, const u8 *p, u32 len)	/* chunks of 0x1F0, as dswifi */
++{
++	while (len) {
++		u32 n = len > 0x1F0 ? 0x1F0 : len;
++
++		mbox_wr32(BMI_WRITE_MEMORY, 0);
++		mbox_wr32(addr, 0);
++		mbox_wr32((n + 3) & ~3u, 0);
++		bmi_bytes(p, n);
++		addr += n;
++		p += n;
++		len -= n;
++	}
++}
++
++static void bmi_lz_data(const u8 *p, u32 len)		/* chunks of 0x1F8 */
++{
++	while (len) {
++		u32 n = len > 0x1F8 ? 0x1F8 : len;
++
++		mbox_wr32(BMI_LZ_DATA, 0);
++		mbox_wr32((n + 3) & ~3u, 0);
++		bmi_bytes(p, n);
++		p += n;
++		len -= n;
++	}
++}
++
++/* start the firmware (BMI done) and wait for it: steps 13-15 of a run, and the "finish" operation after an upload */
++static void twl_finish(u32 *touch, u32 *diag, u32 *info, u32 hi)
++{
++	u32 t;
+ 
++	info[0] = 13;
++	intern_wr(hi + 0x6C, 0x80);			/* hi_mbox_io_block_sz */
++	intern_wr(hi + 0x74, 0x63);			/* hi_mbox_isr_yield_limit */
++	mbox_wr32(BMI_DONE, 1);
++	info[2] |= 4;
++	for (t = 0; t < 2000; t++) {			/* about 2 s */
++		diag[5] = intern_rd(hi + 0x58);		/* hi_board_data_initialized: 1 = the firmware is up */
++		if (diag[5] == 1 || (st & 4))
++			break;
++		tdelay(4000);
++	}
++	touch[6] = t;
++	if (diag[5] != 1)
++		return;
++	touch[5] = intern_rd(hi + 0x54);		/* hi_board_data: EEPROM (board data) address */
++	diag[6] = intern_rd(touch[5] + 0x10);		/* its version */
++
++	/* the firmware's first message (WMI ready) should be waiting in mailbox 0 */
++	info[0] = 14;
++	for (t = 0; t < 500; t++) {
++		diag[7] = rd8(1, F1_RX_LOOKAHEAD_VALID);
++		if ((diag[7] & 1) || (st & 4))
++			break;
++		tdelay(4000);
++	}
++	touch[7] = rd32(1, F1_RX_LOOKAHEAD0);
++	info[0] = 15;					/* all done */
++}
++
++/*
++ * Operations while held in BMI (request count = op, sector = address, touch[0] = length or argument, data = bytes up to 2048):
++ *   2 write memory, 3 LZ stream start, 4 LZ data, 5 execute (answer in info[0]), 6 set app start, 7 write a word (touch[0]),
++ *   8 finish (start the firmware, wait; results like a run), 9 release.
++ * info[1] = 0 done, 1 not held, 2 the card stopped answering (st & 4), 3 no answer from BMI.
++ */
++void twl_wifi_op(u32 op, u32 addr, u32 *touch, u32 *diag, u32 *info, const u8 *data)
++{
++	u32 arg = touch[0], v = 0xFFFFFFFF;
++	int i;
++
++	info[0] = info[1] = info[2] = 0;
++	if (op == 9) {
++		release();
++		return;
++	}
++	if (!held) {
++		info[1] = 1;
++		return;
++	}
++	st = 0;
++	switch (op) {
++	case 2:
++		bmi_write(addr, data, arg > 2048 ? 2048 : arg);
++		break;
++	case 3:
++		mbox_wr32(BMI_LZ_STREAM_START, 0);
++		mbox_wr32(addr, 1);
++		break;
++	case 4:
++		bmi_lz_data(data, arg > 2048 ? 2048 : arg);
++		break;
++	case 5:
++		mbox_wr32(BMI_EXECUTE, 0);
++		mbox_wr32(addr, 0);
++		mbox_wr32(arg, 1);
++		if (mbox_rd32(&v, 2000))
++			info[1] = 3;
++		info[0] = v;
++		break;
++	case 6:
++		mbox_wr32(BMI_SET_APP_START, 0);
++		mbox_wr32(addr, 1);
++		break;
++	case 7:
++		intern_wr(addr, arg);
++		break;
++	case 8:
++		for (i = 0; i < 8; i++)
++			touch[i] = diag[i] = 0;
++		fail_stat = fail_err = 0;
++		twl_finish(touch, diag, info, h_hi);
++		info[0] |= 0x100;
++		info[1] = fail_stat;
++		touch[3] = fail_err;
++		for (i = 0; i < 8; i++) {
++			r_touch[i] = touch[i];
++			r_diag[i] = diag[i];
++		}
++		for (i = 0; i < 3; i++)
++			r_info[i] = info[i];
++		return;
++	}
++	if ((st & 4) && !info[1])
++		info[1] = 2;
++}
++
++/* the last run's results, kept here so the ARM9 can fetch them later (twl_wifi_report) even if it stopped waiting for the run */
+ void twl_wifi_report(u32 *touch, u32 *diag, u32 *info)
+ {
+ 	int i;
+@@ -340,11 +502,16 @@ void twl_wifi_probe(u32 *touch, u32 *diag, u32 *info)
+ 
+ static void twl_run(u32 *touch, u32 *diag, u32 *info)
+ {
+-	u16 gpio0 = R16(GPIO_WIFI), pwr0 = R16(POWCNT2);
+-	u32 ie0 = R32(0x04000210);
++	u16 gpio0, pwr0;
++	u32 ie0;
+ 	u32 hi, uploaded, t, ocr = 0;
+ 	int i;
+ 
++	release();					/* a new run starts from the DS chip's settings */
++	gpio0 = R16(GPIO_WIFI);
++	pwr0 = R16(POWCNT2);
++	ie0 = R32(0x04000210);
++
+ 	R32(0x04000210) = ie0 & ~(1u << 24);		/* no DS Wi-Fi interrupt while its chip is switched away */
+ 	for (i = 0; i < 8; i++)
+ 		touch[i] = diag[i] = 0;
+@@ -465,37 +632,19 @@ static void twl_run(u32 *touch, u32 *diag, u32 *info)
+ 	bmi_wr_reg(0x0040C4, bmi_rd_reg(0x0040C4) | 1);	/* WLAN_SYSTEM_SLEEP */
+ 	bmi_wr_reg(0x004028, 0x5);			/* WLAN_CLOCK_CONTROL */
+ 	bmi_wr_reg(0x004020, 0x0);
+-	if (!uploaded)					/* no firmware: an upload is needed (a later step); stop here */
+-		goto out;
+-
+-	/* 10: start the firmware that is already there and wait for it */
+-	info[0] = 13;
+-	intern_wr(hi + 0x6C, 0x80);
+-	intern_wr(hi + 0x74, 0x63);
+-	mbox_wr32(BMI_DONE, 1);
+-	info[2] |= 4;
+-	for (t = 0; t < 2000; t++) {			/* about 2 s */
+-		diag[5] = intern_rd(hi + 0x58);
+-		if (diag[5] == 1 || (st & 4))
+-			break;
+-		tdelay(4000);
++	if (!uploaded) {				/* no firmware: stay in BMI with the antenna on this chip for an upload */
++		held = 1;
++		h_gpio0 = gpio0;
++		h_pwr0 = pwr0;
++		h_ie0 = ie0;
++		h_hi = hi;
++		info[2] |= 16;
++		info[0] |= 0x100;
++		return;
+ 	}
+-	touch[6] = t;
+-	if (diag[5] != 1)
+-		goto out;
+-	touch[5] = intern_rd(hi + 0x54);		/* EEPROM (board data) address */
+-	diag[6] = intern_rd(touch[5] + 0x10);		/* its version */
+ 
+-	/* 11: the firmware's first message (WMI ready) should be waiting in mailbox 0 */
+-	info[0] = 14;
+-	for (t = 0; t < 500; t++) {
+-		diag[7] = rd8(1, F1_RX_LOOKAHEAD_VALID);
+-		if ((diag[7] & 1) || (st & 4))
+-			break;
+-		tdelay(4000);
+-	}
+-	touch[7] = rd32(1, F1_RX_LOOKAHEAD0);
+-	info[0] = 15;					/* all done */
++	/* 13-15: start the firmware that is already there and wait for it */
++	twl_finish(touch, diag, info, hi);
+ 
+ out:
+ 	info[0] |= 0x100;				/* the run finished (not stuck): bit 8 */
+diff --git a/linux-2.6.x/arch/arm/mach-nds/dsiwifi.c b/linux-2.6.x/arch/arm/mach-nds/dsiwifi.c
+new file mode 100644
+index 000000000..059a0ca15
+--- /dev/null
++++ b/linux-2.6.x/arch/arm/mach-nds/dsiwifi.c
+@@ -0,0 +1,329 @@
++/*
++ * The DSi's own Wi-Fi chip (Atheros AR6013/AR6014), steps 1-3 of docs/ATHEROS-PLAN.md: bring-up, firmware upload, start.
++ * The SDIO work runs on the ARM7 (arch/arm/mach-nds/arm7/twlwifi.c); this side drives it through the SD request block.
++ *
++ *   /proc/dsiwifi2fw   write: the Wi-Fi firmware file (the DSi's title HNCA, "WLFIRM"), appended; "cat file > /proc/dsiwifi2fw"
++ *   /proc/dsiwifi2     write "1": one bring-up run. write "upload": a run, then (when the chip has no firmware, as after Unlaunch) the
++ *                      firmware from /proc/dsiwifi2fw, then start it. write "clear": forget the firmware. read: the last results and the
++ *                      upload log (the card log includes it).
++ * Both refuse while the DS Wi-Fi (nds) is up: the two chips share the antenna.
++ *
++ * The firmware file (dsibrew "WiFi Firmware"): 0x00 RSA signature, 0x80 SHA-1, then at 0xA0 an entry header (byte 0xA2 = number of
++ * entries) and entries of 0x20 bytes from 0xA4: offset, length, ID, SHA-1. Each entry is a blob for some chips. A blob starts with:
++ *   +0x00 flags, +0x04 offset of part 1 (in the blob), +0x08 its size, +0x0C its type (bit 31 = LZ compressed),
++ *   +0x10, +0x20, +0x30 more parts: load address, offset, size, type;   +0x40 part 1's load address (the firmware's start),
++ *   +0x44/+0x48 and +0x4C/+0x50: chip ID / boot ROM version it is for, +0x58 host interest address.
++ * On this DSi XL: blob 2, AR6013 or AR6014 with boot ROM 0x23000024: type 1 LZ firmware for 0x524C00, type 2 for 0x524C00, type 4 (the
++ * data patch) for 0x53F040, type 5 (a small patch that is executed) for 0x527000.
++ * Upload order after dswifi's (disabled) code and the AR6000 host interest layout: write 2 and 5, execute 5 (at its address + 0x400000,
++ * argument its address), LZ-stream 1 to its address, set the app start to it, write 4 and point hi_dset_list_head (+0x18) at it, then
++ * start (hi_mbox_io_block_sz +0x6C = 0x80, hi_mbox_isr_yield_limit +0x74 = 0x63, BMI done) and wait for hi_board_data_initialized (+0x58).
++ */
++#include <linux/kernel.h>
++#include <linux/init.h>
++#include <linux/proc_fs.h>
++#include <linux/string.h>
++#include <linux/slab.h>
++#include <linux/netdevice.h>
++#include <asm/uaccess.h>
++
++extern int dsisd_twlwifi(unsigned int *out, int report);
++extern int dsisd_twlop(unsigned int op, unsigned int addr, unsigned int arg, const unsigned char *data, unsigned int len,
++		       unsigned int *out);
++
++#define FW_MAX	131072
++static unsigned char *fw;
++static unsigned int fw_len;
++
++static unsigned int twl_d[19];
++static int twl_ret = -100;	/* -100 = not run yet, -101 = refused (nds up) */
++
++static char ulog[2048];
++static int ulog_len;
++
++static const char *twl_step[] = { "nothing", "power, antenna", "RTC clock output (FOUT)", "power chip register 0x30", "SCFG_WL",
++				  "SDIO controller", "CMD5 (operating conditions)", "CMD3/CMD7 (address, select)",
++				  "function 1, 4-bit bus, block size", "identify (manufacturer, chip ID)", "reset into the boot ROM",
++				  "boot ROM version (BMI)", "BMI settings", "start the firmware", "wait for the firmware's first message",
++				  "all done" };
++
++static void lg(const char *fmt, unsigned int a, unsigned int b, unsigned int c)
++{
++	char line[128];
++	int n = snprintf(line, sizeof(line), fmt, a, b, c);
++
++	printk(KERN_INFO "dsiwifi2: %s", line);
++	if (ulog_len + n < (int)sizeof(ulog) - 1) {
++		memcpy(ulog + ulog_len, line, n);
++		ulog_len += n;
++		ulog[ulog_len] = 0;
++	}
++}
++
++static const char *twl_chip(unsigned int id)
++{
++	return id == 0x0D000000 ? "AR6013" : id == 0x0D000001 ? "AR6014" : id == 0x02000001 ? "AR6002" : "unknown";
++}
++
++static int nds_is_up(void)
++{
++	struct net_device *dev = dev_get_by_name("nds");
++	int up = dev && (dev->flags & IFF_UP);
++
++	if (dev)
++		dev_put(dev);
++	return up;
++}
++
++static unsigned int w32(const unsigned char *p)
++{
++	return p[0] | (p[1] << 8) | (p[2] << 16) | ((unsigned int)p[3] << 24);
++}
++
++/* one ARM7 operation; logs failures. Returns the answer word (info[0]). */
++static unsigned int op(unsigned int o, unsigned int addr, unsigned int arg, const unsigned char *data, unsigned int len, int *bad)
++{
++	unsigned int out[19];
++	int r = dsisd_twlop(o, addr, arg, data, len, out);
++
++	if (r != 0 || out[1] != 0) {
++		lg("  op %u at %08x failed: request %d, status %u\n", o, addr, r);
++		*bad = 1;
++	}
++	return out[0];
++}
++
++static void write_part(const char *name, unsigned int addr, const unsigned char *p, unsigned int size, int *bad)
++{
++	unsigned int done;
++
++	for (done = 0; done < size && !*bad; done += 2048)
++		op(2, addr + done, size - done > 2048 ? 2048 : size - done, p + done, size - done > 2048 ? 2048 : size - done, bad);
++	lg(*bad ? "  wrote %u bytes to %08x (FAILED)\n" : "  wrote %u bytes to %08x\n", size, addr, 0);
++	(void)name;
++}
++
++static void upload(void)
++{
++	unsigned int *g = twl_d + 8, *in = twl_d + 16, chip, ver, n, i, k;
++	const unsigned char *blob = 0, *part[6];
++	unsigned int paddr[6], psize[6], ptype1 = 0, hi;
++	int bad = 0;
++
++	ulog_len = 0;
++	ulog[0] = 0;
++	if (fw_len < 0xC4) {
++		lg("no firmware: cat /lib/firmware/dsi-wifi.bin > /proc/dsiwifi2fw first (%u bytes)\n", fw_len, 0, 0);
++		return;
++	}
++	twl_ret = dsisd_twlwifi(twl_d, 0);
++	chip = g[1];
++	ver = g[4];
++	lg("run: request %d, step %u, chip %08x\n", twl_ret, in[0] & 0xff, chip);
++	if (g[2]) {
++		lg("the chip already had firmware: started it (no upload)\n", 0, 0, 0);
++		return;
++	}
++	if (!(in[2] & 16)) {
++		lg("the run did not stop in BMI for an upload (flags %x); nothing done\n", in[2], 0, 0);
++		return;
++	}
++
++	/* the blob for this chip and boot ROM */
++	n = fw[0xA2];
++	for (i = 0; i < n && 0xA4 + i * 0x20 + 0x20 <= fw_len; i++) {
++		unsigned int off = w32(fw + 0xA4 + i * 0x20), len = w32(fw + 0xA8 + i * 0x20);
++		const unsigned char *b = fw + off;
++
++		if (off + len > fw_len || len < 0x60)
++			continue;
++		if ((w32(b + 0x44) == chip && w32(b + 0x48) == ver) || (w32(b + 0x4C) == chip && w32(b + 0x50) == ver)) {
++			blob = b;
++			lg("firmware blob %u of %u (offset %x) is for this chip\n", i + 1, n, off);
++			break;
++		}
++	}
++	if (!blob) {
++		lg("no blob in the firmware file for chip %08x boot ROM %08x\n", chip, ver, 0);
++		goto release;
++	}
++	hi = w32(blob + 0x58);
++	for (k = 0; k < 6; k++) {
++		part[k] = 0;
++		paddr[k] = psize[k] = 0;
++	}
++	/* part 1 (described in the header's first words), then three more */
++	k = w32(blob + 0x0C) & 0xff;
++	ptype1 = w32(blob + 0x0C);
++	if (k < 6) {
++		part[k] = blob + w32(blob + 0x04);
++		psize[k] = w32(blob + 0x08);
++		paddr[k] = w32(blob + 0x40);
++	}
++	for (i = 0; i < 3; i++) {
++		const unsigned char *e = blob + 0x10 + i * 0x10;
++
++		k = w32(e + 12) & 0xff;
++		if (k < 6) {
++			part[k] = blob + w32(e + 4);
++			paddr[k] = w32(e);
++			psize[k] = w32(e + 8);
++		}
++	}
++	for (k = 1; k < 6; k++)
++		if (part[k])
++			lg("  part type %u: %u bytes for %08x\n", k, psize[k], paddr[k]);
++	if (!part[1] || !part[2] || !part[4] || !part[5] || !(ptype1 & 0x80000000)) {
++		lg("unexpected blob layout (part 1 type %08x); nothing uploaded\n", ptype1, 0, 0);
++		goto release;
++	}
++
++	write_part("2", paddr[2], part[2], psize[2], &bad);
++	write_part("5", paddr[5], part[5], psize[5], &bad);
++	if (bad)
++		goto release;
++	lg("execute %08x (argument %08x): answer %08x\n", paddr[5] + 0x400000, paddr[5],
++	   op(5, paddr[5] + 0x400000, paddr[5], 0, 0, &bad));
++	op(3, paddr[1], 0, 0, 0, &bad);			/* LZ stream to the firmware's address */
++	for (i = 0; i < psize[1] && !bad; i += 2048)
++		op(4, 0, psize[1] - i > 2048 ? 2048 : psize[1] - i, part[1] + i, psize[1] - i > 2048 ? 2048 : psize[1] - i, &bad);
++	op(3, 0, 0, 0, 0, &bad);			/* close the stream (a new empty one flushes the target's caches) */
++	lg(bad ? "LZ-streamed %u bytes to %08x (FAILED)\n" : "LZ-streamed %u bytes to %08x\n", psize[1], paddr[1], 0);
++	op(6, paddr[1], 0, 0, 0, &bad);			/* app start */
++	write_part("4", paddr[4], part[4], psize[4], &bad);
++	op(7, hi + 0x18, paddr[4], 0, 0, &bad);		/* hi_dset_list_head = the data patch */
++	if (bad)
++		goto release;
++
++	/* start it and wait (results replace the run's) */
++	{
++		unsigned int out[19];
++		int r = dsisd_twlop(8, 0, 0, 0, 0, out);
++
++		for (i = 0; i < 3; i++)
++			in[i] = out[i];
++		for (i = 0; i < 8; i++) {
++			twl_d[i] = out[3 + i];
++			g[i] = out[11 + i];
++		}
++		g[1] = chip;
++		g[4] = ver;
++		lg("start: request %d, step %u, ready %u\n", r, in[0] & 0xff, g[5]);
++		lg("  EEPROM at %08x version %08x, first mailbox word %08x\n", twl_d[5], g[6], twl_d[7]);
++	}
++release:
++	op(9, 0, 0, 0, 0, &bad);
++	lg("antenna back to the DS chip\n", 0, 0, 0);
++}
++
++static int twl_read_proc(char *page, char **start, off_t off, int count, int *eof, void *data)
++{
++	unsigned int *t = twl_d, *g = twl_d + 8, *in = twl_d + 16;
++	int len;
++
++	if (twl_ret == -100)
++		len = sprintf(page, "not run yet: echo 1 > /proc/dsiwifi2 (or: echo upload > /proc/dsiwifi2)\n");
++	else if (twl_ret == -101)
++		len = sprintf(page, "refused: switch the DS Wi-Fi off first (ifconfig nds down)\n");
++	else
++		len = sprintf(page, "request %d (-1 = the ARM9 stopped waiting), reached step %u of 15: %s, run %s%s\n"
++			      "bus %s, CMD5 %s, firmware started %s, BMI %s\n"
++			      "CCCR revision %02x  OCR %08x  bus control %02x\n"
++			      "manufacturer %08x  chip %08x (%s)\n"
++			      "host interest %08x  firmware already loaded %u  reset cause %u (2 expected)\n"
++			      "boot ROM (BMI) version %08x\n"
++			      "after start: ready %u (polls %u)  EEPROM at %08x version %08x\n"
++			      "mailbox: lookahead valid %02x  first word %08x\n"
++			      "first failure: controller status %08x  error detail %08x\n",
++			      twl_ret, in[0] & 0xff, (in[0] & 0xff) <= 15 ? twl_step[in[0] & 0xff] : "?",
++			      (in[0] & 0x100) ? "finished" : "NOT finished (stuck or still running)",
++			      (in[2] & 16) ? " (held in BMI for an upload)" : "",
++			      (in[2] & 1) ? "4-bit" : "1-bit", (in[2] & 2) ? "skipped (card already up)" : "done",
++			      (in[2] & 4) ? "yes" : "no", (in[2] & 8) ? "timed out" : "answered",
++			      t[0] & 0xff, t[1], t[2] & 0xff, g[0], g[1], twl_chip(g[1]), t[4], g[2], g[3], g[4],
++			      g[5], t[6], t[5], g[6], g[7] & 0xff, t[7], in[1], t[3]);
++	len += sprintf(page + len, "firmware file: %u bytes\n%s", fw_len, ulog);
++	*eof = 1;
++	if (off >= len)
++		return 0;
++	*start = page + off;
++	return len - off;
++}
++
++static int twl_write_proc(struct file *file, const char __user *buffer, unsigned long count, void *data)
++{
++	char cmd[16];
++	unsigned long n = count < sizeof(cmd) - 1 ? count : sizeof(cmd) - 1;
++
++	if (copy_from_user(cmd, buffer, n))
++		return -EFAULT;
++	cmd[n] = 0;
++	if (!strncmp(cmd, "clear", 5)) {
++		fw_len = 0;
++		return count;
++	}
++	if (nds_is_up()) {
++		twl_ret = -101;
++		return count;
++	}
++	if (!strncmp(cmd, "upload", 6)) {
++		upload();
++	} else {
++		ulog_len = 0;
++		ulog[0] = 0;
++		twl_ret = dsisd_twlwifi(twl_d, 0);
++		if (twl_d[18] & 16) {			/* held in BMI: a plain run lets go of the antenna again */
++			unsigned int out[19];
++
++			dsisd_twlop(9, 0, 0, 0, 0, out);
++		}
++	}
++	printk(KERN_INFO "dsiwifi2: step %u, chip %08x, firmware loaded %u, BMI %08x, ready %u\n",
++	       twl_d[16], twl_d[9], twl_d[10], twl_d[12], twl_d[13]);
++	return count;
++}
++
++static int fw_write_proc(struct file *file, const char __user *buffer, unsigned long count, void *data)
++{
++	if (!fw) {
++		fw = kmalloc(FW_MAX, GFP_KERNEL);
++		if (!fw)
++			return -ENOMEM;
++	}
++	if (fw_len + count > FW_MAX)
++		return -EFBIG;
++	if (copy_from_user(fw + fw_len, buffer, count))
++		return -EFAULT;
++	fw_len += count;
++	return count;
++}
++
++static int fw_read_proc(char *page, char **start, off_t off, int count, int *eof, void *data)
++{
++	int len = sprintf(page, "%u bytes\n", fw_len);
++
++	*eof = 1;
++	if (off >= len)
++		return 0;
++	*start = page + off;
++	return len - off;
++}
++
++static int __init dsiwifi_init(void)
++{
++	struct proc_dir_entry *e;
++
++	e = create_proc_entry("dsiwifi2", 0644, NULL);
++	if (e) {
++		e->read_proc = twl_read_proc;
++		e->write_proc = twl_write_proc;
++	}
++	e = create_proc_entry("dsiwifi2fw", 0644, NULL);
++	if (e) {
++		e->read_proc = fw_read_proc;
++		e->write_proc = fw_write_proc;
++	}
++	return 0;
++}
++
++module_init(dsiwifi_init);
+diff --git a/linux-2.6.x/arch/arm/mach-nds/volume.c b/linux-2.6.x/arch/arm/mach-nds/volume.c
+index a9014f96d..a60a4fb0b 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/volume.c
++++ b/linux-2.6.x/arch/arm/mach-nds/volume.c
+@@ -10,7 +10,6 @@
+ #include <linux/proc_fs.h>
+ #include <linux/string.h>
+ #include <asm/uaccess.h>
+-#include <linux/netdevice.h>
+ 
+ static int vol_level = -1;
+ static int vol_status = 5;
+@@ -141,78 +140,6 @@ static int settings_write_proc(struct file *file, const char __user *buffer, uns
+ 	return count;
+ }
+ 
+-/*
+- * /proc/dsiwifi2: the DSi's own Wi-Fi chip (Atheros), step 1-3 of docs/ATHEROS-PLAN.md. "echo 1 > /proc/dsiwifi2" runs the bring-up on the
+- * ARM7 (arm7/twlwifi.c, a few seconds); reading shows the last result (the card log includes it). It refuses while the DS Wi-Fi (nds) is
+- * up: both chips share the antenna.
+- */
+-extern int dsisd_twlwifi(unsigned int *out, int report);
+-static unsigned int twl_d[19];
+-static int twl_ret = -100;	/* -100 = not run yet, -101 = refused (nds up) */
+-
+-static const char *twl_step[] = { "nothing", "power, antenna", "RTC clock output (FOUT)", "power chip register 0x30", "SCFG_WL",
+-				  "SDIO controller", "CMD5 (operating conditions)", "CMD3/CMD7 (address, select)",
+-				  "function 1, 4-bit bus, block size", "identify (manufacturer, chip ID)", "reset into the boot ROM",
+-				  "boot ROM version (BMI)", "BMI settings", "start the firmware", "wait for the firmware's first message",
+-				  "all done" };
+-
+-static const char *twl_chip(unsigned int id)
+-{
+-	return id == 0x0D000000 ? "AR6013" : id == 0x0D000001 ? "AR6014" : id == 0x02000001 ? "AR6002" : "unknown";
+-}
+-
+-static int twl_read_proc(char *page, char **start, off_t off, int count, int *eof, void *data)
+-{
+-	unsigned int *d = twl_d, *t = twl_d, *g = twl_d + 8, *in = twl_d + 16;
+-	int len;
+-
+-	if (twl_ret == -100)
+-		len = sprintf(page, "not run yet: echo 1 > /proc/dsiwifi2\n");
+-	else if (twl_ret != -101 && dsisd_twlwifi(twl_d, 1) != 0)
+-		len = sprintf(page, "the ARM7 does not answer (still busy with the run?); the run's request ended with %d\n", twl_ret);
+-	else if (twl_ret == -101)
+-		len = sprintf(page, "refused: switch the DS Wi-Fi off first (ifconfig nds down)\n");
+-	else
+-		len = sprintf(page, "request %d (-1 = the ARM9 stopped waiting), reached step %u of 15: %s, run %s\n"
+-			      "bus %s, CMD5 %s, firmware started %s, BMI %s\n"
+-			      "CCCR revision %02x  OCR %08x  bus control %02x\n"
+-			      "manufacturer %08x  chip %08x (%s)\n"
+-			      "host interest %08x  firmware already loaded %u  reset cause %u (2 expected)\n"
+-			      "boot ROM (BMI) version %08x\n"
+-			      "after start: ready %u (polls %u)  EEPROM at %08x version %08x\n"
+-			      "mailbox: lookahead valid %02x  first word %08x\n"
+-			      "first failure: controller status %08x  error detail %08x\n",
+-			      twl_ret, in[0] & 0xff, (in[0] & 0xff) <= 15 ? twl_step[in[0] & 0xff] : "?",
+-			      (in[0] & 0x100) ? "finished" : "NOT finished (stuck or still running)",
+-			      (in[2] & 1) ? "4-bit" : "1-bit", (in[2] & 2) ? "skipped (card already up)" : "done",
+-			      (in[2] & 4) ? "yes" : "no", (in[2] & 8) ? "timed out" : "answered",
+-			      t[0] & 0xff, t[1], t[2] & 0xff, g[0], g[1], twl_chip(g[1]), t[4], g[2], g[3], g[4],
+-			      g[5], t[6], t[5], g[6], g[7] & 0xff, t[7], in[1], t[3]);
+-	(void)d;
+-	*eof = 1;
+-	if (off >= len)
+-		return 0;
+-	*start = page + off;
+-	return len - off;
+-}
+-
+-static int twl_write_proc(struct file *file, const char __user *buffer, unsigned long count, void *data)
+-{
+-	struct net_device *dev = dev_get_by_name("nds");
+-	int up = dev && (dev->flags & IFF_UP);
+-
+-	if (dev)
+-		dev_put(dev);
+-	if (up) {
+-		twl_ret = -101;
+-		return count;
+-	}
+-	twl_ret = dsisd_twlwifi(twl_d, 0);
+-	printk(KERN_INFO "dsiwifi2: step %u, chip %08x, firmware loaded %u, BMI %08x, ready %u\n",
+-	       twl_d[16], twl_d[9], twl_d[10], twl_d[12], twl_d[13]);
+-	return count;
+-}
+-
+ static int __init nds_volume_init(void)
+ {
+ 	struct proc_dir_entry *e;
+@@ -224,11 +151,6 @@ static int __init nds_volume_init(void)
+ 	}
+ 	create_proc_read_entry("dsimic", 0444, NULL, mic_read_proc, NULL);
+ 	create_proc_read_entry("dsiwifi", 0444, NULL, wifi_read_proc, NULL);
+-	e = create_proc_entry("dsiwifi2", 0644, NULL);
+-	if (e) {
+-		e->read_proc = twl_read_proc;
+-		e->write_proc = twl_write_proc;
+-	}
+ 	create_proc_read_entry("dsivolume", 0444, NULL, vol_read_proc, NULL);
+ 	return 0;
+ }
+diff --git a/linux-2.6.x/drivers/block/dldi_c.c b/linux-2.6.x/drivers/block/dldi_c.c
+index a37e35655..50bf55c1a 100644
+--- a/linux-2.6.x/drivers/block/dldi_c.c
++++ b/linux-2.6.x/drivers/block/dldi_c.c
+@@ -288,6 +288,37 @@ int dsisd_twlwifi(unsigned int *out, int report)
+ 	return ret;
+ }
+ 
++/* One firmware upload operation on the ARM7 (arm7/twlwifi.c, twl_wifi_op): op 2..9, addr, arg (a length for 2 and 4, else the argument),
++ * up to 2048 data bytes. out[0..2] = info (answer, status, flags); with op 8 (finish) also out[3..18] like a run (touch, diag). 0 = ok. */
++int dsisd_twlop(unsigned int op, unsigned int addr, unsigned int arg, const unsigned char *data, unsigned int len, unsigned int *out)
++{
++	int ret, i, save;
++
++	if (len > sizeof(sd_block.data))
++		return -2;
++	down(&sd_mutex);
++	for (i = 0; i < 8; i++)
++		sd_block.touch[i] = sd_block.diag[i] = 0;
++	for (i = 0; i < 3; i++)
++		sd_block.info[i] = 0;
++	sd_block.touch[0] = arg;
++	if (data && len)
++		memcpy(sd_block.data, data, len);
++	save = sd_timeout;
++	sd_timeout = 10 * HZ;
++	ret = sd_request_locked(NDS_SD_CMD_TWLWIFI, addr, op);
++	sd_timeout = save;
++	dmac_flush_range((unsigned long)&sd_block, (unsigned long)&sd_block + sizeof(sd_block));
++	for (i = 0; i < 3; i++)
++		out[i] = sd_block.info[i];
++	for (i = 0; i < 8; i++) {
++		out[3 + i] = sd_block.touch[i];
++		out[11 + i] = sd_block.diag[i];
++	}
++	up(&sd_mutex);
++	return ret;
++}
++
+ /* Power chip status (and the backlight): op 1 sets the backlight register to val (0..4). out[0] battery register, out[1] volume register,
+  * out[2] backlight register (0xffffffff = unreadable). 0 = ok. */
+ int dsisd_pm(unsigned int op, unsigned int val, unsigned int *out)
+diff --git a/vendors/Nintendo/DSI/wifi-dsi-test b/vendors/Nintendo/DSI/wifi-dsi-test
+index 012d9cf51..93354296c 100644
+--- a/vendors/Nintendo/DSI/wifi-dsi-test
++++ b/vendors/Nintendo/DSI/wifi-dsi-test
+@@ -1,10 +1,20 @@
+ #!/bin/sh
+-# Start > Network > DSi Wi-Fi test: one bring-up of the DSi's own Wi-Fi chip (Atheros, step 1-3 of docs/ATHEROS-PLAN.md), its answers,
+-# then the card log is saved. The DS Wi-Fi is switched off first (both chips share the antenna).
++# Start > Network > DSi Wi-Fi test: the DSi's own Wi-Fi chip (Atheros, docs/ATHEROS-PLAN.md). With the firmware in
++# /usr/lib/firmware/dsi-wifi.bin (scripts/add-dsi-wifi-fw.sh on the PC) it is uploaded and started, else one bring-up run.
++# The DS Wi-Fi is switched off first (both chips share the antenna). The result goes into the card log.
++F=/usr/lib/firmware/dsi-wifi.bin
+ killall udhcpc 2>/dev/null
+ ifconfig nds down 2>/dev/null
+-echo "DSi Wi-Fi chip test (a few seconds)..."
+-echo 1 > /proc/dsiwifi2
++echo "DSi Wi-Fi chip test (up to a minute)..."
++if [ -f $F ]
++then
++	echo clear > /proc/dsiwifi2
++	cat $F > /proc/dsiwifi2fw
++	echo upload > /proc/dsiwifi2
++else
++	echo "(no firmware file $F: bring-up only)"
++	echo 1 > /proc/dsiwifi2
++fi
+ cat /proc/dsiwifi2
+ /bin/sh /boot/savelog
+ echo "-- saved in the card log (sd:/linux/DSILOG.TXT) --"
+-- 
+2.56.0
+

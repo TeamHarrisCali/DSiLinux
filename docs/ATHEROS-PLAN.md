@@ -1,6 +1,7 @@
 # Plan: the DSi's second Wi-Fi chip (Atheros, 802.11g, WPA2)
 
-Status: **started 2026-11-13.** Step 0 done; steps 1-3 built as a test (w98d, patch 0105), not yet run on the console.
+Status: **started 2026-11-13.** Step 0 done. Steps 1-2 **verified on the console** (w98h: AR6013, boot ROM 0x23000024, no firmware after
+Unlaunch). Step 3 (firmware upload from the DSi's own HNCA file) built in w98i, not yet run.
 
 ## Why
 
