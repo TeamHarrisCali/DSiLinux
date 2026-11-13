@@ -60,7 +60,7 @@ fi
 [ $NOCARD = 1 ] && { echo "done (card skipped)"; exit 0; }
 echo "== 5. card"
 if ! card_present; then
-	echo "card not in the PC: copy $ROM later (scripts/release.sh copies only when the card is mounted at $CARD)"
+	echo "card not in the PC: copy $ROM later and run scripts/install-apps.sh (the games and accessories now live in ROOTFS.IMG)"
 	exit 0
 fi
 scripts/rootfs-check.sh "$CARD/linux/ROOTFS.IMG" || echo "WARNING: ROOTFS.IMG has errors (scripts/rootfs-check.sh -y repairs it)"
@@ -73,4 +73,6 @@ for f in "$CARD"/dslinux-dsimode-*.nds; do
 done
 sync
 echo "on the card, checksum ok: $(basename $ROM)"
+# the programs that run from the card (/usr/bin in ROOTFS.IMG) must match this ROM
+scripts/install-apps.sh -i "$CARD/linux/ROOTFS.IMG" || { echo "PROGRAMS NOT INSTALLED in ROOTFS.IMG (scripts/install-apps.sh)"; exit 1; }
 ls "$CARD"/*.nds | xargs -n1 basename

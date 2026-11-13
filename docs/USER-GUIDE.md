@@ -99,6 +99,7 @@ The DSi only ever writes inside `sd:/linux/ROOTFS.IMG` (the whole system) and `s
 | `scripts/rootfs-check.sh` | checks the image (read-only); `-y` repairs it |
 | `scripts/add-roms.sh game.gb ...` | your own Game Boy games into `/home/roms` |
 | `scripts/set-wifi.sh NAME [wepkey]` | Wi-Fi settings and the SSH server |
+| `scripts/install-apps.sh` | the games, accessories and multimedia programs into `/usr/bin` (release.sh does it; they are no longer in the ROM) |
 | `doom/install.sh [doom1.wad]` | DOOM into `/home/doom` |
 | `debugfs -R "cat /home/notes.txt" ROOTFS.IMG` | read any file from the image |
 

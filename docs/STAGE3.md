@@ -721,3 +721,14 @@ when DSLinux runs (after Unlaunch, which skips the System Menu) decides how big 
 ARM7 (`arm7/twlwifi.c`): antenna, clock, power, the second SDIO controller, card initialisation, manufacturer, chip ID, the firmware flag,
 boot ROM version, and if firmware is there, starting it and waiting for "ready". Run from Start > Network > DSi Wi-Fi test (or
 `echo 1 > /proc/dsiwifi2`), only on request; the result is in the card log. ARM7 program 41.9 KB of 64 KB, ROM 29 KB free.
+
+### Programs out of the ROM (w98e)
+
+User: "put all programs non essential into SD and not load in ROM". The ROM's /boot now holds only nano-X, nanowm, dsdesk, nxterm,
+dssettings (Settings, the Wi-Fi window, settings applied at boot) and cmp (savelog), plus the scripts. dsarcade, dsgb, dsmemo, dsgl3d, dscam,
+dsgame, ntetris, landmine, dsbench, dsgx, dsplay, dsnotes, dsfiles (and nxclock) run from ROOTFS.IMG as /usr/bin/<name>; every reference
+was changed (menu, Settings' Sound test, Files -> Notes, gl script, the Bench quick button in the kernel). Programs on ext2 cannot run in
+place, so `scripts/install-apps.sh` copies this build's binaries, sets the flat binary's Load-to-RAM flag (`flthdr -r`, in the build
+container) and writes them into the image with debugfs, then checks the sizes; `release.sh` runs it after copying the ROM. Checked on a
+throwaway 256 MB image (all 14 installed, flag `0x3 Load-to-Ram Has-PIC-GOT`). ROM: 828 KB free (was 29 KB). w98e was built while the card
+was in the console: copy the ROM and run install-apps.sh when the card is back. Not yet run on the console.

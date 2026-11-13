@@ -1,0 +1,221 @@
+From 9c30ece78365b52fb30ec93b91d33030ccbc42f7 Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Fri, 13 Nov 2026 10:08:59 -0600
+Subject: [PATCH] Only essential programs in the ROM; the rest run from
+ ROOTFS.IMG
+
+/boot keeps nano-X, nanowm, dsdesk, nxterm, dssettings and cmp. The games,
+accessories, multimedia programs and dsbench are referenced as
+/usr/bin/<name> (the card's ROOTFS.IMG) from the desktop menu, Settings,
+Files, the gl script and the Bench quick button. ROM: 828 KB free (29 KB).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../drivers/input/touchscreen/nds_ts.c        |  2 +-
+ user/microwin/src/demos/nanox/dsbench.c       |  4 +-
+ user/microwin/src/demos/nanox/dsdesk.c        | 40 +++++++++----------
+ user/microwin/src/demos/nanox/dsfiles.c       |  2 +-
+ user/microwin/src/demos/nanox/dsgallery.c     |  2 +-
+ user/microwin/src/demos/nanox/dssettings.c    |  2 +-
+ vendors/Nintendo/DSI/Makefile                 | 21 +++-------
+ vendors/Nintendo/DSI/gl                       |  2 +-
+ 8 files changed, 32 insertions(+), 43 deletions(-)
+
+diff --git a/linux-2.6.x/drivers/input/touchscreen/nds_ts.c b/linux-2.6.x/drivers/input/touchscreen/nds_ts.c
+index 32f8e41a0..45ea7ebb7 100644
+--- a/linux-2.6.x/drivers/input/touchscreen/nds_ts.c
++++ b/linux-2.6.x/drivers/input/touchscreen/nds_ts.c
+@@ -279,7 +279,7 @@ static void draw_keyboard(int gfx_id)
+ #define STRIP_ROWS	2		/* tile rows 0 and 1 */
+ 
+ static const char *strip_label[STRIP_N] = { "Desk", "Test", "Log", "Bench" };
+-static const char *strip_cmd[STRIP_N] = { "/boot/desktop", "/boot/selftest", "/boot/savelog", "/boot/dsbench" };
++static const char *strip_cmd[STRIP_N] = { "/boot/desktop", "/boot/selftest", "/boot/savelog", "/usr/bin/dsbench" };
+ static int strip_x0[STRIP_N], strip_x1[STRIP_N];
+ 
+ static void tile_px(u8 *tile, int row, int px, int val)
+diff --git a/user/microwin/src/demos/nanox/dsbench.c b/user/microwin/src/demos/nanox/dsbench.c
+index fd9bbca26..db8776d11 100644
+--- a/user/microwin/src/demos/nanox/dsbench.c
++++ b/user/microwin/src/demos/nanox/dsbench.c
+@@ -1,7 +1,7 @@
+ /*
+  * dsbench - how fast is drawing on this console? Times a few jobs on the desktop (each ends with a request that
+  * has an answer, so the server really finished) and prints milliseconds in its window and in /tmp/bench.log.
+- * Run it from the terminal window: /boot/dsbench
++ * Run it from the terminal window: /usr/bin/dsbench
+  */
+ #include <stdio.h>
+ #include <stdlib.h>
+@@ -68,7 +68,7 @@ static long ipc_pingpong(void)
+ 	if (pid == 0) {
+ 		dup2(sv[1], 3);
+ 		close(sv[0]);
+-		execl("/boot/dsbench", "dsbench", "echo", (char *)NULL);
++		execl("/usr/bin/dsbench", "dsbench", "echo", (char *)NULL);
+ 		_exit(127);
+ 	}
+ 	if (pid < 0)
+diff --git a/user/microwin/src/demos/nanox/dsdesk.c b/user/microwin/src/demos/nanox/dsdesk.c
+index d36b2b8ee..2a07e356c 100644
+--- a/user/microwin/src/demos/nanox/dsdesk.c
++++ b/user/microwin/src/demos/nanox/dsdesk.c
+@@ -35,32 +35,32 @@ struct item {
+ 
+ /* Start menu: groups open to the side while the pointer is on them */
+ static const struct item accessories[] = {
+-	{ "Notes", "/boot/dsnotes" },
++	{ "Notes", "/usr/bin/dsnotes" },
+ 	{ "Clock", "/usr/bin/nxclock" },
+-	{ "Paint", "/boot/dsarcade", "paint" },
++	{ "Paint", "/usr/bin/dsarcade", "paint" },
+ };
+ static const struct item multimedia[] = {
+-	{ "Camera", "/boot/dscam" },
+-	{ "Photos", "/boot/dscam", "photos" },
+-	{ "Voice memos", "/boot/dsmemo" },
+-	{ "Sound test", "/boot/dsplay" },
+-	{ "3D gears", "/boot/dsgl3d" },
++	{ "Camera", "/usr/bin/dscam" },
++	{ "Photos", "/usr/bin/dscam", "photos" },
++	{ "Voice memos", "/usr/bin/dsmemo" },
++	{ "Sound test", "/usr/bin/dsplay" },
++	{ "3D gears", "/usr/bin/dsgl3d" },
+ };
+ static const struct item games[] = {
+-	{ "3D Dodge", "/boot/dsgame" },
+-	{ "3D Breakout", "/boot/dsarcade", "breakout" },
+-	{ "Tron", "/boot/dsarcade", "tron" },
+-	{ "3D Maze", "/boot/dsarcade", "maze" },
+-	{ "Game Boy", "/boot/dsgb" },
++	{ "3D Dodge", "/usr/bin/dsgame" },
++	{ "3D Breakout", "/usr/bin/dsarcade", "breakout" },
++	{ "Tron", "/usr/bin/dsarcade", "tron" },
++	{ "3D Maze", "/usr/bin/dsarcade", "maze" },
++	{ "Game Boy", "/usr/bin/dsgb" },
+ 	{ "DOOM", "/home/doom/dsdoom" },
+-	{ "Minesweeper", "/boot/landmine" },
+-	{ "Tetris", "/boot/ntetris" },
++	{ "Minesweeper", "/usr/bin/landmine" },
++	{ "Tetris", "/usr/bin/ntetris" },
+ };
+ static const struct item puzzles[] = {
+-	{ "2048", "/boot/dsarcade", "2048" },
+-	{ "Sokoban", "/boot/dsarcade", "sokoban" },
+-	{ "Sudoku", "/boot/dsarcade", "sudoku" },
+-	{ "Life", "/boot/dsarcade", "life" },
++	{ "2048", "/usr/bin/dsarcade", "2048" },
++	{ "Sokoban", "/usr/bin/dsarcade", "sokoban" },
++	{ "Sudoku", "/usr/bin/dsarcade", "sudoku" },
++	{ "Life", "/usr/bin/dsarcade", "life" },
+ };
+ static const struct item network_items[] = {
+ 	{ "Wi-Fi", "/boot/dssettings", "wifi" },
+@@ -70,13 +70,13 @@ static const struct item network_items[] = {
+ };
+ static const struct item system_items[] = {
+ 	{ "Settings", "/boot/dssettings" },
+-	{ "Bench", "/boot/dsbench" },
++	{ "Bench", "/usr/bin/dsbench" },
+ 	{ "Save log", "/boot/savelog" },
+ };
+ #define COUNT(a)	((int)(sizeof(a) / sizeof((a)[0])))
+ static const struct item root_items[] = {
+ 	{ "Terminal", "/boot/nxterm" },
+-	{ "Files", "/boot/dsfiles" },
++	{ "Files", "/usr/bin/dsfiles" },
+ 	{ "Accessories", NULL, NULL, accessories, COUNT(accessories), 1 },
+ 	{ "Multimedia", NULL, NULL, multimedia, COUNT(multimedia) },
+ 	{ "Games", NULL, NULL, games, COUNT(games) },
+diff --git a/user/microwin/src/demos/nanox/dsfiles.c b/user/microwin/src/demos/nanox/dsfiles.c
+index e4752cf88..73bc13406 100644
+--- a/user/microwin/src/demos/nanox/dsfiles.c
++++ b/user/microwin/src/demos/nanox/dsfiles.c
+@@ -139,7 +139,7 @@ static void open_entry(int i)
+ 		snprintf(full, sizeof(full), "%s/%s", cwd, e->name);
+ 		pid = vfork();
+ 		if (pid == 0) {
+-			execl("/boot/dsnotes", "/boot/dsnotes", full, (char *)NULL);
++			execl("/usr/bin/dsnotes", "/usr/bin/dsnotes", full, (char *)NULL);
+ 			_exit(127);
+ 		}
+ 	}
+diff --git a/user/microwin/src/demos/nanox/dsgallery.c b/user/microwin/src/demos/nanox/dsgallery.c
+index f2666fe8f..4119bfa2d 100644
+--- a/user/microwin/src/demos/nanox/dsgallery.c
++++ b/user/microwin/src/demos/nanox/dsgallery.c
+@@ -216,7 +216,7 @@ int main(int argc, char **argv)
+ 			break;
+ 		case 'c':
+ 			if (vfork() == 0) {
+-				execl("/boot/dscam", "/boot/dscam", (char *)NULL);
++				execl("/usr/bin/dscam", "/usr/bin/dscam", (char *)NULL);
+ 				_exit(127);
+ 			}
+ 			break;
+diff --git a/user/microwin/src/demos/nanox/dssettings.c b/user/microwin/src/demos/nanox/dssettings.c
+index 40c995b02..47e7cb4fa 100644
+--- a/user/microwin/src/demos/nanox/dssettings.c
++++ b/user/microwin/src/demos/nanox/dssettings.c
+@@ -437,7 +437,7 @@ static void act(int id)
+ 	case B_DY: adjust_time(0, 2); draw_clock(); break;
+ 	case B_SOUND:
+ 		if (vfork() == 0) {
+-			execl("/boot/dsplay", "/boot/dsplay", (char *)NULL);
++			execl("/usr/bin/dsplay", "/usr/bin/dsplay", (char *)NULL);
+ 			_exit(127);
+ 		}
+ 		break;
+diff --git a/vendors/Nintendo/DSI/Makefile b/vendors/Nintendo/DSI/Makefile
+index 3e812b3b6..948f5765d 100644
+--- a/vendors/Nintendo/DSI/Makefile
++++ b/vendors/Nintendo/DSI/Makefile
+@@ -159,27 +159,16 @@ finishrom:
+ 	# If we have external RAM, we can spend some of our precious internal RAM
+         # to speed up some applications.
+ 	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/nano-X $(ROMFSDIR)/$(OPTDIR)
+-	# The desktop programs also live in the ROM (/boot), so a newer desktop works without replacing ROOTFS.IMG
++	# Only what the system needs lives in the ROM (/boot): the window system, the desktop, the terminal, Settings (also the Wi-Fi window and
++	# the settings applied at boot) and cmp (savelog). Everything else (games, accessories, multimedia, bench) runs from the SD card's
++	# ROOTFS.IMG as /usr/bin/<name>: scripts/install-apps.sh writes this build's copies there (release.sh runs it when the card is in the PC).
+ 	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/nano-X $(ROMFSDIR)/boot/nano-X
+ 	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/nxterm $(ROMFSDIR)/boot/nxterm
+ 	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/nanowm $(ROMFSDIR)/boot/nanowm
+ 	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/dsdesk $(ROMFSDIR)/boot/dsdesk
+-	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/dsnotes $(ROMFSDIR)/boot/dsnotes
+-	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/dsfiles $(ROMFSDIR)/boot/dsfiles
+-	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/dsbench $(ROMFSDIR)/boot/dsbench
+-	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/dsgl3d $(ROMFSDIR)/boot/dsgl3d
+-	# dsgears (the software 3D profiler, 360 KB) and dsgallery (the old photo viewer) are no longer put in the ROM: it was full
+-	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/dsgx $(ROMFSDIR)/boot/dsgx
+-	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/dsplay $(ROMFSDIR)/boot/dsplay
+-	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/cmp $(ROMFSDIR)/boot/cmp
+-	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/dsmemo $(ROMFSDIR)/boot/dsmemo
+ 	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/dssettings $(ROMFSDIR)/boot/dssettings
+-	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/dsgame $(ROMFSDIR)/boot/dsgame
+-	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/dsarcade $(ROMFSDIR)/boot/dsarcade
+-	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/dsgb $(ROMFSDIR)/boot/dsgb
+-	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/dscam $(ROMFSDIR)/boot/dscam
+-	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/landmine $(ROMFSDIR)/boot/landmine
+-	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/ntetris $(ROMFSDIR)/boot/ntetris
++	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/cmp $(ROMFSDIR)/boot/cmp
++	-rm -f $(addprefix $(ROMFSDIR)/boot/,dsnotes dsfiles dsbench dsgl3d dsgx dsplay dsmemo dsgame dsarcade dsgb dscam landmine ntetris)
+ 	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/madplay $(ROMFSDIR)/$(OPTDIR)
+ 	# Compress the data area of these programs
+ 	$(CROSS)flthdr -d $(ROMFSDIR)/$(OPTDIR)/*
+diff --git a/vendors/Nintendo/DSI/gl b/vendors/Nintendo/DSI/gl
+index 2d1d73c1d..abd86a28d 100644
+--- a/vendors/Nintendo/DSI/gl
++++ b/vendors/Nintendo/DSI/gl
+@@ -11,7 +11,7 @@ if [ -n "`pidof nano-X`" ]; then
+ fi
+ if [ "$1" = "hw" ] || [ "$1" = "tri" ] || [ "$1" = "cube" ]; then
+ 	echo "dsgx: the DS's hardware 3D engine. Esc or q to quit"
+-	if [ "$1" = "tri" ] || [ "$1" = "cube" ]; then /boot/dsgx $1; else /boot/dsgx; fi
++	if [ "$1" = "tri" ] || [ "$1" = "cube" ]; then /usr/bin/dsgx $1; else /usr/bin/dsgx; fi
+ elif [ "$1" = "profile" ]; then
+ 	echo "gl profile: the software 3D profiler (dsgears) is no longer in the ROM"
+ else
+-- 
+2.56.0
+

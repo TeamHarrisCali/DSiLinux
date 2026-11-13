@@ -14,7 +14,8 @@ The console's own layout (boot chain, NAND, installed titles, firmware chip, BIO
   `scripts/make-dsimode.sh` repacks with BlocksDS's `ndstool` (`-uc 3 -p 1`). **measured**
 - Header app-flags bit 0 (`APPFLAGS=1`) puts the touch/sound chip into DSi mode. **measured**
 - The ARM9 section that is loaded at `0x02400000` ("DSi9") forces the kernel image plus the romfs to end below `0x02400000`: **the ROM has a 4 MiB
-  ceiling** for kernel + all `/boot` programs. `scripts/release.sh` prints what is left (51 KB at w97p). Big programs belong in `ROOTFS.IMG`. **measured**
+  ceiling** for kernel + all `/boot` programs. Since w98e only the essentials are in /boot; the other programs run from ROOTFS.IMG as
+  /usr/bin/<name>, written there by `scripts/install-apps.sh` with the Load-to-RAM flag (828 KB of ROM free). `scripts/release.sh` prints what is left (51 KB at w97p). Big programs belong in `ROOTFS.IMG`. **measured**
 - The loader already runs the ARM9 at 134 MHz (`SCFG_CLK` 0x04004004 bit 0 reads 1 before we touch it; BogoMIPS 66.76, lpj 333824). **measured**
 - `SCFG_EXT` (0x04004008) as left by the loader: ARM9 `93fffb06`, ARM7 `93fffb07`. **measured**
 

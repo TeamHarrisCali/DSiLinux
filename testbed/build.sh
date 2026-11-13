@@ -24,6 +24,10 @@ gcc $CF -o $T/bin/dssettings $T/src/demos/nanox/dssettings.c $T/src/demos/nanox/
 cp $T/src/bin/nano-X $T/src/bin/nanowm $T/bin/
 # what the desktop starts from /boot on the DS: the PC builds and the boot scripts (dsdesk prefixes /boot paths with DSDESK_ROOT)
 mkdir -p $T/root/boot
-for p in nxterm dsnotes dsfiles dssettings dsarcade dsgb; do ln -sf ../../bin/$p $T/root/boot/$p; done
+for p in nxterm dssettings; do ln -sf ../../bin/$p $T/root/boot/$p; done
+# the games and accessories run from the card's ROOTFS.IMG as /usr/bin/<name> (scripts/install-apps.sh)
+mkdir -p $T/root/usr/bin
+for p in dsnotes dsfiles dsarcade dsgb; do ln -sf ../../../bin/$p $T/root/usr/bin/$p; done
+rm -f $T/root/boot/dsnotes $T/root/boot/dsfiles $T/root/boot/dsarcade $T/root/boot/dsgb
 for f in wifi-scan wifi-connect wifi-status wifi-ssh savelog; do cp work/dslinux/vendors/Nintendo/DSI/$f $T/root/boot/; done
 echo "built: $(ls $T/bin | tr '\n' ' ')"
