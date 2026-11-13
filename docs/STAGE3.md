@@ -802,3 +802,12 @@ taken the address one field too early and executed data. Corrected: type 1 LZ fi
 0x53F040, type 4 code "C" for 0x527000, type 5 configuration "D" for 0x524C00 - exactly dswifi's A/B/C/D addresses (its B differs, for
 another firmware version). The AR6002 blob agrees (code part starts with `entry`, dataset at 0x52D944 pointing at 0x52D958, next to
 Linux ar6000's 0x52D6C8). w98k (patch 0112) uploads in dswifi's order: D, C, execute C, A (LZ), D again, B, hi_dset_list_head = B.
+
+### The Atheros firmware runs (w98k)
+
+w98k on the console, all steps: D and C written and read back identical, **execute C answered 0**, the 12012-byte LZ firmware streamed
+to 0x524C00, D written again and B (dataset) written and read back identical, hi_dset_list_head set, BMI done: **ready 1**. Board data
+(EEPROM) at 0x520E00, version 0x609A0202 (dswifi's comment mentions 0x609C0202). The first word waiting in mailbox 0 is `00 02 10 00`:
+an HTC header (endpoint 0, 16-byte payload), the firmware's HTC "ready" message. **Steps 1-3 of docs/ATHEROS-PLAN.md are verified on the
+console:** DSLinux brings up the DSi's own Wi-Fi chip, uploads the console's own firmware and starts it. Next: step 4, HTC (read the ready
+message, connect the WMI control and data services) and WMI (the ready event with the MAC address, then a scan).
