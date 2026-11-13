@@ -1,0 +1,107 @@
+From daf863d98482e6a478e375e7eb98de1f3978958c Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Fri, 13 Nov 2026 10:51:22 -0600
+Subject: [PATCH] DSi Wi-Fi test: RTC write without BIOS calls, DS Wi-Fi IRQ
+ masked
+
+w98g's timeline: the run reached step 2 (RTC FOUT writes) at once and never
+left it, yet the ARM7 answered later requests: the run's context was lost,
+not stuck. rtcTransaction() waits with swiDelay (a BIOS call) inside this
+interrupt-handler code; an interrupt let in there clobbers the return
+address. Write the RTC with plain delay loops instead, and mask the DS
+Wi-Fi interrupt (bit 24) while the antenna is switched away; acknowledge
+and restore it afterwards.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ linux-2.6.x/arch/arm/mach-nds/arm7/twlwifi.c | 45 ++++++++++++++++++--
+ 1 file changed, 41 insertions(+), 4 deletions(-)
+
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/twlwifi.c b/linux-2.6.x/arch/arm/mach-nds/arm7/twlwifi.c
+index ee2f95f24..d1a2f05ed 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/arm7/twlwifi.c
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/twlwifi.c
+@@ -82,8 +82,17 @@
+ #define BMI_WRITE_SOC_REGISTER	7
+ #define BMI_GET_TARGET_ID	8
+ 
+-/* RTC: the DSi's clock chip gives the Wi-Fi module its 32 kHz sleep clock (FOUT) */
+-extern void nds_rtc_write2(u8 cmd, u8 val);
++/*
++ * RTC: the DSi's clock chip gives the Wi-Fi module its 32 kHz sleep clock (FOUT). Written here with plain delay loops: the shared
++ * rtcTransaction() waits with the BIOS delay call (swiDelay), and the w98d-w98g runs never came back from this step while the ARM7 itself
++ * carried on: a BIOS call that lets an interrupt in, inside this interrupt-handler code, loses the return address.
++ */
++#define RTC_CR8	0x04000138
++#define RTC_CS_0	(1 << 6)
++#define RTC_CS_1	((1 << 6) | (1 << 2))
++#define RTC_SCK_0	(1 << 5)
++#define RTC_SCK_1	((1 << 5) | (1 << 1))
++#define RTC_SIO_OUT	(1 << 4)
+ 
+ static u32 st;		/* bit 0 response seen, bit 2 error or timeout (as dswifi's ctx->status) */
+ static u32 resp;
+@@ -97,6 +106,29 @@ static void tdelay(u32 n)
+ 		;
+ }
+ 
++static void rtc_write2(u8 c0, u8 c1)
++{
++	u8 c[2];
++	int i, bit;
++
++	c[0] = c0;
++	c[1] = c1;
++	*(volatile u8 *)RTC_CR8 = RTC_CS_0 | RTC_SCK_1 | (1 << 4) | 1;
++	tdelay(50);
++	*(volatile u8 *)RTC_CR8 = RTC_CS_1 | RTC_SCK_1 | (1 << 4) | 1;
++	tdelay(50);
++	for (i = 0; i < 2; i++)
++		for (bit = 0; bit < 8; bit++) {
++			*(volatile u8 *)RTC_CR8 = RTC_CS_1 | RTC_SCK_0 | RTC_SIO_OUT | (c[i] >> 7);
++			tdelay(50);
++			*(volatile u8 *)RTC_CR8 = RTC_CS_1 | RTC_SCK_1 | RTC_SIO_OUT | (c[i] >> 7);
++			tdelay(50);
++			c[i] <<= 1;
++		}
++	*(volatile u8 *)RTC_CR8 = RTC_CS_0 | RTC_SCK_1;
++	tdelay(50);
++}
++
+ static void mask16(u32 reg, u16 clear, u16 set)
+ {
+ 	R16(reg) = (R16(reg) & ~clear) | set;
+@@ -309,9 +341,11 @@ void twl_wifi_probe(u32 *touch, u32 *diag, u32 *info)
+ static void twl_run(u32 *touch, u32 *diag, u32 *info)
+ {
+ 	u16 gpio0 = R16(GPIO_WIFI), pwr0 = R16(POWCNT2);
++	u32 ie0 = R32(0x04000210);
+ 	u32 hi, uploaded, t, ocr = 0;
+ 	int i;
+ 
++	R32(0x04000210) = ie0 & ~(1u << 24);		/* no DS Wi-Fi interrupt while its chip is switched away */
+ 	for (i = 0; i < 8; i++)
+ 		touch[i] = diag[i] = 0;
+ 	info[0] = info[1] = info[2] = 0;
+@@ -324,8 +358,8 @@ static void twl_run(u32 *touch, u32 *diag, u32 *info)
+ 	tdelay(40000);
+ 	/* 2: the module's 32 kHz clock (RTC FOUT1, FOUT2) */
+ 	info[0] = 2;
+-	nds_rtc_write2(0x72, 0x80);
+-	nds_rtc_write2(0x74, 0x00);
++	rtc_write2(0x72, 0x80);
++	rtc_write2(0x74, 0x00);
+ 	/* 3: power chip register 0x30 */
+ 	info[0] = 3;
+ 	dsivol_pm_write(0x30, 0x13);
+@@ -469,4 +503,7 @@ out:
+ 	touch[3] = fail_err;
+ 	R16(GPIO_WIFI) = gpio0;				/* antenna back to the DS chip, power as it was */
+ 	R16(POWCNT2) = pwr0;
++	tdelay(40000);
++	*(volatile u32 *)0x04000214 = 1u << 24;	/* drop a DS Wi-Fi interrupt latched meanwhile, then allow it again */
++	R32(0x04000210) = ie0;
+ }
+-- 
+2.56.0
+

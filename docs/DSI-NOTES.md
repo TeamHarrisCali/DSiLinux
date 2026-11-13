@@ -24,6 +24,8 @@ The console's own layout (boot chain, NAND, installed titles, firmware chip, BIO
 - ARM9: ARM946E-S at 134 MHz, no FPU (soft float), 8 KB instruction cache, 4 KB data cache, MPU (no MMU). Our MPU set-up: region 1 = main RAM
   16 MB, cached and buffered; DTCM 16 KB moved to `0x02FF0000` (the top 64 KB of RAM is reserved for it, kernel `DRAM_SIZE 0x00FF0000`);
   ITCM 32 KB at 0 holds the vectors. **code**
+- **No BIOS calls (`swiDelay` and friends) in ARM7 code that runs from its interrupt handler** (all SD/FIFO request work does): the
+  DSi Wi-Fi test lost its context in one (w98d-w98g). Use plain delay loops. **measured/inferred**
 - ARM7: about 33 MHz, 64 KB IWRAM; our ARM7 program is linked at `0x03800000` (34 KB at w97m) and does SD, touch, sound, microphone,
   camera I2C, power chip, buttons X/Y and Wi-Fi. It is interrupt driven: **anything slow or stuck on the ARM7 stops the SD card, touch and sound**
   (a stuck ARM7 = "the whole DSi froze"). Every wait on hardware there must be bounded. **measured** (w97k/w97l Wi-Fi freezes)

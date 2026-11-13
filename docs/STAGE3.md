@@ -753,3 +753,13 @@ end, so a run that hangs or takes over 30 s shows nothing (a design mistake). w9
 request block, and the ARM9 checks it every second while waiting and logs `dsiwifi2: ARM7 at step N after M s`, so the kernel log shows the
 timeline even if the ARM7 never finishes.
 User (w98f): the games and Notes start from the card. **Programs running from ROOTFS.IMG verified on the console** (w98e/w98f layout).
+
+### w98g timeline: the run is lost at the RTC write (w98h)
+
+w98g's kernel log: `dsiwifi2: ARM7 at step 2 after 0 s`, then nothing until the 30 s limit, and a later report request was answered
+normally with an empty result ("NOT finished"). So the ARM7 kept working but never came back into the run: its context was lost at step 2,
+the two RTC FOUT writes (w98d's "step 1" contained the same writes). The RTC routine waits with `swiDelay`, a BIOS call, and the run is
+interrupt-handler code; if the BIOS lets an interrupt in there, the nested entry overwrites the return address and execution continues
+elsewhere. A pending interrupt is likely at that moment: the antenna has just been switched away from the DS chip, whose interrupt is still
+enabled. w98h (patch 0109): the run writes the RTC itself with plain delay loops, and masks the DS Wi-Fi interrupt for the duration
+(acknowledged and restored at the end). Lesson for the ARM7: no BIOS calls in code that runs from the interrupt handler.
