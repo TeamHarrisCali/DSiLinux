@@ -752,3 +752,4 @@ first, "step 0" meant the ARM7 had not copied anything back: w98f's run wrote it
 end, so a run that hangs or takes over 30 s shows nothing (a design mistake). w98g (patch 0108): the run writes each step straight into the
 request block, and the ARM9 checks it every second while waiting and logs `dsiwifi2: ARM7 at step N after M s`, so the kernel log shows the
 timeline even if the ARM7 never finishes.
+User (w98f): the games and Notes start from the card. **Programs running from ROOTFS.IMG verified on the console** (w98e/w98f layout).
