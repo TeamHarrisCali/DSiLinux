@@ -830,3 +830,6 @@ a4:c0:e1:..** (Nintendo's prefix), regulatory domain 0x80000348 (840 = USA), and
 DSLinux. Flaw: every network on channel 1, and "set channel params" was refused twice (WMI command error 1): the per-channel scan with phy
 mode 11ag (dswifi's value; the AR6013 is 2.4 GHz only) never left channel 1. w98m (patch 0114): one scan over all channels, phy mode
 11g, empty channel list.
+w98m: no command refused, 8 networks (incl. ATTDtsFwBq, WPA2, -87 dBm, SNR 8, which the DS chip had also found on channel 1), but again all
+on channel 1 and no "scan complete" event within 6 s. The DS chip saw networks on channels 6 and 11 at the same place, so the scan still
+stays on channel 1 or its later results are not read. Unknown WMI events are not logged yet; the next build (step 5) logs them.
