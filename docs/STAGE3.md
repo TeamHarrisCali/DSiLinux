@@ -591,3 +591,21 @@ The user's ideas, done in the same build:
 Test bed (fake AP list in `testbed/aps.txt`, commands printed instead of run): tray tooltips, the tap opening the window, scan list with the
 duplicate name merged, WEP key entry, connect commands (`iwconfig nds key 's:abcde'`), saved files, Forget, On/Off all as intended.
 Not yet run on the console.
+
+### w97s results and joining a network (w97t)
+
+User test of w97s with a phone hotspot ("Nothing_Phone_2", open): the scan now lists networks (the `/proc/dswifi` fix works), but connecting
+gave no address. Log: ESSID set, key off, no route, nothing saved in `/home/wifi.known`. "TX packets 0" in ifconfig is meaningless: with
+`REPORT_RAW_PACKET_STATS` the driver reports `TXRAWPACKETS`, which the ARM7 never counts; TX bytes (710) were real. RX frames: 76.
+Cause found in the ARM7 code: `wifi_try_to_associate()` sends one authentication frame when the network is chosen (or when a beacon of it
+first arrives) and never retries. A lost frame or answer, or a frame sent while a scan still hops channels, leaves the console unjoined
+for good; DHCP then has nobody to talk to. Fix (patch 0096):
+- ARM7 `wifi_join_tick()`, from the vblank interrupt: while a network is chosen but not joined, and no scan runs, it resends the
+  authentication (or, once authenticated, the association) every second.
+- Counters for the join: frames sent (auth, assoc), the access point's last answers (status codes), channels, in four new stats words.
+  `/proc/dswifistat` prints them with the state flags named, without scanning; the log includes it, the Wi-Fi window's steps
+  (`/tmp/dsnet.log`) and udhcpc's output.
+- The Wi-Fi window sets the key before the network name (choosing the network starts the login with the key mode of that moment), waits
+  up to 12 s for "associated" showing the tries, says "No answer from X" / "X refused..." when it fails, and only then runs DHCP.
+- WPA networks (the ARM7 already noticed them) are marked "WPA" in the list and refused with a message instead of a hopeless attempt.
+Still open: WEP always uses shared-key authentication (many WEP routers want open authentication).

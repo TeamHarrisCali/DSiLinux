@@ -1,0 +1,396 @@
+From c9b5342cc683e0e30ea627681bdf0c30dbd17f30 Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Fri, 13 Nov 2026 00:29:30 -0600
+Subject: [PATCH] Wi-Fi: retry joining a network, /proc/dswifistat, WPA marked
+
+- ARM7 wifi_join_tick() (vblank): while a network is chosen but not joined
+  and no scan runs, resend the authentication (or association) every
+  second; the original code sent one frame and never retried.
+- Join counters (auth/assoc frames, last status codes, channels) in four new
+  stats words; /proc/dswifistat prints them and the state flags.
+- /proc/dswifi marks WPA networks "wpa".
+- Wi-Fi window: key before ESSID, waits up to 12 s for the join showing
+  the tries, explains a failure, refuses WPA; logs to /tmp/dsnet.log.
+- logbody: /proc/dswifistat, dsnet.log, the DHCP output.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ linux-2.6.x/arch/arm/mach-nds/arm7/main.c   |  3 +
+ linux-2.6.x/arch/arm/mach-nds/arm7/wifi.c   | 32 ++++++++
+ linux-2.6.x/arch/arm/mach-nds/arm7/wifi.h   |  1 +
+ linux-2.6.x/drivers/net/wireless/nds.c      | 39 +++++++++-
+ linux-2.6.x/include/asm-arm/arch-nds/wifi.h |  6 ++
+ user/microwin/src/demos/nanox/dsnet.c       | 81 ++++++++++++++++++---
+ vendors/Nintendo/DSI/logbody                |  5 ++
+ 7 files changed, 157 insertions(+), 10 deletions(-)
+
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/main.c b/linux-2.6.x/arch/arm/mach-nds/arm7/main.c
+index c68e087e7..0d984d0e6 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/arm7/main.c
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/main.c
+@@ -418,6 +418,9 @@ void InterruptHandler(void)
+ 
+ 		sendTouchState(buttons);
+ 		dsivol_poll();
++#ifdef CONFIG_NDS_WIFI
++		wifi_join_tick();	/* retries joining the chosen network */
++#endif
+ 
+ 		/* clear FIFO errors (just in case) */
+ 		if (NDS_REG_IPCFIFOCNT & (1 << 14))
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/wifi.c b/linux-2.6.x/arch/arm/mach-nds/arm7/wifi.c
+index f2a3c8536..d069a4342 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/arm7/wifi.c
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/wifi.c
+@@ -428,6 +428,29 @@ static void wifi_try_to_associate(void)
+ 	}
+ }
+ 
++/*
++ * Called 60 times a second (ARM7 vblank). The original driver sent one authentication frame when the network was chosen and never again:
++ * if that frame or the answer was lost (or it went out while a scan still hopped channels), the console stayed unjoined for good.
++ * Now: while a network is chosen but not joined, the authentication (or, once authenticated, the association) is sent again every second.
++ */
++void wifi_join_tick(void)
++{
++	static int ticks;
++
++	if (!(wifi_data.state & WIFI_STATE_UP) || (wifi_data.state & (WIFI_STATE_ASSOCIATED | WIFI_STATE_CHANNEL_SCANNING)) ||
++	    !wifi_data.ssid[0] || !wifi_data.stats) {
++		ticks = 0;
++		return;
++	}
++	if (++ticks < 60)
++		return;
++	ticks = 0;
++	if (wifi_data.state & WIFI_STATE_AUTHENTICATED)
++		Wifi_SendAssocPacket();
++	else
++		wifi_try_to_associate();	/* finds the network again (channel), sends the authentication */
++}
++
+ void Wifi_SetSSID(int off, char b1, char b2)
+ {
+ 	wifi_data.ssid[(off * 2) + 1] = b1;
+@@ -439,6 +462,10 @@ void Wifi_SetSSID(int off, char b1, char b2)
+ 		wifi_data.ssid[0] = off * 2 + 1;
+ 	if (!b1 || !b2) {
+ 		/* once we see the null terminator, we are done */
++		if (wifi_data.stats) {
++			wifi_data.stats[WIFI_STATS_AUTH_TRIES] = wifi_data.stats[WIFI_STATS_ASSOC_TRIES] = 0;
++			wifi_data.stats[WIFI_STATS_JOIN_STATUS] = 0xffffffff;
++		}
+ 		if (wifi_data.state & WIFI_STATE_UP) {
+ 			wifi_try_to_associate();
+ 		}
+@@ -760,6 +787,7 @@ void wifi_stats_query(void)
+ 	wifi_data.stats[WIFI_STATS_DEBUG4] = WIFI_REG(0xB8);
+ 
+ 	wifi_data.stats[WIFI_STATS_DEBUG5] = wifi_data.state;
++	wifi_data.stats[WIFI_STATS_CHANNELS] = wifi_data.curChannel | (wifi_data.reqChannel << 8) | ((u32)wifi_data.maxrate << 16);
+ 
+ 	wifi_data.state &= ~WIFI_STATE_SAW_TX_ERR;
+ 
+@@ -1152,6 +1180,7 @@ static int Wifi_ProcessReassocResponse(int macbase, int framelen)
+ 	}
+ 
+ 	status = fixed_params[1];
++	wifi_data.stats[WIFI_STATS_JOIN_STATUS] = (wifi_data.stats[WIFI_STATS_JOIN_STATUS] & 0xffff) | ((u32)status << 16);
+ 	if (status == 0) {	// status code, 0==success
+ 		WIFI_AIDS = fixed_params[2];
+ 		WIFI_REG(0x2A) = fixed_params[2];
+@@ -1223,6 +1252,7 @@ static int Wifi_ProcessAuthenticationFrame(int macbase, int framelen)
+ 	auth_algorithm = fixed_params[0];
+ 	auth_sequence = fixed_params[1];
+ 	status = fixed_params[2];
++	wifi_data.stats[WIFI_STATS_JOIN_STATUS] = (wifi_data.stats[WIFI_STATS_JOIN_STATUS] & 0xffff0000) | status;
+ 	// open system
+ 	if (auth_algorithm == 0) {
+ 		// a good response
+@@ -1749,6 +1779,7 @@ static void Wifi_SendAuthPacket(int wepmode)
+ 	((u16 *) data)[4] = 0x000A;	// 1Mbit
+ 	((u16 *) data)[5] = i + 6 - 12 + 4;	// length
+ 
++	wifi_data.stats[WIFI_STATS_AUTH_TRIES]++;
+ 	wifi_send_raw(i + 6, data);
+ }
+ 
+@@ -1788,6 +1819,7 @@ static void Wifi_SendAssocPacket(void)
+ 	u8 data[96];
+ 	int i, j, numrates;
+ 
++	wifi_data.stats[WIFI_STATS_ASSOC_TRIES]++;
+ 	i = Wifi_GenMgtHeader(data, 0x0000);
+ 
+ 	if (wifi_data.curWepmode) {
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/wifi.h b/linux-2.6.x/arch/arm/mach-nds/arm7/wifi.h
+index ae5ec0548..80905f9fe 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/arm7/wifi.h
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/wifi.h
+@@ -177,6 +177,7 @@ void Wifi_GetAPMode(void);
+ void wifi_ap_query(u16 start_stop);
+ void wifi_start_scan(void);
+ void wifi_timer_handler(void);
++void wifi_join_tick(void);
+ void wifi_rx_q_complete(void);
+ 
+ /* Pointer to buffer used to send incoming packets to ARM9 */
+diff --git a/linux-2.6.x/drivers/net/wireless/nds.c b/linux-2.6.x/drivers/net/wireless/nds.c
+index 4918699e0..b64a9f989 100644
+--- a/linux-2.6.x/drivers/net/wireless/nds.c
++++ b/linux-2.6.x/drivers/net/wireless/nds.c
+@@ -1264,7 +1264,7 @@ static int dswifi_read_proc(char *page, char **start, off_t off, int count, int
+ 		name[n] = 0;
+ 		len += sprintf(page + len, "%02x:%02x:%02x:%02x:%02x:%02x %d %s %d %s\n",
+ 			       aplist[i].bssid[0], aplist[i].bssid[1], aplist[i].bssid[2], aplist[i].bssid[3], aplist[i].bssid[4],
+-			       aplist[i].bssid[5], aplist[i].channel, (aplist[i].flags & WFLAG_APDATA_WEP) ? "wep" : "open",
++			       aplist[i].bssid[5], aplist[i].channel, (aplist[i].flags & WFLAG_APDATA_WPA) ? "wpa" : (aplist[i].flags & WFLAG_APDATA_WEP) ? "wep" : "open",
+ 			       aplist[i].rssi, name);
+ 	}
+ 	ap_query_complete = 0;
+@@ -1274,6 +1274,42 @@ static int dswifi_read_proc(char *page, char **start, off_t off, int count, int
+ 	return len;
+ }
+ 
++/*
++ * /proc/dswifistat: how joining the chosen network goes, without scanning (cheap, so the log and the Wi-Fi window can read it often).
++ *   state 0x0013 up authenticated associated     the ARM7's state flags, named
++ *   auth 3 assoc 1 status 0 0                    frames sent, the access point's last answers (-1 = none yet; 0 = accepted)
++ *   channel 6 wanted 6 rate 20 rx 812 tx-bytes 2410
++ */
++static int dswifistat_read_proc(char *page, char **start, off_t off, int count, int *eof, void *data)
++{
++	static const char *names[] = { "up", "associated", "associating", "cannot-associate", "authenticated", "tx-error", "scanning" };
++	u32 st, js;
++	int i, len;
++
++	if (off > 0) {
++		*eof = 1;
++		return 0;
++	}
++	dmac_inv_range((unsigned long)&arm7_stats[0], (unsigned long)&arm7_stats[WIFI_STATS_MAX]);
++	stats_query_complete = 0;
++	nds_fifo_send(FIFO_WIFI_CMD(FIFO_WIFI_CMD_STATS_QUERY, 0));
++	wait_event_interruptible_timeout(ndswifi_wait, stats_query_complete != 0, WIFI_ARM7_TIMEOUT);
++	dmac_inv_range((unsigned long)&arm7_stats[0], (unsigned long)&arm7_stats[WIFI_STATS_MAX]);
++	st = arm7_stats[WIFI_STATS_DEBUG5];
++	len = sprintf(page, "state 0x%04x", st);
++	for (i = 0; i < 7; i++)
++		if (st & (1 << i))
++			len += sprintf(page + len, " %s", names[i]);
++	js = arm7_stats[WIFI_STATS_JOIN_STATUS];
++	len += sprintf(page + len, "\nauth %u assoc %u status %d %d\nchannel %u wanted %u rate %u rx %u tx-bytes %u\n",
++		       arm7_stats[WIFI_STATS_AUTH_TRIES], arm7_stats[WIFI_STATS_ASSOC_TRIES],
++		       (js & 0xffff) == 0xffff ? -1 : (int)(js & 0xffff), (js >> 16) == 0xffff ? -1 : (int)(js >> 16),
++		       arm7_stats[WIFI_STATS_CHANNELS] & 0xff, (arm7_stats[WIFI_STATS_CHANNELS] >> 8) & 0xff,
++		       arm7_stats[WIFI_STATS_CHANNELS] >> 16, arm7_stats[WIFI_STATS_RXRAWPACKETS], arm7_stats[WIFI_STATS_TXBYTES]);
++	*eof = 1;
++	return len;
++}
++
+ static int __init init_nds(void)
+ {
+ 	u8 *p = NULL;
+@@ -1289,6 +1325,7 @@ static int __init init_nds(void)
+ 	/* need to talk to the device, to set it up */
+ 	register_fifocb(&nds_cmd_fifocb);
+ 	create_proc_read_entry("dswifi", 0444, NULL, dswifi_read_proc, NULL);
++	create_proc_read_entry("dswifistat", 0444, NULL, dswifistat_read_proc, NULL);
+ 
+ 	/* Initialise stats buffer and send address to ARM7 */
+ 	for (i = 0; i < WIFI_STATS_MAX; i++)
+diff --git a/linux-2.6.x/include/asm-arm/arch-nds/wifi.h b/linux-2.6.x/include/asm-arm/arch-nds/wifi.h
+index 54aab48a0..cd1547540 100644
+--- a/linux-2.6.x/include/asm-arm/arch-nds/wifi.h
++++ b/linux-2.6.x/include/asm-arm/arch-nds/wifi.h
+@@ -51,6 +51,12 @@ enum WIFI_STATS {
+ 	WIFI_STATS_HW_1D8,
+ 	WIFI_STATS_HW_1DC,
+ 
++	/* joining a network (DSLinuxDSi): frames sent, the access point's last answers, channels */
++	WIFI_STATS_AUTH_TRIES,
++	WIFI_STATS_ASSOC_TRIES,
++	WIFI_STATS_JOIN_STATUS,	/* low 16 bits: last authentication status, high 16: last association status; 0xffff = no answer yet */
++	WIFI_STATS_CHANNELS,	/* current channel | requested channel << 8 | max rate << 16 */
++
+ 	WIFI_STATS_MAX
+ };
+ 
+diff --git a/user/microwin/src/demos/nanox/dsnet.c b/user/microwin/src/demos/nanox/dsnet.c
+index 8f6b493cb..076674fa2 100644
+--- a/user/microwin/src/demos/nanox/dsnet.c
++++ b/user/microwin/src/demos/nanox/dsnet.c
+@@ -37,7 +37,7 @@ static char KNOWN[200], CONF[200];	/* PC test bed: in $HOME */
+ 
+ struct net {
+ 	char ssid[33];
+-	int channel, wep, signal, saved;
++	int channel, wep, wpa, signal, saved;
+ 	char key[40];
+ };
+ 
+@@ -183,7 +183,7 @@ static void save_known(const char *ssid, const char *key, int forget)
+ 	fclose(o);
+ }
+ 
+-/* read the networks from /proc/dswifi: "bssid channel open|wep signal name"; the same name heard twice keeps its best signal */
++/* read the networks from /proc/dswifi: "bssid channel open|wep|wpa signal name"; the same name heard twice keeps its best signal */
+ static void read_networks(void)
+ {
+ 	const char *src = getenv("DSNET_APS");
+@@ -214,6 +214,7 @@ static void read_networks(void)
+ 		strncpy(nets[nnet].ssid, name, 32);
+ 		nets[nnet].channel = ch;
+ 		nets[nnet].wep = !strcmp(sec, "wep");
++		nets[nnet].wpa = !strcmp(sec, "wpa");
+ 		nets[nnet].signal = sig;
+ 		nnet++;
+ 	}
+@@ -262,7 +263,7 @@ static void draw_status(void)
+ 		if (status[0])
+ 			snprintf(t, sizeof(t), "%s", status);
+ 		else if (ip[0])
+-			snprintf(t, sizeof(t), "Online %s %s", cur_ssid[0] ? cur_ssid : "", ip);
++			snprintf(t, sizeof(t), "%s %s", cur_ssid[0] ? cur_ssid : "Online", ip);
+ 		else
+ 			snprintf(t, sizeof(t), "On, not connected");
+ 	}
+@@ -311,7 +312,7 @@ static void draw_list(void)
+ 		if (on)
+ 			w95_fill(win, gc, W95_NAVY, 4, y, WW - 8, ROWH);
+ 		bars(7, y + 2, level_of(n->signal), on ? W95_LIGHT : W95_DARK);
+-		if (n->wep) {			/* a padlock */
++		if (n->wep || n->wpa) {		/* a padlock */
+ 			w95_fill(win, gc, fgc, 18, y + 5, 5, 4);
+ 			w95_fill(win, gc, fgc, 19, y + 2, 3, 1);
+ 			w95_fill(win, gc, fgc, 19, y + 3, 1, 2);
+@@ -322,6 +323,8 @@ static void draw_list(void)
+ 			w95_text(win, gc, on ? W95_LIGHT : GR_RGB(0, 128, 0), WW - 50, y + (ROWH - th) / 2, "online");
+ 		else if (n->saved)
+ 			w95_text(win, gc, on ? W95_LIGHT : W95_SHADOW, WW - 44, y + (ROWH - th) / 2, "saved");
++		else if (n->wpa)
++			w95_text(win, gc, on ? W95_LIGHT : W95_SHADOW, WW - 32, y + (ROWH - th) / 2, "WPA");
+ 	}
+ }
+ 
+@@ -375,6 +378,56 @@ static void scan(void)
+ 	draw_all();
+ }
+ 
++/* what the window did, for the log (Save log puts /tmp/dsnet.log on the card) */
++static void dlog(const char *s)
++{
++	FILE *f = fopen("/tmp/dsnet.log", "a");
++
++	if (f) {
++		fprintf(f, "dsnet: %s\n", s);
++		fclose(f);
++	}
++}
++
++/*
++ * Wait until the console has joined the network (the ARM7 retries the authentication / association every second), at most 12 s.
++ * /proc/dswifistat: "state 0x.. names", "auth N assoc N status A B". Returns 1 when joined.
++ */
++static int join_wait(const char *ssid)
++{
++	char line[96], t[64];
++	unsigned st = 0, auth = 0, assoc = 0;
++	int sa = -1, sb = -1, s;
++
++	if (dryrun)
++		return 1;
++	for (s = 0; s < 12; s++) {
++		FILE *f = fopen("/proc/dswifistat", "r");
++
++		if (f) {
++			while (fgets(line, sizeof(line), f)) {
++				sscanf(line, "state 0x%x", &st);
++				sscanf(line, "auth %u assoc %u status %d %d", &auth, &assoc, &sa, &sb);
++			}
++			fclose(f);
++		}
++		if (st & 2)
++			return 1;
++		snprintf(t, sizeof(t), "Joining %s: tries %u/%u", ssid, auth, assoc);
++		say(t);
++		sleep(1);
++	}
++	snprintf(t, sizeof(t), "not joined: state 0x%x auth %u assoc %u status %d %d", st, auth, assoc, sa, sb);
++	dlog(t);
++	if (sa > 0)
++		snprintf(status, sizeof(status), "%s refused the login (%d)", ssid, sa);
++	else if (sb > 0)
++		snprintf(status, sizeof(status), "%s refused to join (%d)", ssid, sb);
++	else
++		snprintf(status, sizeof(status), "No answer from %s", ssid);
++	return 0;
++}
++
+ static void connect_to(struct net *n, const char *key)
+ {
+ 	char q[80], cmd[200], ip[24], k[44];
+@@ -383,11 +436,9 @@ static void connect_to(struct net *n, const char *key)
+ 	wifi_on();
+ 	snprintf(cmd, sizeof(cmd), "Connecting to %s...", n->ssid);
+ 	say(cmd);
+-	quote(q, sizeof(q), n->ssid);
++	dlog(cmd);
+ 	run("killall udhcpc 2>/dev/null");
+-	snprintf(cmd, sizeof(cmd), "iwconfig nds essid %s > /dev/null 2>&1", q);
+-	run(cmd);
+-	k[0] = 0;
++	k[0] = 0;	/* the key first: choosing the network starts the login with the key mode set at that moment */
+ 	if (key && key[0]) {
+ 		int len = strlen(key);
+ 
+@@ -399,10 +450,18 @@ static void connect_to(struct net *n, const char *key)
+ 		snprintf(cmd, sizeof(cmd), "iwconfig nds key off > /dev/null 2>&1");
+ 	}
+ 	run(cmd);
+-	sleep(2);
++	quote(q, sizeof(q), n->ssid);
++	snprintf(cmd, sizeof(cmd), "iwconfig nds essid %s > /dev/null 2>&1", q);
++	run(cmd);
++	if (!join_wait(n->ssid)) {
++		draw_all();
++		return;
++	}
++	dlog("joined");
+ 	say("Asking for an address (DHCP)...");
+ 	run("udhcpc -n -q -i nds > /tmp/dsnet-dhcp.log 2>&1");
+ 	wifi_ip(ip);
++	dlog(ip[0] ? ip : "no address (DHCP): /tmp/dsnet-dhcp.log");
+ 	if (ip[0]) {
+ 		snprintf(cur_ssid, sizeof(cur_ssid), "%s", n->ssid);
+ 		save_known(n->ssid, key ? key : "", 0);
+@@ -438,6 +497,10 @@ static void activate(void)
+ 	if (!nnet)
+ 		return;
+ 	n = &nets[sel];
++	if (n->wpa) {
++		say("WPA: the DS chip cannot join");
++		return;
++	}
+ 	if (n->wep && !n->saved) {	/* ask for the key first */
+ 		asking = 1;
+ 		keybuf[0] = 0;
+diff --git a/vendors/Nintendo/DSI/logbody b/vendors/Nintendo/DSI/logbody
+index 825479756..74604d769 100644
+--- a/vendors/Nintendo/DSI/logbody
++++ b/vendors/Nintendo/DSI/logbody
+@@ -13,6 +13,11 @@ echo "--- /home/doom/dsdoom.log ---"
+ echo "--- network (nds) ---"
+ ifconfig nds 2>&1
+ iwconfig nds 2>&1
++echo "--- /proc/dswifistat (joining) ---"
++/usr/bin/cat /proc/dswifistat 2>&1
++echo "--- Wi-Fi window (dsnet.log, DHCP) ---"
++[ -f /tmp/dsnet.log ] && /usr/bin/cat /tmp/dsnet.log
++[ -f /tmp/dsnet-dhcp.log ] && /usr/bin/cat /tmp/dsnet-dhcp.log
+ echo "--- /proc/net/route ---"
+ /usr/bin/cat /proc/net/route 2>&1
+ echo "--- /proc/net/arp ---"
+-- 
+2.56.0
+
