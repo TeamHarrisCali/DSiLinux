@@ -781,3 +781,13 @@ and 5, executes 5, LZ-streams part 1 (then closes the stream), sets the app star
 firmware and waits for +0x58, then gives the antenna back; every step is logged in `/proc/dsiwifi2`. `scripts/add-dsi-wifi-fw.sh`
 copies the user's own HNCA into ROOTFS.IMG as `/usr/lib/firmware/dsi-wifi.bin` (checked against its SHA-1 sums; never in the repo or ROM);
 done for this card. dswifi also wrote part 2 again after the firmware ("is D needed?"); left out for now.
+
+### w98i: upload stops at "execute" (w98j)
+
+w98i's upload log: the right blob, parts 2 (4032 bytes) and 5 (56 bytes) written, then `BMI_EXECUTE` of part 5 at 0x927000 got no
+answer within about 2 s, so the rest was skipped (and the log's "status" number was garbage: a format with one field too many). The
+writes had used dswifi's 0x1F0/0x1F8-byte chunks from its disabled code; Linux's AR6000 drivers limit a BMI message to 256 bytes
+(BMI_DATASZ_MAX) and take a mailbox credit before each command. An overflowing boot ROM buffer would get the byte stream out of step and
+swallow the execute command, which fits. w98j (patch 0111): 240-byte messages, a credit wait before each command (mailbox 0 counter
+0x450; a miss is counted and logged, not fatal), a read-back of each part's first 32 bytes compared with the file, and if execute still gets
+no answer, a fresh run (reset into the boot ROM) and a second try at the part's plain address 0x527000.

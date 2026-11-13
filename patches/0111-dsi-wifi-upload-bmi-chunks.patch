@@ -1,0 +1,311 @@
+From 72dcdbe8c3000aedb5d465c1ed1520c918a0dfe4 Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Fri, 13 Nov 2026 11:06:50 -0600
+Subject: [PATCH] DSi Wi-Fi chip upload: 240-byte BMI messages, credits,
+ read-back, fallback
+
+w98i: parts 2 and 5 written, then BMI_EXECUTE got no answer. The writes
+used dswifi's (untested) 496-byte chunks; Linux AR6000 drivers allow 256
+bytes per BMI message and wait for a mailbox credit first: an overflow
+would desynchronise the boot ROM and swallow the execute.
+- ARM7: BMI write and LZ data in 240-byte messages; wait for a credit
+  (mailbox 0 counter 0x450) before each command, counting misses instead of
+  failing; op 10 reads back up to 64 bytes.
+- ARM9: read back 32 bytes of each written part and compare with the file;
+  log credit misses; if execute (part 5 + 0x400000) gets no answer, reset
+  with a new run and try at the plain address; fix the status in the log.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ linux-2.6.x/arch/arm/mach-nds/arm7/twlwifi.c | 82 ++++++++++++++++++--
+ linux-2.6.x/arch/arm/mach-nds/dsiwifi.c      | 64 +++++++++++++--
+ 2 files changed, 132 insertions(+), 14 deletions(-)
+
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/twlwifi.c b/linux-2.6.x/arch/arm/mach-nds/arm7/twlwifi.c
+index f089a7e81..e7f55714f 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/arm7/twlwifi.c
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/twlwifi.c
+@@ -69,6 +69,7 @@
+ /* Atheros function-1 registers */
+ #define F1_RX_LOOKAHEAD_VALID	0x405
+ #define F1_RX_LOOKAHEAD0	0x408
++#define F1_COUNT4		0x450	/* mailbox 0 credit counter (reading takes one credit) */
+ #define F1_WINDOW_DATA		0x474
+ #define F1_WINDOW_WRITE_ADDR	0x478
+ #define F1_WINDOW_READ_ADDR	0x47C
+@@ -78,6 +79,7 @@
+ #define HI_AR601X	0x00520000
+ 
+ #define BMI_DONE		1
++#define BMI_READ_MEMORY		2
+ #define BMI_WRITE_MEMORY	3
+ #define BMI_EXECUTE		4
+ #define BMI_SET_APP_START	5
+@@ -333,6 +335,29 @@ static void release(void)
+ 	held = 0;
+ }
+ 
++/*
++ * BMI flow control as in Linux ath6kl: wait for a mailbox credit (the target has a free buffer) before each command. Reading the
++ * credit counter consumes one. Bounded; returns 0 when no credit came.
++ */
++static u32 credit_miss;		/* commands sent without a credit (reported in info[2] of each operation) */
++
++static void bmi_credit(void)
++{
++	u32 t;
++
++	for (t = 0; t < 2000; t++) {
++		if (rd8(1, F1_COUNT4))
++			return;
++		if (st & 4)
++			break;
++		tdelay(400);
++	}
++	credit_miss++;			/* go on anyway: a missing credit is reported, not fatal */
++}
++
++/* AR6000 BMI messages are at most 256 bytes (ath6kl BMI_DATASZ_MAX): 240 data bytes leave room for the command words */
++#define BMI_CHUNK	240
++
+ /* a BMI message: command word, then 32-bit words, then bytes (zero padded to 4); the last byte goes to 0xFF */
+ static void bmi_bytes(const u8 *p, u32 n)
+ {
+@@ -342,11 +367,12 @@ static void bmi_bytes(const u8 *p, u32 n)
+ 		wr8(1, i == al - 1 ? 0xFF : 0, i < n ? p[i] : 0);
+ }
+ 
+-static void bmi_write(u32 addr, const u8 *p, u32 len)	/* chunks of 0x1F0, as dswifi */
++static int bmi_write(u32 addr, const u8 *p, u32 len)
+ {
+ 	while (len) {
+-		u32 n = len > 0x1F0 ? 0x1F0 : len;
++		u32 n = len > BMI_CHUNK ? BMI_CHUNK : len;
+ 
++		bmi_credit();
+ 		mbox_wr32(BMI_WRITE_MEMORY, 0);
+ 		mbox_wr32(addr, 0);
+ 		mbox_wr32((n + 3) & ~3u, 0);
+@@ -355,19 +381,47 @@ static void bmi_write(u32 addr, const u8 *p, u32 len)	/* chunks of 0x1F0, as dsw
+ 		p += n;
+ 		len -= n;
+ 	}
++	return 0;
+ }
+ 
+-static void bmi_lz_data(const u8 *p, u32 len)		/* chunks of 0x1F8 */
++static int bmi_lz_data(const u8 *p, u32 len)
+ {
+ 	while (len) {
+-		u32 n = len > 0x1F8 ? 0x1F8 : len;
++		u32 n = len > BMI_CHUNK ? BMI_CHUNK : len;
+ 
++		bmi_credit();
+ 		mbox_wr32(BMI_LZ_DATA, 0);
+ 		mbox_wr32((n + 3) & ~3u, 0);
+ 		bmi_bytes(p, n);
+ 		p += n;
+ 		len -= n;
+ 	}
++	return 0;
++}
++
++/* read back up to 64 bytes (to check what was written); waits for the answer like any BMI read */
++static int bmi_read(u32 addr, u8 *out, u32 len)
++{
++	u32 i, t, al;
++
++	if (len > 64)
++		len = 64;
++	al = (len + 3) & ~3u;
++	bmi_credit();
++	mbox_wr32(BMI_READ_MEMORY, 0);
++	mbox_wr32(addr, 0);
++	mbox_wr32(al, 1);
++	for (t = 0; t < 2000 && !(rd8(1, F1_RX_LOOKAHEAD_VALID) & 1) && !(st & 4); t++)
++		tdelay(400);
++	if (t == 2000 || (st & 4))
++		return -1;
++	for (i = 0; i < al; i++) {
++		u8 v = rd8(1, 0xFF);
++
++		if (i < len)
++			out[i] = v;
++	}
++	return 0;
+ }
+ 
+ /* start the firmware (BMI done) and wait for it: steps 13-15 of a run, and the "finish" operation after an upload */
+@@ -378,6 +432,7 @@ static void twl_finish(u32 *touch, u32 *diag, u32 *info, u32 hi)
+ 	info[0] = 13;
+ 	intern_wr(hi + 0x6C, 0x80);			/* hi_mbox_io_block_sz */
+ 	intern_wr(hi + 0x74, 0x63);			/* hi_mbox_isr_yield_limit */
++	bmi_credit();
+ 	mbox_wr32(BMI_DONE, 1);
+ 	info[2] |= 4;
+ 	for (t = 0; t < 2000; t++) {			/* about 2 s */
+@@ -408,7 +463,8 @@ static void twl_finish(u32 *touch, u32 *diag, u32 *info, u32 hi)
+  * Operations while held in BMI (request count = op, sector = address, touch[0] = length or argument, data = bytes up to 2048):
+  *   2 write memory, 3 LZ stream start, 4 LZ data, 5 execute (answer in info[0]), 6 set app start, 7 write a word (touch[0]),
+  *   8 finish (start the firmware, wait; results like a run), 9 release.
+- * info[1] = 0 done, 1 not held, 2 the card stopped answering (st & 4), 3 no answer from BMI.
++ *   10 read back up to 64 bytes (answer in touch[] then diag[]).
++ * info[1] = 0 done, 1 not held, 2 the card stopped answering (st & 4), 3 no answer from BMI; info[2] = commands sent without a credit.
+  */
+ void twl_wifi_op(u32 op, u32 addr, u32 *touch, u32 *diag, u32 *info, const u8 *data)
+ {
+@@ -416,6 +472,7 @@ void twl_wifi_op(u32 op, u32 addr, u32 *touch, u32 *diag, u32 *info, const u8 *d
+ 	int i;
+ 
+ 	info[0] = info[1] = info[2] = 0;
++	credit_miss = 0;
+ 	if (op == 9) {
+ 		release();
+ 		return;
+@@ -427,16 +484,25 @@ void twl_wifi_op(u32 op, u32 addr, u32 *touch, u32 *diag, u32 *info, const u8 *d
+ 	st = 0;
+ 	switch (op) {
+ 	case 2:
+-		bmi_write(addr, data, arg > 2048 ? 2048 : arg);
++		if (bmi_write(addr, data, arg > 2048 ? 2048 : arg))
++			info[1] = 4;
+ 		break;
+ 	case 3:
++		bmi_credit();
+ 		mbox_wr32(BMI_LZ_STREAM_START, 0);
+ 		mbox_wr32(addr, 1);
+ 		break;
+ 	case 4:
+-		bmi_lz_data(data, arg > 2048 ? 2048 : arg);
++		if (bmi_lz_data(data, arg > 2048 ? 2048 : arg))
++			info[1] = 4;
++		break;
++	case 10:					/* read back up to 64 bytes into touch[] and diag[] */
++		if (bmi_read(addr, (u8 *)touch, arg > 32 ? 32 : arg) ||
++		    (arg > 32 && bmi_read(addr + 32, (u8 *)diag, arg - 32 > 32 ? 32 : arg - 32)))
++			info[1] = 3;
+ 		break;
+ 	case 5:
++		bmi_credit();
+ 		mbox_wr32(BMI_EXECUTE, 0);
+ 		mbox_wr32(addr, 0);
+ 		mbox_wr32(arg, 1);
+@@ -445,6 +511,7 @@ void twl_wifi_op(u32 op, u32 addr, u32 *touch, u32 *diag, u32 *info, const u8 *d
+ 		info[0] = v;
+ 		break;
+ 	case 6:
++		bmi_credit();
+ 		mbox_wr32(BMI_SET_APP_START, 0);
+ 		mbox_wr32(addr, 1);
+ 		break;
+@@ -469,6 +536,7 @@ void twl_wifi_op(u32 op, u32 addr, u32 *touch, u32 *diag, u32 *info, const u8 *d
+ 	}
+ 	if ((st & 4) && !info[1])
+ 		info[1] = 2;
++	info[2] = credit_miss;
+ }
+ 
+ /* the last run's results, kept here so the ARM9 can fetch them later (twl_wifi_report) even if it stopped waiting for the run */
+diff --git a/linux-2.6.x/arch/arm/mach-nds/dsiwifi.c b/linux-2.6.x/arch/arm/mach-nds/dsiwifi.c
+index 059a0ca15..cc4415479 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/dsiwifi.c
++++ b/linux-2.6.x/arch/arm/mach-nds/dsiwifi.c
+@@ -81,18 +81,46 @@ static unsigned int w32(const unsigned char *p)
+ }
+ 
+ /* one ARM7 operation; logs failures. Returns the answer word (info[0]). */
++static unsigned int op_out[19];
++
+ static unsigned int op(unsigned int o, unsigned int addr, unsigned int arg, const unsigned char *data, unsigned int len, int *bad)
+ {
+-	unsigned int out[19];
++	unsigned int *out = op_out;
+ 	int r = dsisd_twlop(o, addr, arg, data, len, out);
+ 
+-	if (r != 0 || out[1] != 0) {
+-		lg("  op %u at %08x failed: request %d, status %u\n", o, addr, r);
++	if (r != 0) {
++		lg("  op %u at %08x: request failed (%d)\n", o, addr, r);
++		*bad = 1;
++	} else if (out[1] != 0) {
++		/* 1 not held, 2 the card stopped answering, 3 no answer from BMI */
++		lg("  op %u at %08x failed: status %u\n", o, addr, out[1]);
+ 		*bad = 1;
+ 	}
++	if (r == 0 && out[2])
++		lg("  op %u at %08x: %u command(s) sent without a mailbox credit\n", o, addr, out[2]);
+ 	return out[0];
+ }
+ 
++/* read back the first 32 bytes of a written part and compare them with the file */
++static void verify(unsigned int addr, const unsigned char *p, unsigned int size, int *bad)
++{
++	unsigned int n = size < 32 ? size : 32;
++	int b2 = 0;
++
++	op(10, addr, n, 0, 0, &b2);
++	if (b2) {
++		lg("  read-back at %08x: no answer\n", addr, 0, 0);
++		*bad = 1;
++		return;
++	}
++	if (memcmp(op_out + 3, p, n)) {
++		lg("  read-back at %08x DIFFERS: %08x (file %08x)\n", addr, op_out[3], w32(p));
++		*bad = 1;
++	} else {
++		lg("  read-back at %08x matches (%u bytes)\n", addr, n, 0);
++	}
++}
++
+ static void write_part(const char *name, unsigned int addr, const unsigned char *p, unsigned int size, int *bad)
+ {
+ 	unsigned int done;
+@@ -100,6 +128,8 @@ static void write_part(const char *name, unsigned int addr, const unsigned char
+ 	for (done = 0; done < size && !*bad; done += 2048)
+ 		op(2, addr + done, size - done > 2048 ? 2048 : size - done, p + done, size - done > 2048 ? 2048 : size - done, bad);
+ 	lg(*bad ? "  wrote %u bytes to %08x (FAILED)\n" : "  wrote %u bytes to %08x\n", size, addr, 0);
++	if (!*bad)
++		verify(addr, p, size, bad);
+ 	(void)name;
+ }
+ 
+@@ -178,12 +208,32 @@ static void upload(void)
+ 		goto release;
+ 	}
+ 
+-	write_part("2", paddr[2], part[2], psize[2], &bad);
+-	write_part("5", paddr[5], part[5], psize[5], &bad);
++	/* parts 2 and 5, then execute 5: first at its address + 0x400000 (dswifi), and if the boot ROM does not answer, after a fresh run
++	 * (a reset into the boot ROM) at its plain address */
++	for (i = 0; i < 2; i++) {
++		unsigned int xa = i == 0 ? paddr[5] + 0x400000 : paddr[5], ans;
++
++		if (i == 1) {
++			bad = 0;
++			lg("no answer: reset the chip and try executing at %08x\n", xa, 0, 0);
++			op(9, 0, 0, 0, 0, &bad);
++			twl_ret = dsisd_twlwifi(twl_d, 0);
++			if (!(in[2] & 16)) {
++				lg("the new run did not stop in BMI (flags %x)\n", in[2], 0, 0);
++				return;
++			}
++		}
++		write_part("2", paddr[2], part[2], psize[2], &bad);
++		write_part("5", paddr[5], part[5], psize[5], &bad);
++		if (bad)
++			goto release;
++		ans = op(5, xa, paddr[5], 0, 0, &bad);
++		lg("execute %08x (argument %08x): answer %08x\n", xa, paddr[5], ans);
++		if (!bad)
++			break;
++	}
+ 	if (bad)
+ 		goto release;
+-	lg("execute %08x (argument %08x): answer %08x\n", paddr[5] + 0x400000, paddr[5],
+-	   op(5, paddr[5] + 0x400000, paddr[5], 0, 0, &bad));
+ 	op(3, paddr[1], 0, 0, 0, &bad);			/* LZ stream to the firmware's address */
+ 	for (i = 0; i < psize[1] && !bad; i += 2048)
+ 		op(4, 0, psize[1] - i > 2048 ? 2048 : psize[1] - i, part[1] + i, psize[1] - i > 2048 ? 2048 : psize[1] - i, &bad);
+-- 
+2.56.0
+
