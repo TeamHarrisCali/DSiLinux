@@ -1,0 +1,175 @@
+From 3fbd78e1e36b0bdb438c617cbab8317e6d359623 Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Fri, 13 Nov 2026 11:46:15 -0600
+Subject: [PATCH] wlan0: firmware health check, received-packet ring, connect
+ retry
+
+w98o did not connect: after the connect commands no packet at all came
+back (w98n had connected twice with the same sequence).
+- While wlan0 is up the thread reads the firmware's failure state (host
+  interest +0x04) every 3 s and logs changes.
+- /proc/dsiwifi2 shows the number of received mailbox packets and the
+  last 8 (endpoint/id/length).
+- No connect event 15 s after a connect: send it again (3 tries).
+- wifi-dsi-test waits up to 40 s for CONNECTED before DHCP and records
+  how long it took.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ linux-2.6.x/arch/arm/mach-nds/dsiwifi.c | 50 +++++++++++++++++++++++--
+ vendors/Nintendo/DSI/wifi-dsi-test      | 11 +++++-
+ 2 files changed, 57 insertions(+), 4 deletions(-)
+
+diff --git a/linux-2.6.x/arch/arm/mach-nds/dsiwifi.c b/linux-2.6.x/arch/arm/mach-nds/dsiwifi.c
+index 5ca37a40e..17c58744e 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/dsiwifi.c
++++ b/linux-2.6.x/arch/arm/mach-nds/dsiwifi.c
+@@ -285,6 +285,10 @@ static void bss_info(const unsigned char *d, int len)
+ static struct net_device *wdev;
+ static struct net_device_stats wstats;
+ static int session;		/* the chip runs its firmware and holds the antenna */
++static unsigned int cur_hi;	/* host interest address of the running firmware */
++static unsigned int rx_count, rx_ring[8], fail_state;	/* received packets (endpoint | id << 8 | length << 24 >> ...), firmware failure state */
++static unsigned long conn_at, health_at;	/* when the last connect was sent (0 = none pending), the last health check */
++static int conn_tries;
+ static int connected;
+ static int unknown_logged;
+ 
+@@ -322,6 +326,9 @@ static void handle_pkt(unsigned int hdr, int *ev_scan_done)
+ {
+ 	unsigned int len = hdr >> 16, alen, id, ep = hdr & 0xff;
+ 
++	rx_ring[rx_count % 8] = ep | ((rx[6] | (rx[7] << 8)) << 8) | ((len > 255 ? 255 : len) << 24);
++	rx_count++;
++
+ 	alen = (hdr >> 8) & 0xff ? rx[4] : 0;		/* trailer (acknowledgements, lookahead) */
+ 	if (len < alen + 2 || len > 2040)
+ 		return;
+@@ -363,6 +370,7 @@ static void handle_pkt(unsigned int hdr, int *ev_scan_done)
+ 		break;
+ 	case WMI_CONNECT_EVENT:				/* u16 channel (MHz), bssid[6], ... */
+ 		connected = 1;
++		conn_at = 0;
+ 		lg("  CONNECTED on channel %u, BSSID ..:%02x:%02x\n", wifi_mhz_to_channel(rx[8] | (rx[9] << 8)), rx[14], rx[15]);
+ 		if (wdev)
+ 			netif_carrier_on(wdev);
+@@ -624,6 +632,7 @@ static void upload(int keep)
+ 			htc_wmi(hi, &bad);
+ 			if (keep && reg_domain && !bad) {	/* wlan0: keep the chip up and the antenna on it */
+ 				session = 1;
++				cur_hi = hi;
+ 				lg("chip up for wlan0 (antenna kept)\n", 0, 0, 0);
+ 				return;
+ 			}
+@@ -775,10 +784,27 @@ static void tx_one(struct sk_buff *skb)
+ static int wthread(void *arg)
+ {
+ 	daemonize("dsiwifi");
++	health_at = jiffies;
+ 	while (thr_run) {
+ 		struct sk_buff *skb;
+ 		int i, bad = 0;
+ 
++		/* no connect event 15 s after a connect: send it again (twice at most) */
++		if (conn_at && !connected && time_after(jiffies, conn_at + 15 * HZ) && conn_tries < 3) {
++			lg("connect: no connect event after 15 s (packets received so far %u): sending it again\n", rx_count, 0, 0);
++			conn_pending = 1;
++		}
++		/* every 3 s: the firmware's failure state (host interest +0x04, non-zero after a crash in the chip) */
++		if (cur_hi && time_after(jiffies, health_at + 3 * HZ)) {
++			unsigned int f = op(13, cur_hi + 0x04, 0, 0, 0, &bad);
++
++			health_at = jiffies;
++			if (f != fail_state) {
++				lg("firmware failure state changed: %08x (was %08x)\n", f, fail_state, 0);
++				fail_state = f;
++			}
++		}
++
+ 		while ((skb = skb_dequeue(&txq))) {
+ 			tx_one(skb);
+ 			dev_kfree_skb(skb);
+@@ -787,6 +813,8 @@ static int wthread(void *arg)
+ 			netif_wake_queue(wdev);
+ 		if (conn_pending) {
+ 			conn_pending = 0;
++			conn_tries++;
++			conn_at = jiffies;
+ 			do_connect();
+ 		}
+ 		if (disc_pending) {
+@@ -830,6 +858,9 @@ static int w_open(struct net_device *dev)
+ 		return 0;
+ 	connected = 0;
+ 	unknown_logged = 0;
++	rx_count = 0;
++	fail_state = 0;
++	conn_at = 0;
+ 	upload(1);
+ 	if (!session)
+ 		return -EIO;
+@@ -864,6 +895,8 @@ static int w_stop(struct net_device *dev)
+ 		session = 0;
+ 	}
+ 	connected = 0;
++	conn_at = 0;
++	cur_hi = 0;
+ 	netif_carrier_off(dev);
+ 	lg("wlan0 down: antenna back to the DS chip\n", 0, 0, 0);
+ 	return 0;
+@@ -900,9 +933,19 @@ static int twl_read_proc(char *page, char **start, off_t off, int count, int *eo
+ 			      (in[2] & 4) ? "yes" : "no", (in[2] & 8) ? "timed out" : "answered",
+ 			      t[0] & 0xff, t[1], t[2] & 0xff, g[0], g[1], twl_chip(g[1]), t[4], g[2], g[3], g[4],
+ 			      g[5], t[6], t[5], g[6], g[7] & 0xff, t[7], in[1], t[3]);
+-	len += snprintf(page + len, PAGE_SIZE - len, "wlan0: %s, %s; packets in %lu out %lu (dropped out %lu)\nfirmware file: %u bytes\n%s",
+-			session ? "chip up" : "down", connected ? "CONNECTED" : "not connected", wstats.rx_packets, wstats.tx_packets,
+-			wstats.tx_dropped, fw_len, ulog);
++	len += snprintf(page + len, PAGE_SIZE - len, "wlan0: %s, %s; packets in %lu out %lu (dropped out %lu); firmware failure state %08x\n"
++			"mailbox packets received %u, last (endpoint/id/length):", session ? "chip up" : "down",
++			connected ? "CONNECTED" : "not connected", wstats.rx_packets, wstats.tx_packets, wstats.tx_dropped, fail_state, rx_count);
++	{
++		unsigned int k, n = rx_count < 8 ? rx_count : 8;
++
++		for (k = 0; k < n; k++) {
++			unsigned int e = rx_ring[(rx_count - n + k) % 8];
++
++			len += snprintf(page + len, PAGE_SIZE - len, " %u/%04x/%u", e & 0xff, (e >> 8) & 0xffff, e >> 24);
++		}
++	}
++	len += snprintf(page + len, PAGE_SIZE - len, "\nfirmware file: %u bytes\n%s", fw_len, ulog);
+ 	if (len > PAGE_SIZE - 1)
+ 		len = PAGE_SIZE - 1;
+ 	*eof = 1;
+@@ -942,6 +985,7 @@ static int twl_write_proc(struct file *file, const char __user *buffer, unsigned
+ 			for (k = 0; nm[k] && nm[k] != '\n' && k < 32; k++)
+ 				conn_req[k] = nm[k];
+ 			conn_req[k] = 0;
++			conn_tries = 0;
+ 			conn_pending = 1;
+ 		}
+ 		wake_up(&thr_wait);
+diff --git a/vendors/Nintendo/DSI/wifi-dsi-test b/vendors/Nintendo/DSI/wifi-dsi-test
+index febf26f99..4282f1aaa 100644
+--- a/vendors/Nintendo/DSI/wifi-dsi-test
++++ b/vendors/Nintendo/DSI/wifi-dsi-test
+@@ -23,7 +23,16 @@ cat $F > /proc/dsiwifi2fw
+ ifconfig wlan0 up >> $L 2>&1
+ echo "connecting to ${1:-the strongest open network}..."
+ echo "connect $1" > /proc/dsiwifi2
+-sleep 10
++N=0
++while [ $N -lt 20 ]
++do
++	grep -q CONNECTED /proc/dsiwifi2 && break
++	sleep 2
++	N=`expr $N + 1`
++done
++T=`expr $N \* 2`
++grep -q CONNECTED /proc/dsiwifi2 && echo "connected after about $T s" >> $L
++grep -q CONNECTED /proc/dsiwifi2 || echo "NOT connected after 40 s" >> $L
+ echo "DHCP..."
+ udhcpc -n -q -i wlan0 >> $L 2>&1
+ ifconfig wlan0 >> $L 2>&1
+-- 
+2.56.0
+

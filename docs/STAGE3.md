@@ -852,3 +852,11 @@ channel 1` and the firmware's **WMI connect event: CONNECTED on channel 1** (the
 (neighbour report). **The DSi's own Wi-Fi chip joined a network under DSLinux.** The card log lost the block that held the DHCP and ping
 results (again a contiguous part missing). Some scan entries were garbled (SNR 253, RSSI 158). w98o (patch 0116): the test writes its
 output and a copy of dmesg into /home (read from the image with debugfs), scan entries with SNR < 16 or > 127 are dropped.
+
+### w98o: not connected this time (w98p)
+
+w98o's own output (read from /home/wlan0-test.log in the image, which worked): upload, HTC/WMI and scan as before, `connect: GuestNet,
+channel 1, signal -58`, then no packet at all from the firmware, no connect event, no error; DHCP sent three discovers into a link
+without carrier (0 packets out), ping: network unreachable. w98n had connected twice with the same commands. w98p (patch 0117) adds a
+firmware health check (failure state at host interest +0x04 every 3 s), the count and the last 8 received mailbox packets in
+/proc/dsiwifi2, a connect retry after 15 s without an event, and the test waits up to 40 s for CONNECTED before DHCP.
