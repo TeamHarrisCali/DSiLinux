@@ -692,3 +692,14 @@ last connect). In the ARM7 code only a **deauthentication** from the access poin
 handled (logged, association requested again), the re-login after a deauthentication uses the network's key mode instead of "none", and
 the Wi-Fi window logs the join state when DHCP fails and retries once after re-joining. The reason code will say why the phone sends the
 console away (e.g. 7 = data from a station it does not consider associated, 4 = inactivity).
+
+### w98b: an address, but a lossy link; the association rate list (w98c)
+
+w98b log: connected on the second try (10.53.221.108, gateway and DNS, the gateway's MAC in the ARP table) but `ping google.com` failed.
+DHCP needed three udhcpc runs (11 discovers, 4 selects before one lease), one `DEAUTH(1)` (reason "unspecified") followed by a successful
+re-login, data tx 35 / rx 50, the chip's receive-error counters climbing: the link was joined but lost most frames. Cause found in
+`Wifi_SendAssocPacket`: to put 1 and 2 Mbit/s in front of the access point's basic rates it shifted the array **from the front**
+(`for (j = 1; j < 16; j++) r[j] = r[j - 1]`), which copies one entry over all of them (dswifi shifts from the end). With this hotspot the
+request offered 15 rates, "1, 2, 5.5 x 13" (a rates element may hold 8), and so told the phone the console takes 5.5 Mbit/s, which the DS
+chip cannot receive. Fixed (patch 0104): the first request offers 1 and 2 Mbit/s only; after a refusal the next ones add the AP's basic
+rates (dswifi's list). The event log shows the offer: `assoc-sent(2)` = 1-2 only, `assoc-sent(260+)` = with the basic rates.

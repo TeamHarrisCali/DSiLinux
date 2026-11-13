@@ -146,6 +146,9 @@ The console's own layout (boot chain, NAND, installed titles, firmware chip, BIO
   loop took 0x43 + 1 as the baseband count, so RF register 1 was never set per channel: the radio did not really tune, scans found few
   networks, and no access point heard the console. Fixed in w97y (as dswifi reads it). **read from the user's firmware dump** (the fix is
   not yet run on the console)
+- **Association rates:** the DS chip sends and receives only 1 and 2 Mbit/s. DSLinux's association request mangled the rate list (an
+  array shift in the wrong direction: "1, 2, 5.5 x 13"), claiming 5.5 Mbit/s; the link then lost most frames (w98b). Since w98c the
+  request offers 1 and 2 Mbit/s only, and the access point's basic rates only after a refusal. **code** (not yet run on the console)
 - Transmissions: the original driver started queued frames only from the beacon-time interrupt (the `W_TXREQ` 0xAE writes were commented
   out); since w97v they start at once, as in dswifi. **built**
 - The Atheros chip (AR6013G on DWM-W024) sits behind the second SDIO controller at `0x04004A00` (its registers answer). BlocksDS's DSi-mode driver

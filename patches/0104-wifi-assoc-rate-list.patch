@@ -1,0 +1,114 @@
+From ed75aa034b7af2d198dd049dff63b100a92dbf13 Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Fri, 13 Nov 2026 09:39:02 -0600
+Subject: [PATCH] Wi-Fi: correct association rate list, offer 1-2 Mbit/s first
+
+The rate list was built by shifting the AP's basic rates up from the front
+(j = 1, 2, ...), which copies the first entry over the whole array: against
+the phone hotspot it offered 15 rates "1, 2, 5.5 x 13" (an element may hold
+8) and claimed 5.5 Mbit/s, which the DS chip cannot receive; the link was
+very lossy. Build the list separately: 1 and 2 Mbit/s only, and the AP's
+basic rates as well (as dswifi) only after a refused association. The event
+log records the offer (count | basic << 8).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ linux-2.6.x/arch/arm/mach-nds/arm7/wifi.c | 53 +++++++++++++----------
+ 1 file changed, 30 insertions(+), 23 deletions(-)
+
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/wifi.c b/linux-2.6.x/arch/arm/mach-nds/arm7/wifi.c
+index 662d959fb..e432eca42 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/arm7/wifi.c
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/wifi.c
+@@ -114,6 +114,13 @@ static void wtrace(u32 n)
+  * 5 deauthenticated (reason), 6 disassociated (reason), 7 first data frame sent after joining (length), 8 first data frame received
+  * after joining (length), 9 looked for the network (1 = found in the list, 0 = not yet heard).
+  */
++/*
++ * Which rates the association request offers. The DS chip only sends and receives 1 and 2 Mbit/s. First offer just those, so the access
++ * point has to talk to us at a rate we can decode; if it refuses (status != 0, e.g. 18 "basic rates not supported"), offer its basic
++ * rates as well, as dswifi does.
++ */
++static int assoc_offer_basic;
++
+ #define JLOG_N	12
+ static int jlog_tx_seen, jlog_rx_seen;
+ 
+@@ -490,6 +497,7 @@ void Wifi_SetSSID(int off, char b1, char b2)
+ 		wifi_data.ssid[0] = off * 2 + 1;
+ 	if (!b1 || !b2) {
+ 		/* once we see the null terminator, we are done */
++		assoc_offer_basic = 0;
+ 		if (wifi_data.stats) {
+ 			wifi_data.stats[WIFI_STATS_AUTH_TRIES] = wifi_data.stats[WIFI_STATS_ASSOC_TRIES] = 0;
+ 			wifi_data.stats[WIFI_STATS_TX_DONE] = wifi_data.stats[WIFI_STATS_TX_ERR] = wifi_data.stats[WIFI_STATS_TBTT] = 0;
+@@ -1221,6 +1229,8 @@ static int Wifi_ProcessReassocResponse(int macbase, int framelen)
+ 	wifi_data.stats[WIFI_STATS_JOIN_STATUS] = (wifi_data.stats[WIFI_STATS_JOIN_STATUS] & 0xffff) | ((u32)status << 16);
+ 	jlog(4, status);
+ 	jlog_tx_seen = jlog_rx_seen = 0;
++	if (status != 0)
++		assoc_offer_basic = 1;		/* refused with just 1 and 2 Mbit/s: offer its basic rates too */
+ 	if (status == 0) {	// status code, 0==success
+ 		WIFI_AIDS = fixed_params[2];
+ 		WIFI_REG(0x2A) = fixed_params[2];
+@@ -1915,7 +1925,6 @@ static void Wifi_SendAssocPacket(void)
+ 	int i, j, numrates;
+ 
+ 	wifi_data.stats[WIFI_STATS_ASSOC_TRIES]++;
+-	jlog(3, 0);
+ 	i = Wifi_GenMgtHeader(data, 0x0000);
+ 
+ 	if (wifi_data.curWepmode) {
+@@ -1931,29 +1940,27 @@ static void Wifi_SendAssocPacket(void)
+ 	for (j = 0; j < wifi_data.ssid[0]; j++)
+ 		data[i++] = wifi_data.ssid[1 + j];
+ 
+-	if ((wifi_data.baserates[0] & 0x7f) != 2) {
+-		for (j = 1; j < 16; j++)
+-			wifi_data.baserates[j] = wifi_data.baserates[j - 1];
+-	}
+-	wifi_data.baserates[0] = 0x82;
+-	if ((wifi_data.baserates[1] & 0x7f) != 4) {
+-		for (j = 2; j < 16; j++)
+-			wifi_data.baserates[j] = wifi_data.baserates[j - 1];
++	/*
++	 * The original code put 1 and 2 Mbit/s in front by shifting the AP's basic rates up, but shifted from the front (j = 1, 2, ...), which
++	 * copies the first entry over the whole array: with this hotspot it offered 15 rates, "1, 2, 5.5 x 13" (an element may hold 8), and
++	 * told the access point we take 5.5 Mbit/s. Build the list separately instead (the AP's list in wifi_data stays as it was).
++	 */
++	{
++		u8 rates[8];
++
++		numrates = 0;
++		rates[numrates++] = 0x82;	/* 1 Mbit/s */
++		rates[numrates++] = 0x04;	/* 2 Mbit/s */
++		if (assoc_offer_basic)
++			for (j = 0; j < 16 && wifi_data.baserates[j] && numrates < 8; j++)
++				if ((wifi_data.baserates[j] & 0x7f) != 2 && (wifi_data.baserates[j] & 0x7f) != 4)
++					rates[numrates++] = wifi_data.baserates[j] & 0x7f;
++		jlog(3, numrates | (assoc_offer_basic << 8));
++		data[i++] = 1;		// rate set
++		data[i++] = numrates;
++		for (j = 0; j < numrates; j++)
++			data[i++] = rates[j];
+ 	}
+-	wifi_data.baserates[1] = 0x04;
+-
+-	wifi_data.baserates[15] = 0;
+-	for (j = 0; j < 16; j++)
+-		if (wifi_data.baserates[j] == 0)
+-			break;
+-	numrates = j;
+-	for (j = 2; j < numrates; j++)
+-		wifi_data.baserates[j] &= 0x7F;
+-
+-	data[i++] = 1;		// rate set
+-	data[i++] = numrates;
+-	for (j = 0; j < numrates; j++)
+-		data[i++] = wifi_data.baserates[j];
+ 
+ 	// reset header fields with needed data
+ 	((u16 *) data)[4] = 0x000A;
+-- 
+2.56.0
+
