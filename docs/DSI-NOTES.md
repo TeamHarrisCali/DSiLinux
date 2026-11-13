@@ -47,6 +47,11 @@ The console's own layout (boot chain, NAND, installed titles, firmware chip, BIO
 - **No bash:** bash needs `fork()` (a copy of the process), which a system without an MMU cannot do; busybox's `msh` is built for `vfork()`. It already
   has line editing, history (saved), tab completion and a prompt with `\u \h \w \W \$ \e \[ \]` (cmdedit), which work with the rewritten `nxterm` (w97r);
   the old VT52 nxterm dropped the ANSI sequences cmdedit sends, so editing looked broken. **code/inferred**
+- busybox `msh` opened `>>` files with open + seek to the end instead of `O_APPEND`: several programs appending to `/tmp/desktop.log` at
+  once overwrote each other's lines ("tarted /boot/dssettings wifi"). Fixed in w97z (patch 0101). **measured**
+- nano-X (upstream) quit the whole server when both mouse buttons were down: on the DSi those are R and L. The desktop vanished and the
+  screen kept its last picture, which looks like a freeze (w97y, after a `ping` the user could not stop). Removed in w97z. **measured/inferred**
+- The touch keyboard is one finger: Ctrl and Alt now latch until the next key, so Ctrl+C can be typed (w97z). **code**
 - The shell is `msh`: plain commands only. `{ ...; } > file` is ignored, `a && b &` runs in the foreground, `cmp -s` takes `-s` as a file name,
   `/usr/bin/cat` must be called by its full path in boot scripts, and there is no `tail`. busybox `grep` has `-E` on the console's build. **measured**
 - The compiler is gcc 4.0.4 (2008). It does not define the endianness macros newer code expects (`PEANUT_GB_IS_LITTLE_ENDIAN` had to be set). **measured**
@@ -122,6 +127,8 @@ The console's own layout (boot chain, NAND, installed titles, firmware chip, BIO
 - The DSi has two Wi-Fi chips behind one antenna, selected by `GPIO_WIFI` (0x04004C04, **bit 8 = DS/NTR chip**). The loader leaves it at `0x0100`. **measured**
 - **The DSi XL's board (DWM-W024) does have a working DS chip**: after powering the block (`POWCNT2` 0x04000304 bit 1) the DS chip's ID register
   (0x04808000) reads **`0xC340`**; unpowered it reads 0. **measured** (w97j probe, `/proc/dsiwifi`)
+- **Wi-Fi works on the console (w97y):** scan, join an open network (phone hotspot, 2.4 GHz), DHCP address, DNS, `ping google.com`.
+  `/proc/dswifistat` after joining: `state up associated authenticated`, auth 3, assoc 4 (status 0 0), rx from-ap 1044, to-us 48. **measured**
 - DSLinux's original DS Wi-Fi driver works once the DS-only LED write is gone: radio up, interrupts at a normal rate, scans find networks, MAC from the
   firmware flash (`A4:C0:E1:...`, Nintendo). Interface name `nds`. Open or WEP networks only, 802.11b. `WIFIWAITCNT` (0x04000206) = 0x30. **measured** (w97m)
 - `iwconfig` (wireless extensions 17) warns about the driver's version 19. One manual `iwlist nds scan` listed networks (w97m), but from the

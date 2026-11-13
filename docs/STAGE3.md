@@ -655,3 +655,16 @@ DSLinux's `Wifi_SetChannel` walked it with `i <= flash[0x43]` baseband entries (
 then RF register 2 and garbage (0xFF) into RF register 0xFF, and never RF register 1. dswifi reads the count byte. Fixed (patch 0100).
 This explains every Wi-Fi symptom so far: few networks in scans, the channel 6 hotspot heard only sometimes, nothing on channel 11, and no
 access point ever hearing the console.
+
+### Wi-Fi works (w97y); the "freeze" after ping (w97z)
+
+User: "it was able to see, connect, and ping google.com!" The w97y log: joined Nothing_Phone_2 on channel 6 (`state up associated
+authenticated`, auth 3, assoc 4, both answered with status 0), DHCP lease 10.53.221.108 with gateway and DNS, the gateway's MAC in the ARP
+table, `rx from-ap 1044`, `to-us 48`. The channel table fix (patch 0100) was the cause of all earlier failures. **Wi-Fi is verified on the
+console** (open network; WEP and SSH not yet tried).
+Then "after pinging, it froze". The log (written after it, so the kernel was alive): no fault in dmesg, three `nxclient: lost connection to
+Nano-X server`, i.e. the graphics server ended and the screen kept its last picture. `ping` with no count never ends, the touch keyboard could
+not type Ctrl+C (its Ctrl key is released at once), and nano-X upstream quits when both mouse buttons are down, which on the DSi are R and L
+(L+R also quits the Game Boy emulator): the likeliest story is L+R to stop the ping. The desktop log could not confirm it: busybox `msh`
+appends with open + seek instead of `O_APPEND`, so the programs logging there at once overwrote each other's lines. w97z (patch 0101):
+Ctrl/Alt latch on the touch keyboard (tap Ctrl, then C), no L+R quit in nano-X, `>>` with `O_APPEND` in msh.

@@ -62,6 +62,10 @@ across its top: Desk, Test (self-test), Log (save the log now), Bench.
 
 Every program closes with q or Esc, or with the window's close box.
 
+**Stopping a program in the terminal (Ctrl+C):** tap **Ctrl** on the touch keyboard (it stays down, shown pressed), then **C**. Ctrl and Alt
+stay down until the next key; a second tap releases them. Holding the R button works as Ctrl too. `ping` runs until stopped: `ping -c 4 host`
+sends four and ends by itself. (Up to w97y, pressing L and R together closed the whole desktop and the screen looked frozen; that is gone.)
+
 ## Wi-Fi and SSH
 
 The DSi's DS-compatible Wi-Fi chip is used: it joins **open or WEP networks on 2.4 GHz** (802.11b), not WPA/WPA2. A phone hotspot works if its
@@ -74,6 +78,7 @@ security can be set to "None" (iPhones cannot); a laptop hotspot works if it is 
      or 10 / 26 hex digits); after a working connection it is saved in `/home/wifi.known` and `/home/wifi.conf`. **Forget** removes a saved key.
    - Keys: s or B = scan, w = Wi-Fi on/off, f = forget, q / Esc = close.
 2. In the terminal: `/boot/wifi-scan` prints the same list (`cat /proc/dswifi` is the raw list), `/boot/wifi-connect` asks for name and key.
+   Tested: scan, connect, address by DHCP and `ping google.com` over a phone hotspot (open, 2.4 GHz) work (w97y).
 3. **Network > Wi-Fi status:** address, Wi-Fi state, routes. The tray shows the same at a glance.
 4. **Network > SSH server:** makes the host key once (about a minute) and starts Dropbear. Password logins are switched off as soon as
    `/home/.ssh/authorized_keys` exists (an RSA public key). The server is old; from a current PC:
