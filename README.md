@@ -9,6 +9,7 @@ This repository holds the patches, build scripts and notes. The source tree is a
 [ipwndev/DSLinux](https://github.com/ipwndev/DSLinux) in `work/dslinux` (git-ignored); the changes are in `patches/` (100 patches, in order).
 
 - **Using it:** [docs/USER-GUIDE.md](docs/USER-GUIDE.md): buttons, the desktop, every app, Wi-Fi and SSH, the card scripts, what to do after a freeze.
+- **How the DSi itself works** (boot chain, NAND, installed titles, firmware chip, BIOS, which driver talks to what): [docs/DSI-INTERNALS.md](docs/DSI-INTERNALS.md).
 - **Developing for it:** [docs/DSI-NOTES.md](docs/DSI-NOTES.md): everything learned about the DSi hardware and this system (registers, limits, pitfalls, numbers).
 - **How it was done:** [docs/STAGE3.md](docs/STAGE3.md) (every build, including wrong turns), [docs/FEASIBILITY.md](docs/FEASIBILITY.md), [docs/STAGE1.md](docs/STAGE1.md), [docs/STAGE2.md](docs/STAGE2.md).
 

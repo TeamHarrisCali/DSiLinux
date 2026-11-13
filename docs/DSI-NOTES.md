@@ -4,6 +4,8 @@ Everything learned while bringing DSLinux up on a **DSi XL in DSi mode** (launch
 Each fact says how we know it: **measured** (seen on this console: photo, user report or the card log), **code** (it is what our working code
 does, so it works on the console), **docs** (from BlocksDS/libnds, dswifi, GBATEK or dsibrew, not separately checked) or **inferred**.
 Build numbers (w95x, w97m...) point into [STAGE3.md](STAGE3.md), where the story behind each fact is.
+The console's own layout (boot chain, NAND, installed titles, firmware chip, BIOS), read from the user's dumps, is in
+[DSI-INTERNALS.md](DSI-INTERNALS.md).
 
 ## 1. Starting in DSi mode
 
@@ -166,4 +168,5 @@ Build numbers (w95x, w97m...) point into [STAGE3.md](STAGE3.md), where the story
 - `testbed/` runs the desktop's Nano-X server and programs on the PC against a 256x192 framebuffer file; `nxctl` clicks, types and takes pictures.
   Good for UI logic and drawing; it has no 3D engine, sound, Wi-Fi or DS buttons. **measured** (it reproduced a menu bug seen on the console)
 - `dsgb_host.c` (Game Boy core), `arc_test.c` (game rules) and the DOOM/Peanut code paths build and run natively for checks of logic and speed.
-- melonDS (Flatpak) is set up with isolated configs for DS mode (`scripts/melon-ds.sh`); its DSi mode would need console dumps, which are not used.
+- melonDS (Flatpak) is set up with isolated configs for DS mode (`scripts/melon-ds.sh`). Its DSi mode needs the console dumps; the user allowed
+  reading them (2026-11-13), see [DSI-INTERNALS.md](DSI-INTERNALS.md) section 9 (the user prefers to start DSi-mode runs themselves).
