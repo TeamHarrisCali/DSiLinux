@@ -2,7 +2,7 @@
 # Copies Game Boy ROMs (your own games) into /home/roms inside the DSLinux root image on the SD card, for dsgb (Start > Games > Game Boy).
 # Usage: scripts/add-roms.sh [-i /path/to/ROOTFS.IMG] game1.gb game2.gb ...
 # Needs debugfs (e2fsprogs). The card must be in the PC, not in the console. Existing files with the same name are replaced.
-IMG=/run/media/sharris/1419-260A/linux/ROOTFS.IMG
+. "$(dirname "$0")/card.sh"
 if [ "$1" = "-i" ]; then IMG="$2"; shift 2; fi
 [ -f "$IMG" ] || { echo "no image: $IMG (card not mounted?)"; exit 1; }
 [ $# -gt 0 ] || { echo "usage: $0 [-i ROOTFS.IMG] game.gb ..."; exit 1; }

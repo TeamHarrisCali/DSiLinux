@@ -2,7 +2,7 @@
 # Writes the Wi-Fi settings DSLinux reads at boot into /etc/rc.conf inside the root image on the SD card (card in the PC), and an inetd
 # line that starts the Dropbear SSH server. The DSi's DS Wi-Fi chip can only join an OPEN network (no password) or a WEP one, 2.4 GHz, 802.11b rates.
 # Usage: scripts/set-wifi.sh [-i ROOTFS.IMG] ESSID [wepkey]      (static IP: set ip= / gateway= in rc.conf afterwards; default is DHCP)
-IMG=/run/media/sharris/1419-260A/linux/ROOTFS.IMG
+. "$(dirname "$0")/card.sh"
 if [ "$1" = "-i" ]; then IMG="$2"; shift 2; fi
 ESSID="$1"; WEP="$2"
 [ -n "$ESSID" ] || { echo "usage: $0 [-i ROOTFS.IMG] ESSID [wepkey]"; exit 1; }

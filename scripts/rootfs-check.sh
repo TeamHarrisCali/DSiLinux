@@ -2,7 +2,7 @@
 # Checks the ext2 root image on the SD card (read-only check). Usage: scripts/rootfs-check.sh [ROOTFS.IMG] [-y to repair]
 # DSLinux never unmounts the image (power-off, resets and freezes leave it unclean), so metadata can be left half written: after a
 # freeze or a hard reset run this with -y BEFORE writing to the image from the PC (add-roms.sh, set-wifi.sh and doom/install.sh refuse to).
-IMG=/run/media/sharris/1419-260A/linux/ROOTFS.IMG
+. "$(dirname "$0")/card.sh"
 [ -n "$1" ] && [ "$1" != "-y" ] && { IMG="$1"; shift; }
 if [ "$1" = "-y" ]; then exec e2fsck -fy "$IMG"; fi
 e2fsck -fn "$IMG" > /dev/null 2>&1 && { echo "image clean"; exit 0; }

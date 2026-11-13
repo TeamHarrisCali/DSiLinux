@@ -521,3 +521,22 @@ Symptom: "ERROR: No such user root!" on the text console before the first prompt
 w97m (user, photo): the bring-up reaches `step 99`, chip interrupt rounds grow slowly (20 per second, ie 40bb, if c840 = timer and beacon interrupts), no freeze, the user's scan found networks. w97n: **Start > Network** with Wi-Fi scan / Wi-Fi connect / Wi-Fi status / SSH server (scripts `/boot/wifi-*`, each started in an `nxterm` window that stays open): connect asks the network name and WEP key the first time and keeps them in `/home/wifi.conf` (`rm` it to change), then `iwconfig nds essid/key`, `udhcpc -n -q -i nds`; the SSH server script makes the Dropbear host key once and starts `dropbear` (key login only if `/home/.ssh/authorized_keys` exists). Save log (and the 10 s autolog) now also records `ifconfig nds`, `iwconfig nds`, `/proc/net/route` and `/proc/net/arp` in `DSILOG.TXT`, so a session can be read from the card. Dropbear 0.48 is old: from this PC use `ssh -o KexAlgorithms=+diffie-hellman-group1-sha1 -o HostKeyAlgorithms=+ssh-rsa -o PubkeyAcceptedAlgorithms=+ssh-rsa -o Ciphers=+aes128-cbc -o MACs=+hmac-sha1 root@IP` (client OpenSSH 10.6 still has all of these); keys must be RSA. Not yet run on the console beyond the bring-up.
 
 w97n result (card log, user: "nothing happens when clicking wifi"): `dsdesk: started /boot/nxterm /boot/wifi-scan` was logged twice, so the menu worked, but no window stayed: `nxterm` runs its argument with `execvp()`, uClibc's `execvp()` does not fall back to the shell for a script without a binary header (the kernel has no `#!` support here either: scripts only run because the shell interprets them), so the child failed at once and the window closed. w97o: dsdesk starts `nxterm /bin/sh script`. The same log shows the Wi-Fi interface is healthy: `nds` with the console's own MAC address (Nintendo A4:C0:E1:...), no errors; `iwconfig` warns that the driver speaks wireless extensions v19 and the tool v17 ("some things may be broken": `iwlist nds scan` did work for the user).
+
+### w97p: organisation, UI and speed (2026-11-12)
+
+- **Workflow:** `scripts/release.sh TAG [-t file...] [-o desc] [-n]` replaces the hand routine (make in the container, DSi packaging, the 4 MiB check,
+  archiving the previous ROM, image check, copy to the card with checksum, removal of older ROMs from the card root); `scripts/card.sh` holds the card's
+  mount point for all card scripts; build logs live in `out/logs/`.
+- **Start menu:** every entry has a 9x9 icon (terminal, folder, page, clock, camera, speaker, signal bars, tiles, game pad, gear, power), groups too.
+  Each level is drawn on a pixmap and copied in one request: drawn on the window it appeared entry by entry (a user photo caught "Shut down" at the
+  top of a half drawn menu). Colours are shared with the taskbar to stay within the 16 graphics contexts of `w95.h`.
+- **Wi-Fi tray:** `SIOCGIFFLAGS` / `SIOCGIFADDR` on `nds` every ~3 s (no server round trip): no icon when down, grey bars when up without an address,
+  black bars when online.
+- **Game Boy renderer:** background and window are drawn a tile row at a time: the two bit planes are spread through a table into a 16 bit word of
+  2 bit colours, and a whole tile row becomes two table loads and two 4 byte stores (palette table rebuilt only when the palette changes).
+  PC check: identical frames at 600/1500/3000/5000/8000 frames of Pokemon Yellow with scripted input and in the test ROM; drawing 0.53 s -> 0.14 s
+  per 6000 frames in the profile, the whole core about 30% faster. (Pitfall found on the way: the PC harness writes the game's `.sav`, so two runs
+  only compare when it is deleted in between.)
+- **Docs:** README rewritten (current status, workflow, scripts), `docs/USER-GUIDE.md` (controls, every program, Wi-Fi/SSH, card scripts, after a
+  freeze), `docs/DSI-NOTES.md` (everything learned about the DSi for future development).
+- Not yet run on the console: all of the above (w97p).

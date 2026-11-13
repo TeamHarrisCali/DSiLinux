@@ -1,7 +1,7 @@
 #!/bin/sh
 # Puts dsdoom, the shareware WAD and default.cfg into /home/doom inside the DSLinux root image on the SD card (card in the PC).
 # Usage: doom/install.sh [-i ROOTFS.IMG] [path/to/doom1.wad]   (the binary comes from out/doom-build/dsdoom; without a WAD the one already in the image stays)
-IMG=/run/media/sharris/1419-260A/linux/ROOTFS.IMG
+. "$(dirname "$0")/../scripts/card.sh"
 if [ "$1" = "-i" ]; then IMG="$2"; shift 2; fi
 WAD="$1"
 cd "$(dirname "$0")/.."
