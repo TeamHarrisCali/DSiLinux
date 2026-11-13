@@ -6,7 +6,7 @@ It starts from TWiLight Menu++ (through Unlaunch). **Nothing is ever written to 
 outside two files in `sd:/linux/` (enforced by the ARM7, see below).
 
 This repository holds the patches, build scripts and notes. The source tree is a separate clone of
-[ipwndev/DSLinux](https://github.com/ipwndev/DSLinux) in `work/dslinux` (git-ignored); the changes are in `patches/` (98 patches, in order).
+[ipwndev/DSLinux](https://github.com/ipwndev/DSLinux) in `work/dslinux` (git-ignored); the changes are in `patches/` (99 patches, in order).
 
 - **Using it:** [docs/USER-GUIDE.md](docs/USER-GUIDE.md): buttons, the desktop, every app, Wi-Fi and SSH, the card scripts, what to do after a freeze.
 - **Developing for it:** [docs/DSI-NOTES.md](docs/DSI-NOTES.md): everything learned about the DSi hardware and this system (registers, limits, pitfalls, numbers).

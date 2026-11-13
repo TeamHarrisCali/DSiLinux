@@ -632,3 +632,13 @@ exactly when the access point beacons, which is the likeliest reason it was neve
 as BlocksDS dswifi does, and records the transmit buffer's header after each send (the chip writes the result there) and the chip's
 counters 0x1B0-0x1DE (0x1C0 = transmit errors) in `/proc/dswifistat`. Listening with the PC's Wi-Fi is not possible here: it is the PC's
 only network link and sits on a 5 GHz channel.
+
+### w97v results: the hotspot was not in the scan (w97x)
+
+User: "didn't even see the hotspot this time". Log: Wi-Fi switched on twice, 161 frames received from other networks during the scans, no
+network chosen, nothing sent. w97v changed only how frames are sent, not receiving or scanning, so the hotspot was most likely not on
+2.4 GHz at that moment (Android switches an unused hotspot off after a while, and some phones move it to 5 GHz). The log did not say
+what the scan found: the Wi-Fi window now writes every scanned network to `/tmp/dsnet.log` (patch 0099), which the log includes.
+w97w was built with a compile error in that change (a brace lost while moving a function): the top-level make goes on and the old
+`dssettings` was packaged, and release.sh only printed the error. release.sh now stops on any compile error. w97x is the corrected build.
+The send-at-once change (w97v) is still untested against an access point.

@@ -32,7 +32,12 @@ echo "== 1. build ($TAG)"
 T=""
 for f in $TOUCH; do T="$T $f"; done
 scripts/in-container.sh "cd /work && ${T:+touch$T &&} make > /out/logs/$TAG-build.log 2>&1" || { echo "BUILD FAILED, see out/logs/$TAG-build.log"; grep -n "error" out/logs/$TAG-build.log | grep -v "ignored\|roach" | tail -5; exit 1; }
-grep -n ": error:\|undefined reference" out/logs/$TAG-build.log | grep -v "roach" | head -5 || true
+# the top-level make goes on after a program fails to compile and the old binary is packaged: stop here instead (w97w shipped a stale
+# dssettings that way)
+if grep -n ": error:\|undefined reference" out/logs/$TAG-build.log | grep -v "roach" | head -5 | grep .; then
+	echo "BUILD HAD ERRORS (above), see out/logs/$TAG-build.log"
+	exit 1
+fi
 
 echo "== 2. package"
 scripts/make-variants.sh > /dev/null 2>&1
