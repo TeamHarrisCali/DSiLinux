@@ -6,7 +6,7 @@ It starts from TWiLight Menu++ (through Unlaunch). **Nothing is ever written to 
 outside two files in `sd:/linux/` (enforced by the ARM7, see below).
 
 This repository holds the patches, build scripts and notes. The source tree is a separate clone of
-[ipwndev/DSLinux](https://github.com/ipwndev/DSLinux) in `work/dslinux` (git-ignored); the changes are in `patches/` (99 patches, in order).
+[ipwndev/DSLinux](https://github.com/ipwndev/DSLinux) in `work/dslinux` (git-ignored); the changes are in `patches/` (100 patches, in order).
 
 - **Using it:** [docs/USER-GUIDE.md](docs/USER-GUIDE.md): buttons, the desktop, every app, Wi-Fi and SSH, the card scripts, what to do after a freeze.
 - **Developing for it:** [docs/DSI-NOTES.md](docs/DSI-NOTES.md): everything learned about the DSi hardware and this system (registers, limits, pitfalls, numbers).
@@ -29,7 +29,7 @@ This repository holds the patches, build scripts and notes. The source tree is a
 | Games: 3D Dodge, 3D Breakout, Tron, 3D Maze, 2048, Sokoban, Sudoku, Life, Paint | console | |
 | Game Boy emulator (Peanut-GB) | console: runs, about 22 of 60 frames per second (w97f) | w97g sound and frame clock, w97p tile-row renderer (drawing 4x faster on a PC, identical frames): **not yet run** |
 | DOOM (doomgeneric, shareware WAD) | console: runs, "a little sluggish" | Lives in `ROOTFS.IMG` (`/home/doom`), not in the ROM |
-| Wi-Fi (the DS chip: open or WEP networks, 802.11b) | console: radio up, scan finds networks (w97m); the menu scan showed nothing (w97r) | w97s: scan lists networks on the console; joining failed (no retry in the ARM7 code). w97t: join retries work, the hotspot never answered; w97u: every frame "sent", nothing came back; w97v: frames sent at once instead of at beacon time: **not yet run** |
+| Wi-Fi (the DS chip: open or WEP networks, 802.11b) | console: radio up, scan finds networks (w97m); the menu scan showed nothing (w97r) | w97s: scan lists networks on the console; joining failed (no retry in the ARM7 code). w97t: join retries work, the hotspot never answered; w97u: every frame "sent", nothing came back; w97v-x: still no answer, radio not on the chosen channel; w97y: channel table bug fixed (RF type 3): **not yet run** |
 | Power off | console | |
 | The DSi's Atheros Wi-Fi (WPA2), DSP | not attempted | |
 

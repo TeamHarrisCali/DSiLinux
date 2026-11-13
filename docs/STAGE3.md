@@ -642,3 +642,16 @@ what the scan found: the Wi-Fi window now writes every scanned network to `/tmp/
 w97w was built with a compile error in that change (a brace lost while moving a function): the top-level make goes on and the old
 `dssettings` was packaged, and release.sh only printed the error. release.sh now stops on any compile error. w97x is the corrected build.
 The send-at-once change (w97v) is still untested against an access point.
+
+### w97x results and the channel table bug (w97y)
+
+w97x, hotspot now on channel 11: scan listed only two networks (the hotspot, open, rates `b11`; a hidden WPA network on channel 6), all
+with signal 0. Joining: `auth 33`, `tx-done 33`, transmit header word 0 = 1 (sent), and `rx from-ap 0`: tuned to channel 11 the console
+heard nothing at all from the hotspot, while on channel 6 (w97u) it had heard 156 of its beacons. So the radio was not really on the
+chosen channel. With the user's permission the Wi-Fi calibration section of their firmware dump (`dsfirmware.bin`, read only, nothing
+copied into the repository) was decoded: RF type 3, 41 initial RF bytes, then the channel table: a count byte (2 baseband entries:
+registers 0x1E, 0x26), then 2 RF entries (RF register 1, the coarse frequency 0x4B-0x4D by channel; RF register 2, the fine part).
+DSLinux's `Wifi_SetChannel` walked it with `i <= flash[0x43]` baseband entries (3): it wrote RF entry 0's values into baseband register 1,
+then RF register 2 and garbage (0xFF) into RF register 0xFF, and never RF register 1. dswifi reads the count byte. Fixed (patch 0100).
+This explains every Wi-Fi symptom so far: few networks in scans, the channel 6 hotspot heard only sometimes, nothing on channel 11, and no
+access point ever hearing the console.

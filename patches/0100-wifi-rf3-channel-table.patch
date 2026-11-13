@@ -1,0 +1,41 @@
+From 9771d640e4bcd2af80ec774918bc622c4bfeb1db Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Fri, 13 Nov 2026 01:10:18 -0600
+Subject: [PATCH] Wi-Fi: fix the RF type 3 channel table walk
+
+The baseband entry count is the byte before the table (as dswifi reads it),
+not the RF entry count + 1. On the DSi (2 baseband, 2 RF entries) the old
+loop wrote RF entry 0 into baseband register 1, never set RF register 1
+(coarse frequency) and wrote 0xFF to RF register 0xFF: the radio never
+tuned to the chosen channel.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ linux-2.6.x/arch/arm/mach-nds/arm7/wifi.c | 9 ++++++++-
+ 1 file changed, 8 insertions(+), 1 deletion(-)
+
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/wifi.c b/linux-2.6.x/arch/arm/mach-nds/arm7/wifi.c
+index 63dd0de8f..cdb4cad11 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/arm7/wifi.c
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/wifi.c
+@@ -316,9 +316,16 @@ static void Wifi_SetChannel(int channel)
+ 		return;
+ 
+ 	if (ReadFlashByte(0x40) == 3) {
++		/* The firmware's channel table: after the 0x42 initial RF bytes at 0xCE comes a count of baseband entries, then those
++		 * entries, then 0x43 RF entries; each entry is a register number and 14 per-channel values. The original loop took the RF
++		 * count + 1 as the baseband count: on this DSi (2 and 2) it wrote RF entry 0 into baseband register 1, never set RF
++		 * register 1 (the coarse frequency) and wrote 0xFF into RF register 0xFF, so the radio never tuned to the chosen channel. */
++		int nbb;
++
+ 		n=ReadFlashByte(0x42);
+ 		n+=0xCF;
+-		for(i=0;i<=ReadFlashByte(0x43);i++) {
++		nbb = ReadFlashByte(n - 1);
++		for(i=0;i<nbb;i++) {
+ 			Wifi_BBWrite(ReadFlashByte(n),ReadFlashByte(n+channel+1));
+ 			n+=15;
+ 		}
+-- 
+2.56.0
+

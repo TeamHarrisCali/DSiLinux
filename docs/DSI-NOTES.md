@@ -128,6 +128,14 @@ Build numbers (w95x, w97m...) point into [STAGE3.md](STAGE3.md), where the story
 - Hence `/proc/dswifi` (w97s): reading it starts a scan, waits for it, asks the ARM7 for its AP list, invalidates the cache over the list and prints
   one line per network, `bssid channel open|wep signal name`. The Wi-Fi window (`dsnet.c`, inside `dssettings wifi`) and `/boot/wifi-scan` use it; no wireless-extensions
   tool is involved. **built, not yet run on the console**
+- **Channel tuning (RF type 3, which this DSi XL's firmware reports at 0x40):** after the 0x42 initial RF bytes at 0xCE comes one byte
+  with the number of baseband entries, then those entries, then 0x43 RF entries; each entry is a register number plus 14 per-channel
+  values. Here: 2 baseband entries (registers 0x1E, 0x26), 2 RF entries (RF registers 1 = coarse frequency, 2 = fine). DSLinux's original
+  loop took 0x43 + 1 as the baseband count, so RF register 1 was never set per channel: the radio did not really tune, scans found few
+  networks, and no access point heard the console. Fixed in w97y (as dswifi reads it). **read from the user's firmware dump** (the fix is
+  not yet run on the console)
+- Transmissions: the original driver started queued frames only from the beacon-time interrupt (the `W_TXREQ` 0xAE writes were commented
+  out); since w97v they start at once, as in dswifi. **built**
 - The Atheros chip (AR6013G on DWM-W024) sits behind the second SDIO controller at `0x04004A00` (its registers answer). BlocksDS's DSi-mode driver
   (`dswifi`, `arm7/twl/`, MIT, about 130 KB) runs on the ARM7 and does not upload firmware: it relies on the chip already holding it. Not tried. **docs/measured**
 - SSH: the image has Dropbear 0.48 (RSA host keys, `diffie-hellman-group1-sha1`, `aes128-cbc`, `hmac-sha1`). A current OpenSSH client connects with
