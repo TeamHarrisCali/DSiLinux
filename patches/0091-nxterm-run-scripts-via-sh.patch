@@ -1,0 +1,32 @@
+From 6fc2841e7050870ed9beadb12f57387932cdb6e3 Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Thu, 12 Nov 2026 23:19:29 -0600
+Subject: [PATCH] dsdesk: menu scripts run as 'nxterm /bin/sh script' (nxterm's
+ execvp cannot run a file without a binary header, so the Network entries
+ opened and closed a window at once)
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ user/microwin/src/demos/nanox/dsdesk.c | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/user/microwin/src/demos/nanox/dsdesk.c b/user/microwin/src/demos/nanox/dsdesk.c
+index 5eea7051f..3e223bbca 100644
+--- a/user/microwin/src/demos/nanox/dsdesk.c
++++ b/user/microwin/src/demos/nanox/dsdesk.c
+@@ -186,7 +186,11 @@ static void launch(const char *prog, const char *arg)
+ 	exec_errno = 0;
+ 	pid = vfork();
+ 	if (pid == 0) {
+-		if (arg)
++		if (arg && !strcmp(prog, "/boot/nxterm"))
++			/* a script in a terminal window: nxterm uses execvp(), which (unlike the shell) cannot run a file with no binary
++			 * header, so the shell is started with the script as its argument */
++			execl(prog, prog, "/bin/sh", arg, (char *)NULL);
++		else if (arg)
+ 			execl(prog, prog, arg, (char *)NULL);
+ 		else
+ 			execl(prog, prog, (char *)NULL);
+-- 
+2.56.0
+
