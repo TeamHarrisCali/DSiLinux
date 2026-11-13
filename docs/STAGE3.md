@@ -703,3 +703,12 @@ re-login, data tx 35 / rx 50, the chip's receive-error counters climbing: the li
 request offered 15 rates, "1, 2, 5.5 x 13" (a rates element may hold 8), and so told the phone the console takes 5.5 Mbit/s, which the DS
 chip cannot receive. Fixed (patch 0104): the first request offers 1 and 2 Mbit/s only; after a refusal the next ones add the AP's basic
 rates (dswifi's list). The event log shows the offer: `assoc-sent(2)` = 1-2 only, `assoc-sent(260+)` = with the basic rates.
+
+### w98c results
+
+Join: `assoc-sent(2)` (1-2 Mbit/s only) was refused with status **18** ("basic rates not supported": the hotspot requires 5.5/11 Mbit/s as
+basic rates), then `assoc-sent(260)` (4 rates, with its basic rates) was accepted, as designed. DHCP got a lease on the **first** udhcpc
+run (3 discovers, 2 selects; w98b needed three runs), gateway in the ARP table, data tx 19 / rx 25, no deauthentication. The phone's own
+MAC changes per hotspot session (the gateway's MAC differs from w98b). Whether the ping then worked is not in the log (the terminal's
+output is not saved). The hotspot insisting on 5.5/11 Mbit/s as basic rates means it may still send to the console at rates the DS chip
+cannot receive, relying on its retries at lower rates.
