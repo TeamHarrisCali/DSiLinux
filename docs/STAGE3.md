@@ -860,3 +860,12 @@ channel 1, signal -58`, then no packet at all from the firmware, no connect even
 without carrier (0 packets out), ping: network unreachable. w98n had connected twice with the same commands. w98p (patch 0117) adds a
 firmware health check (failure state at host interest +0x04 every 3 s), the count and the last 8 received mailbox packets in
 /proc/dsiwifi2, a connect retry after 15 s without an event, and the test waits up to 40 s for CONNECTED before DHCP.
+
+### w98p: connected late, data flowing (w98q)
+
+w98p's /home/wlan0-test.log: the firmware stayed healthy (failure state 0); the connect event came only after the third connect command,
+past the test's 40 s wait, so DHCP ran on a link without carrier. 291 mailbox packets had arrived, mostly BSS info events (227 before
+the first retry): the scan never stops reporting beacons, and the byte-by-byte receive lagged behind so far that the connect was delayed.
+After the connect, data packets came in (33 passed to the network stack; the ring shows endpoint 2 packets). w98q (patch 0118): BSS filter
+"none" after the scan and during the connect, up to 16 packets per round without pausing while more wait, the test waits up to 90 s and
+retries DHCP once. gcc 4.0.4 crashed on upload() again until the helpers it calls were made noinline.
