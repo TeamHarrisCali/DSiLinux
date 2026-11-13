@@ -50,7 +50,7 @@ How the chip is talked to (AR6000 family, as in Linux `ath6kl` / the old `ar6000
   The existing SD code (`sdmmc.c`, TMIO) and BlocksDS's `tmio.twl.c` are the models. **Every wait bounded** (a stuck ARM7 freezes the DSi).
 - **Everything else in the kernel on the ARM9**: BMI, HTC, WMI, the net device, the handshake. It is easier to debug there (printk, /proc),
   and the ARM9 has the RAM and the speed (PBKDF2 4096 rounds: a few seconds on the ARM9 at 134 MHz; cache the PSK per network).
-- **Firmware**: never in this repository or the ROM. A script copies it from the user's own SDNAND (`scripts/add-dsi-wifi-firmware.sh`,
+- **Firmware**: never in this repository or the ROM. A script copies it from the user's own SDNAND (`scripts/add-dsi-wifi-fw.sh`,
   reading `title/0003000f/484e4341/content/*.app` from a path the user gives) into `ROOTFS.IMG` as `/lib/firmware/dsi-wifi.bin`; the driver
   reads it at `ifconfig wlan0 up`. If the chip already runs a firmware (WMI_READY arrives without BMI), skip the upload.
 - **Only one radio at a time**: `nds` (DS chip) and `wlan0` (Atheros) exclude each other (antenna switch, power); bringing one up takes the
