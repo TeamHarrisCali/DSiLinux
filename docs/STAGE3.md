@@ -744,3 +744,11 @@ is split into four (antenna, RTC clock output, power chip, SCFG_WL as a 16-bit w
 results so a later read of /proc/dsiwifi2 shows where the run really ended ("run finished" / "NOT finished").
 w98f is on the card together with the programs moved out of the ROM (w98e): install-apps.sh wrote all 14 into ROOTFS.IMG /usr/bin; the
 image checks clean.
+
+### w98f result: no step reported; live progress (w98g)
+
+w98f: `dsisd: ARM7 did not answer (cmd 13)` twice, each followed by "step 0", and log sections missing again. With the block now cleared
+first, "step 0" meant the ARM7 had not copied anything back: w98f's run wrote its results into its own copy and handed them over only at the
+end, so a run that hangs or takes over 30 s shows nothing (a design mistake). w98g (patch 0108): the run writes each step straight into the
+request block, and the ARM9 checks it every second while waiting and logs `dsiwifi2: ARM7 at step N after M s`, so the kernel log shows the
+timeline even if the ARM7 never finishes.
