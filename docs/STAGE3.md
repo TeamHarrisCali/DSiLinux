@@ -811,3 +811,13 @@ to 0x524C00, D written again and B (dataset) written and read back identical, hi
 an HTC header (endpoint 0, 16-byte payload), the firmware's HTC "ready" message. **Steps 1-3 of docs/ATHEROS-PLAN.md are verified on the
 console:** DSLinux brings up the DSi's own Wi-Fi chip, uploads the console's own firmware and starts it. Next: step 4, HTC (read the ready
 message, connect the WMI control and data services) and WMI (the ready event with the MAC address, then a scan).
+
+### Step 4: HTC, WMI and a first scan (w98l)
+
+w98l (patch 0113) continues after "ready": it reads the waiting HTC ready message, connects the five HTC services with dswifi's bytes,
+sends setup complete, waits for the WMI ready event (the chip's MAC address) and the regulatory domain event, writes the WMI protocol
+version (3) where host interest +0 points, sets scan parameters, turns the firmware's debug log off, then scans channels 1-13 one at a time
+as dswifi does (channel, scan parameters, BSS filter "all", start scan, BSS info events until scan complete). Each BSS info event gives
+channel, RSSI, SNR, BSSID and the beacon, from which the SSID and the security (open, WEP from the privacy bit, WPA from the vendor element,
+WPA2 from the RSN element) are read. The ARM7 moves mailbox packets byte by byte (CMD52), slow but simple; block transfers can come with
+the data path.
