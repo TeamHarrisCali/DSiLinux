@@ -151,6 +151,7 @@ The console's own layout (boot chain, NAND, installed titles, firmware chip, BIO
   request offers 1 and 2 Mbit/s only, and the access point's basic rates only after a refusal. **code** (not yet run on the console)
 - Transmissions: the original driver started queued frames only from the beacon-time interrupt (the `W_TXREQ` 0xAE writes were commented
   out); since w97v they start at once, as in dswifi. **built**
+- A plan for driving the Atheros chip (WPA2, 802.11g) is in [ATHEROS-PLAN.md](ATHEROS-PLAN.md) (not started).
 - The Atheros chip (AR6013G on DWM-W024) sits behind the second SDIO controller at `0x04004A00` (its registers answer). BlocksDS's DSi-mode driver
   (`dswifi`, `arm7/twl/`, MIT, about 130 KB) runs on the ARM7 and does not upload firmware: it relies on the chip already holding it. Not tried. **docs/measured**
 - SSH: the image has Dropbear 0.48 (RSA host keys, `diffie-hellman-group1-sha1`, `aes128-cbc`, `hmac-sha1`). A current OpenSSH client connects with
