@@ -844,3 +844,11 @@ LLC/SNAP, EtherType), and every 20 ms up to 8 received packets are handled (WMI 
 sequence; the connect event turns the carrier on. Unknown WMI events are now logged (for the scan's channel question). The test (Start >
 Network > DSi Wi-Fi test) does all of it and then DHCP and pings, with the output in the card log. gcc 4.0.4 crashed ("unrecognizable
 insn") on upload() until its part tables were made static.
+
+### w98n: CONNECTED (w98o)
+
+w98n on the console, test run twice: each time the firmware upload, HTC/WMI and scan (9 and 11 networks), then `connect: GuestNet,
+channel 1` and the firmware's **WMI connect event: CONNECTED on channel 1** (the open network GuestNet), followed by event 0x1008
+(neighbour report). **The DSi's own Wi-Fi chip joined a network under DSLinux.** The card log lost the block that held the DHCP and ping
+results (again a contiguous part missing). Some scan entries were garbled (SNR 253, RSSI 158). w98o (patch 0116): the test writes its
+output and a copy of dmesg into /home (read from the image with debugfs), scan entries with SNR < 16 or > 127 are dropped.

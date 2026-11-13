@@ -1,0 +1,89 @@
+From e7bef15df1cf86603d6e0895c4625cfc5ba00904 Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Fri, 13 Nov 2026 11:41:09 -0600
+Subject: [PATCH] DSi Wi-Fi test output in /home; scan drops garbled entries
+
+w98n connected (CONNECTED on channel 1, twice) but the card log lost the
+block with the DHCP and ping results. The test now writes its output and
+a copy of dmesg into /home (wlan0-test.log, wlan0-dmesg.txt), readable
+from the image on the PC. The connect log line is one line; BSS entries
+with SNR < 16 (as dswifi) or > 127 (garbled) are dropped.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ linux-2.6.x/arch/arm/mach-nds/dsiwifi.c | 12 ++++++++----
+ vendors/Nintendo/DSI/logbody            |  2 +-
+ vendors/Nintendo/DSI/wifi-dsi-test      |  6 ++++--
+ 3 files changed, 13 insertions(+), 7 deletions(-)
+
+diff --git a/linux-2.6.x/arch/arm/mach-nds/dsiwifi.c b/linux-2.6.x/arch/arm/mach-nds/dsiwifi.c
+index 0f60c227f..5ca37a40e 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/dsiwifi.c
++++ b/linux-2.6.x/arch/arm/mach-nds/dsiwifi.c
+@@ -247,6 +247,8 @@ static void bss_info(const unsigned char *d, int len)
+ 	memset(&n, 0, sizeof(n));
+ 	n.channel = wifi_mhz_to_channel(d[0] | (d[1] << 8));
+ 	n.snr = d[3];
++	if (n.snr < 0x10 || n.snr > 0x7F)		/* weak or garbled (w98n saw SNR 253, RSSI 158): dswifi drops SNR < 16 too */
++		return;
+ 	n.rssi = (short)(d[4] | (d[5] << 8));
+ 	memcpy(n.bssid, d + 6, 6);
+ 	strcpy(n.sec, (d[16 + 10] & 0x10) ? "wep" : "open");	/* capability: privacy */
+@@ -664,10 +666,12 @@ static void do_connect(void)
+ 		lg(conn_req[0] ? "connect: no open network of that name in the scan\n" : "connect: no open network in the scan\n", 0, 0, 0);
+ 		return;
+ 	}
+-	lg("connect: channel %u, signal %d, %u-character name\n", n->channel, n->rssi, strlen(n->ssid));
+-	lgs("  name: ");
+-	lgs(n->ssid);
+-	lgs("\n");
++	{
++		char line[80];
++
++		snprintf(line, sizeof(line), "connect: %s, channel %d, signal %d\n", n->ssid, n->channel, n->rssi);
++		lgs(line);
++	}
+ 	memset(b, 0, sizeof(b));
+ 	b[0] = 4;						/* BSS filter: the current beacon */
+ 	mbox_out(1, 1, WMI_SET_BSS_FILTER_CMD, b, 8, &bad);
+diff --git a/vendors/Nintendo/DSI/logbody b/vendors/Nintendo/DSI/logbody
+index c38684df8..2ba839987 100644
+--- a/vendors/Nintendo/DSI/logbody
++++ b/vendors/Nintendo/DSI/logbody
+@@ -15,7 +15,7 @@ ifconfig nds 2>&1
+ iwconfig nds 2>&1
+ echo "--- wlan0 (DSi Wi-Fi chip) ---"
+ ifconfig wlan0 2>&1
+-[ -f /tmp/wlan0-test.log ] && /usr/bin/cat /tmp/wlan0-test.log
++[ -f /home/wlan0-test.log ] && /usr/bin/cat /home/wlan0-test.log
+ echo "--- /proc/dsiwifi2 (DSi Wi-Fi chip test) ---"
+ /usr/bin/cat /proc/dsiwifi2 2>&1
+ echo "--- /proc/dswifistat (joining) ---"
+diff --git a/vendors/Nintendo/DSI/wifi-dsi-test b/vendors/Nintendo/DSI/wifi-dsi-test
+index acf52f2fd..febf26f99 100644
+--- a/vendors/Nintendo/DSI/wifi-dsi-test
++++ b/vendors/Nintendo/DSI/wifi-dsi-test
+@@ -4,7 +4,7 @@
+ # network (or the one named as the first argument), DHCP, ping. Without it: one bring-up run. The DS Wi-Fi is switched off first (both
+ # chips share the antenna). Everything goes into the card log. wlan0 stays up afterwards ("ifconfig wlan0 down" gives the antenna back).
+ F=/usr/lib/firmware/dsi-wifi.bin
+-L=/tmp/wlan0-test.log
++L=/home/wlan0-test.log		# in the image: readable on the PC even when the card log misses parts
+ killall udhcpc 2>/dev/null
+ ifconfig nds down 2>/dev/null
+ if [ ! -f $F ]
+@@ -31,8 +31,10 @@ ifconfig wlan0 >> $L 2>&1
+ echo "ping..."
+ ping -c 3 8.8.8.8 >> $L 2>&1
+ ping -c 3 google.com >> $L 2>&1
++cat /proc/dsiwifi2 >> $L
++dmesg > /home/wlan0-dmesg.txt
++sync
+ /usr/bin/cat $L
+-cat /proc/dsiwifi2
+ /bin/sh /boot/savelog
+ echo "-- saved in the card log (sd:/linux/DSILOG.TXT) --"
+ exec /bin/sh
+-- 
+2.56.0
+
