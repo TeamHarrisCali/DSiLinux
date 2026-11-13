@@ -1,0 +1,815 @@
+From f71b2431efe9f1a94c43d8deb4589114233520b1 Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Fri, 13 Nov 2026 12:05:45 -0600
+Subject: [PATCH] wlan0: WPA2-PSK (4-way handshake, AES/TKIP group key)
+
+- dsiwpa.c: SHA-1, HMAC-SHA1, PBKDF2 (PMK), the PTK PRF, the EAPOL MIC,
+  AES-128 and RFC 3394 key unwrap. Written for gcc 4.0.4: noinline
+  helpers, memcpy instead of struct copies, word-wise XOR (byte-wise
+  code crashed the compiler under -mswp-byte-writes). DSIWPA_HOST builds
+  it on a PC for the test vectors in testbed/wpa_test.sh.
+- dsiwifi.c: "psk PASS" (8-63 characters, never logged, wiped at
+  wlan0 down); connect uses auth mode WPA2-PSK, pairwise AES, the
+  group cipher from the beacon's RSN element. EAPOL messages 1 and 3
+  are answered (2 and 4), the MIC is checked, the GTK is unwrapped
+  with the KEK, both keys are installed with ADD_CIPHER_KEY. Group
+  rekeys are answered. No data goes out before the keys are in.
+- wifi-dsi-test asks for the network name and password, and runs
+  /usr/bin/wpatest (the crypto as built for the DSi) first.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ linux-2.6.x/arch/arm/mach-nds/Makefile  |   2 +-
+ linux-2.6.x/arch/arm/mach-nds/dsiwifi.c | 259 +++++++++++++++++-
+ linux-2.6.x/arch/arm/mach-nds/dsiwpa.c  | 340 ++++++++++++++++++++++++
+ vendors/Nintendo/DSI/wifi-dsi-test      |  18 +-
+ 4 files changed, 606 insertions(+), 13 deletions(-)
+ create mode 100644 linux-2.6.x/arch/arm/mach-nds/dsiwpa.c
+
+diff --git a/linux-2.6.x/arch/arm/mach-nds/Makefile b/linux-2.6.x/arch/arm/mach-nds/Makefile
+index 39ee3cd32..721a5dfd0 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/Makefile
++++ b/linux-2.6.x/arch/arm/mach-nds/Makefile
+@@ -4,7 +4,7 @@
+ 
+ # Object file lists.
+ 
+-obj-y                += arch.o irq.o time.o button.o fifo.o rtc.o volume.o dsiwifi.o disable-itcm-writes.o
++obj-y                += arch.o irq.o time.o button.o fifo.o rtc.o volume.o dsiwifi.o dsiwpa.o disable-itcm-writes.o
+ 
+ obj-$(CONFIG_NDS_TEXT_CONSOLE) += console.o
+ obj-$(CONFIG_NDS_SOUNDTEST) += soundtest.o
+diff --git a/linux-2.6.x/arch/arm/mach-nds/dsiwifi.c b/linux-2.6.x/arch/arm/mach-nds/dsiwifi.c
+index cd8ba155e..132bb190c 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/dsiwifi.c
++++ b/linux-2.6.x/arch/arm/mach-nds/dsiwifi.c
+@@ -37,11 +37,18 @@
+ #include <linux/delay.h>
+ #include <linux/wait.h>
+ #include <linux/completion.h>
++#include <linux/random.h>
+ #include <asm/uaccess.h>
+ 
+ extern int dsisd_twlwifi(unsigned int *out, int report);
+ extern int dsisd_twlop(unsigned int op, unsigned int addr, unsigned int arg, const unsigned char *data, unsigned int len,
+ 		       unsigned int *out);
++/* dsiwpa.c */
++void wpa_pmk(const char *pass, const unsigned char *ssid, unsigned int ssid_len, unsigned char pmk[32]);
++void wpa_ptk(const unsigned char pmk[32], const unsigned char *aa, const unsigned char *spa, const unsigned char *anonce,
++	     const unsigned char *snonce, unsigned char ptk[48]);
++void wpa_mic(const unsigned char kck[16], const unsigned char *frame, unsigned int len, unsigned char mic[16]);
++int wpa_unwrap(const unsigned char kek[16], const unsigned char *in, unsigned int len, unsigned char *out);
+ extern int dsisd_twlop_rx(unsigned int op, unsigned int addr, unsigned int arg, const unsigned char *data, unsigned int len,
+ 			  unsigned int *out, unsigned char *rxbuf);
+ 
+@@ -170,6 +177,7 @@ static noinline void write_part(const char *name, unsigned int addr, const unsig
+ #define HTC_MSG_CONN_SVC_RESP	3
+ #define HTC_MSG_SETUP_COMPLETE	4
+ #define WMI_CONNECT_CMD		0x0001
++#define WMI_ADD_CIPHER_KEY_CMD	0x0016
+ #define WMI_DISCONNECT_CMD	0x0003
+ #define WMI_SYNCHRONIZE_CMD	0x0004
+ #define WMI_CREATE_PSTREAM_CMD	0x0005
+@@ -200,6 +208,7 @@ static struct net2 {
+ 	unsigned char bssid[6];
+ 	int channel, rssi, snr;
+ 	char sec[5];			/* open, wep, wpa, wpa2 */
++	int group;			/* WPA2 group cipher: 4 AES (CCMP), 3 TKIP */
+ 	char ssid[33];
+ } nets[MAXNET];
+ static int nnets;
+@@ -263,8 +272,9 @@ static noinline void bss_info(const unsigned char *d, int len)
+ 			for (i = 0; i < l; i++)
+ 				n.ssid[i] = (e[2 + i] >= 32 && e[2 + i] < 127) ? e[2 + i] : '?';
+ 			n.ssid[l] = 0;
+-		} else if (id == 48) {			/* RSN */
++		} else if (id == 48) {			/* RSN: version, group cipher suite 00-0F-AC-x (4 CCMP, 2 TKIP), ... */
+ 			strcpy(n.sec, "wpa2");
++			n.group = (l >= 6 && e[7] == 2) ? 3 : 4;
+ 		} else if (id == 221 && l >= 4 && e[2] == 0x00 && e[3] == 0x50 && e[4] == 0xF2 && e[5] == 1 && strcmp(n.sec, "wpa2")) {
+ 			strcpy(n.sec, "wpa");		/* the WPA vendor element */
+ 		}
+@@ -287,11 +297,196 @@ static struct net_device_stats wstats;
+ static int session;		/* the chip runs its firmware and holds the antenna */
+ static unsigned int cur_hi;	/* host interest address of the running firmware */
+ static unsigned int rx_count, rx_ring[8], fail_state;	/* received packets (endpoint | id << 8 | length << 24 >> ...), firmware failure state */
++static int wpa2, keys_ok;			/* the current connection uses WPA2-PSK; its keys are installed */
++static int cur_group;				/* its group cipher */
++static char psk[64];				/* the passphrase (never logged; wiped at wlan0 down) */
++static unsigned char pmk[32], ptk[48], anonce[32], snonce[32], ap_mac[6];
+ static unsigned long conn_at, health_at;	/* when the last connect was sent (0 = none pending), the last health check */
+ static int conn_tries;
+ static int connected;
+ static int unknown_logged;
+ 
++/*
++ * WPA2-PSK 4-way handshake (after dswifi's arm7/twl/ath/wmi.twl.c, with the MIC of message 3 checked). An EAPOL-Key frame: version,
++ * type 3, length (BE), descriptor 2, key info (BE), key length, replay counter (8), nonce (32), IV (16), RSC (8), key ID (8),
++ * MIC (16), key data length (BE), key data. Key info bits: 0x0008 pairwise, 0x0040 install, 0x0080 ack, 0x0100 MIC, 0x0200 secure,
++ * 0x1000 encrypted key data; version 2 = HMAC-SHA1 MIC and AES key wrap.
++ */
++static unsigned char eapol[160];
++
++/* send an EAPOL-Key frame (key info, replay counter, nonce or none, key data) to the AP as a data packet (header word 0, 00 1C) */
++static noinline void eapol_out(unsigned int keyinfo, const unsigned char *replay, const unsigned char *nonce,
++			       const unsigned char *kd, unsigned int kdlen)
++{
++	unsigned int body = 95 + kdlen, flen = 4 + body, full, pl;
++	unsigned char mic[16];
++	int bad = 0;
++
++	memset(eapol, 0, sizeof(eapol));
++	eapol[0] = 1;					/* version (as dswifi) */
++	eapol[1] = 3;					/* EAPOL-Key */
++	eapol[2] = body >> 8;
++	eapol[3] = body & 0xff;
++	eapol[4] = 2;					/* RSN key descriptor */
++	eapol[5] = keyinfo >> 8;
++	eapol[6] = keyinfo & 0xff;
++	memcpy(eapol + 9, replay, 8);
++	if (nonce)
++		memcpy(eapol + 17, nonce, 32);
++	eapol[97] = kdlen >> 8;
++	eapol[98] = kdlen & 0xff;
++	if (kdlen)
++		memcpy(eapol + 99, kd, kdlen);
++	wpa_mic(ptk, eapol, flen, mic);			/* KCK = PTK bytes 0..15 */
++	memcpy(eapol + 81, mic, 16);
++
++	pl = 24 + flen;					/* data header with LLC/SNAP and EtherType 0x888E, then the frame */
++	full = (6 + pl + 0x7F) & ~0x7Fu;
++	memset(pkt, 0, full);
++	pkt[0] = 2;
++	pkt[2] = pl & 0xff;
++	pkt[3] = pl >> 8;
++	pkt[6] = 0x00;
++	pkt[7] = 0x1C;
++	memcpy(pkt + 8, ap_mac, 6);
++	memcpy(pkt + 14, mac, 6);
++	pkt[20] = (flen + 8) >> 8;
++	pkt[21] = (flen + 8) & 0xff;
++	pkt[22] = 0xAA; pkt[23] = 0xAA; pkt[24] = 0x03;
++	pkt[28] = 0x88; pkt[29] = 0x8E;
++	memcpy(pkt + 30, eapol, flen);
++	op(11, 0, full, pkt, full, &bad);
++}
++
++/* the keys into the firmware: pairwise (TK) and group, as dswifi's wmi_post_handshake() */
++static noinline void install_key(int idx, int type, int usage, const unsigned char *key, const unsigned char *rsc, int *bad)
++{
++	unsigned char b[45];
++	int klen = type == 3 ? 32 : 16;
++
++	memset(b, 0, sizeof(b));
++	b[0] = idx;
++	b[1] = type;
++	b[2] = usage;
++	b[3] = klen;
++	if (rsc)
++		memcpy(b + 4, rsc, 8);
++	if (type == 3) {				/* TKIP: dswifi swaps the two MIC keys */
++		memcpy(b + 12, key, 16);
++		memcpy(b + 12 + 16, key + 24, 8);
++		memcpy(b + 12 + 24, key + 16, 8);
++	} else {
++		memcpy(b + 12, key, 16);
++	}
++	b[44] = 3;					/* key_op_ctrl */
++	mbox_out(1, 1, WMI_ADD_CIPHER_KEY_CMD, b, 45, bad);
++}
++
++/* the GTK from the (decrypted) key data: KDE dd len 00-0F-AC 01, key ID info, reserved, key */
++static noinline int find_gtk(const unsigned char *kd, int len, int *keyid, const unsigned char **gtk)
++{
++	int i = 0;
++
++	while (i + 2 <= len) {
++		int t = kd[i], l = kd[i + 1];
++
++		if (t == 0xDD && l >= 6 + 16 && i + 2 + l <= len && kd[i + 2] == 0x00 && kd[i + 3] == 0x0F && kd[i + 4] == 0xAC &&
++		    kd[i + 5] == 0x01) {
++			*keyid = kd[i + 6] & 3;
++			*gtk = kd + i + 8;
++			return 0;
++		}
++		if (t == 0 && l == 0)
++			break;
++		i += 2 + l;
++	}
++	return -1;
++}
++
++static noinline void eapol_in(const unsigned char *f, int len)
++{
++	unsigned int keyinfo, flen, kdlen;
++	unsigned char mic[16], kd[128], copy[256];
++	const unsigned char *gtk;
++	int keyid, bad = 0, k;
++
++	if (len < 99 || f[1] != 3)
++		return;
++	flen = 4 + ((f[2] << 8) | f[3]);
++	keyinfo = (f[5] << 8) | f[6];
++	kdlen = (f[97] << 8) | f[98];
++	if (flen > (unsigned int)len || flen > sizeof(copy) || 99 + kdlen > flen)
++		return;
++	if ((keyinfo & 0x0108) == 0x0008 && (keyinfo & 0x0080)) {		/* message 1 of 4 */
++		static const unsigned char rsn_aes[22] = { 0x30, 0x14, 0x01, 0x00, 0x00, 0x0F, 0xAC, 0x04, 0x01, 0x00, 0x00, 0x0F, 0xAC,
++							   0x04, 0x01, 0x00, 0x00, 0x0F, 0xAC, 0x02, 0x00, 0x00 };
++		unsigned char rsn[22];
++
++		memcpy(rsn, rsn_aes, 22);
++		if (cur_group == 3)
++			rsn[7] = 0x02;				/* TKIP group cipher */
++		memcpy(anonce, f + 17, 32);
++		get_random_bytes(snonce, 32);
++		wpa_ptk(pmk, ap_mac, mac, anonce, snonce, ptk);
++		eapol_out(0x010A, f + 9, snonce, rsn, 22);
++		lg("  WPA2 handshake: message 1 received, 2 sent\n", 0, 0, 0);
++		return;
++	}
++	if (!(keyinfo & 0x0100) || !(keyinfo & 0x0080))
++		return;
++	/* messages 3 of 4 and group renewals carry a MIC: check it over the frame with the MIC field zeroed */
++	memcpy(copy, f, flen);
++	memset(copy + 81, 0, 16);
++	wpa_mic(ptk, copy, flen, mic);
++	if (memcmp(mic, f + 81, 16)) {
++		lg("  WPA2 handshake: MIC wrong (key info %04x): wrong password?\n", keyinfo, 0, 0);
++		return;
++	}
++	if (!(keyinfo & 0x1000) || kdlen < 24 || kdlen - 8 > sizeof(kd) || wpa_unwrap(ptk + 16, f + 99, kdlen, kd)) {
++		lg("  WPA2 handshake: key data not readable (key info %04x, %u bytes)\n", keyinfo, kdlen, 0);
++		return;
++	}
++	if (find_gtk(kd, kdlen - 8, &keyid, &gtk)) {
++		lg("  WPA2 handshake: no group key in message (key info %04x)\n", keyinfo, 0, 0);
++		return;
++	}
++	if (keyinfo & 0x0008) {
++		eapol_out(0x030A, f + 9, 0, 0, 0);		/* message 4 of 4 */
++		lg("  WPA2 handshake: message 3 received (MIC ok), 4 sent\n", 0, 0, 0);
++	} else {
++		eapol_out(0x0302, f + 9, 0, 0, 0);		/* group message 2 of 2 */
++		lg("  WPA2 group key renewed (key %u)\n", keyid, 0, 0);
++	}
++	/* as dswifi: synchronize, two empty data packets, the keys, synchronize */
++	k = 1;
++	mbox_out(1, 1, WMI_SYNCHRONIZE_CMD, &k, 1, &bad);
++	{
++		unsigned char d[2] = { 0x00, 0x02 };
++		unsigned int full = 0x80;
++
++		memset(pkt, 0, full);
++		pkt[0] = 2;
++		pkt[2] = 2;
++		memcpy(pkt + 6, d, 2);
++		op(11, 0, full, pkt, full, &bad);
++		op(11, 0, full, pkt, full, &bad);
++	}
++	if (keyinfo & 0x0008)
++		install_key(0, 4, 0, ptk + 32, 0, &bad);	/* pairwise: TK, AES */
++	install_key(keyid, cur_group, 1, gtk, f + 65, &bad);	/* group, with the AP's RSC */
++	mbox_out(1, 1, WMI_SYNCHRONIZE_CMD, &k, 1, &bad);
++	if (bad) {
++		lg("  WPA2: installing the keys FAILED\n", 0, 0, 0);
++		return;
++	}
++	if (!keys_ok) {
++		keys_ok = 1;
++		lg("  WPA2 keys installed: link up\n", 0, 0, 0);
++		if (wdev)
++			netif_carrier_on(wdev);
++	}
++}
++
+ /* a received data packet (endpoint 2..5): rssi, 0, dst[6], src[6], length (BE), LLC/SNAP AA AA 03 00 00 00, EtherType, data */
+ static void rx_data(const unsigned char *p, int len)
+ {
+@@ -304,6 +499,11 @@ static void rx_data(const unsigned char *p, int len)
+ 		wstats.rx_frame_errors++;
+ 		return;
+ 	}
++	if (p[22] == 0x88 && p[23] == 0x8E) {		/* EAPOL: the WPA2 handshake, handled here */
++		if (wpa2)
++			eapol_in(p + 24, dl);
++		return;
++	}
+ 	skb = dev_alloc_skb(dl + 14 + 2);
+ 	if (!skb) {
+ 		wstats.rx_dropped++;
+@@ -371,12 +571,16 @@ static void handle_pkt(unsigned int hdr, int *ev_scan_done)
+ 	case WMI_CONNECT_EVENT:				/* u16 channel (MHz), bssid[6], ... */
+ 		connected = 1;
+ 		conn_at = 0;
++		memcpy(ap_mac, rx + 10, 6);
+ 		lg("  CONNECTED on channel %u, BSSID ..:%02x:%02x\n", wifi_mhz_to_channel(rx[8] | (rx[9] << 8)), rx[14], rx[15]);
+-		if (wdev)
++		if (wpa2)
++			lg("  WPA2: waiting for the access point's handshake\n", 0, 0, 0);
++		else if (wdev)
+ 			netif_carrier_on(wdev);
+ 		break;
+ 	case WMI_DISCONNECT_EVENT:			/* u16 protocol reason, bssid[6], u8 reason */
+ 		connected = 0;
++		keys_ok = 0;
+ 		lg("  disconnected: reason %u (protocol reason %u)\n", rx[16], rx[8] | (rx[9] << 8), 0);
+ 		if (wdev)
+ 			netif_carrier_off(wdev);
+@@ -669,17 +873,31 @@ static noinline void do_connect(void)
+ 	int i, bad = 0;
+ 
+ 	for (i = 0; i < nnets; i++) {
+-		if (strcmp(nets[i].sec, "open"))
+-			continue;
+-		if (conn_req[0] && strcmp(nets[i].ssid, conn_req))
++		/* by name: an open or (with a password) WPA2 network; without a name: the strongest open one */
++		if (conn_req[0] ? strcmp(nets[i].ssid, conn_req) || (strcmp(nets[i].sec, "open") && strcmp(nets[i].sec, "wpa2")) :
++		    strcmp(nets[i].sec, "open"))
+ 			continue;
+ 		if (!n || nets[i].rssi > n->rssi)
+ 			n = &nets[i];
+ 	}
+ 	if (!n) {
+-		lg(conn_req[0] ? "connect: no open network of that name in the scan\n" : "connect: no open network in the scan\n", 0, 0, 0);
++		lg(conn_req[0] ? "connect: no open or WPA2 network of that name in the scan\n" : "connect: no open network in the scan\n",
++		   0, 0, 0);
+ 		return;
+ 	}
++	wpa2 = !strcmp(n->sec, "wpa2");
++	keys_ok = 0;
++	if (wpa2) {
++		if (!psk[0]) {
++			lg("connect: a WPA2 network needs its password first (echo psk ... > /proc/dsiwifi2)\n", 0, 0, 0);
++			return;
++		}
++		cur_group = n->group ? n->group : 4;
++		lg(cur_group == 3 ? "connect: WPA2 (group cipher TKIP): computing the key from the password...\n" :
++		   "connect: WPA2 (AES): computing the key from the password...\n", 0, 0, 0);
++		wpa_pmk(psk, (const unsigned char *)n->ssid, strlen(n->ssid), pmk);
++		lg("connect: key computed\n", 0, 0, 0);
++	}
+ 	{
+ 		char line[80];
+ 
+@@ -736,6 +954,11 @@ static noinline void do_connect(void)
+ 	 * channel switches) */
+ 	memset(b, 0, sizeof(b));
+ 	b[0] = 1; b[1] = 1; b[2] = 1; b[3] = 1; b[4] = 0; b[5] = 1; b[6] = 0;
++	if (wpa2) {						/* WPA2-PSK (auth mode 5), pairwise AES (4), the AP's group cipher */
++		b[2] = 5;
++		b[3] = 4;
++		b[5] = cur_group;
++	}
+ 	b[7] = strlen(n->ssid);
+ 	memcpy(b + 8, n->ssid, b[7]);
+ 	b[40] = wifi_channel_to_mhz(n->channel) & 0xff;
+@@ -842,7 +1065,7 @@ static int wthread(void *arg)
+ 
+ static int w_xmit(struct sk_buff *skb, struct net_device *dev)
+ {
+-	if (!connected) {
++	if (!connected || (wpa2 && !keys_ok)) {
+ 		wstats.tx_dropped++;
+ 		dev_kfree_skb(skb);
+ 		return 0;
+@@ -903,6 +1126,10 @@ static int w_stop(struct net_device *dev)
+ 	connected = 0;
+ 	conn_at = 0;
+ 	cur_hi = 0;
++	keys_ok = wpa2 = 0;
++	memset(psk, 0, sizeof(psk));			/* secrets do not outlive the interface */
++	memset(pmk, 0, sizeof(pmk));
++	memset(ptk, 0, sizeof(ptk));
+ 	netif_carrier_off(dev);
+ 	lg("wlan0 down: antenna back to the DS chip\n", 0, 0, 0);
+ 	return 0;
+@@ -941,7 +1168,8 @@ static int twl_read_proc(char *page, char **start, off_t off, int count, int *eo
+ 			      g[5], t[6], t[5], g[6], g[7] & 0xff, t[7], in[1], t[3]);
+ 	len += snprintf(page + len, PAGE_SIZE - len, "wlan0: %s, %s; packets in %lu out %lu (dropped out %lu); firmware failure state %08x\n"
+ 			"mailbox packets received %u, last (endpoint/id/length):", session ? "chip up" : "down",
+-			connected ? "CONNECTED" : "not connected", wstats.rx_packets, wstats.tx_packets, wstats.tx_dropped, fail_state, rx_count);
++			!connected ? "not connected" : !wpa2 ? "CONNECTED" : keys_ok ? "CONNECTED (WPA2 keys installed)" :
++			"associated, WPA2 handshake not done", wstats.rx_packets, wstats.tx_packets, wstats.tx_dropped, fail_state, rx_count);
+ 	{
+ 		unsigned int k, n = rx_count < 8 ? rx_count : 8;
+ 
+@@ -963,7 +1191,7 @@ static int twl_read_proc(char *page, char **start, off_t off, int count, int *eo
+ 
+ static int twl_write_proc(struct file *file, const char __user *buffer, unsigned long count, void *data)
+ {
+-	char cmd[48];
++	char cmd[80];
+ 	unsigned long n = count < sizeof(cmd) - 1 ? count : sizeof(cmd) - 1;
+ 
+ 	if (copy_from_user(cmd, buffer, n))
+@@ -977,6 +1205,19 @@ static int twl_write_proc(struct file *file, const char __user *buffer, unsigned
+ 		twl_ret = -101;
+ 		return count;
+ 	}
++	if (!strncmp(cmd, "psk ", 4)) {			/* the WPA2 passphrase (8..63 characters); never shown or logged */
++		int k;
++
++		for (k = 0; cmd[4 + k] && cmd[4 + k] != '\n' && k < 63; k++)
++			psk[k] = cmd[4 + k];
++		psk[k] = 0;
++		memset(cmd, 0, sizeof(cmd));
++		if (k < 8) {
++			psk[0] = 0;
++			return -EINVAL;
++		}
++		return count;
++	}
+ 	if (!strncmp(cmd, "connect", 7) || !strncmp(cmd, "disconnect", 10)) {
+ 		if (!session)
+ 			return -ENOTCONN;		/* ifconfig wlan0 up first */
+diff --git a/linux-2.6.x/arch/arm/mach-nds/dsiwpa.c b/linux-2.6.x/arch/arm/mach-nds/dsiwpa.c
+new file mode 100644
+index 000000000..46c2fb63f
+--- /dev/null
++++ b/linux-2.6.x/arch/arm/mach-nds/dsiwpa.c
+@@ -0,0 +1,340 @@
++/*
++ * WPA2-PSK crypto for the DSi's Atheros Wi-Fi (arch/arm/mach-nds/dsiwifi.c, step 6 of docs/ATHEROS-PLAN.md): SHA-1, HMAC-SHA1, PBKDF2
++ * (passphrase -> PMK), the IEEE 802.11i PRF (PMK -> PTK), the EAPOL-Key MIC and AES key unwrap (RFC 3394) for the group key.
++ * The kernel's crypto API is not built in this configuration, so it is done here. Plain C with no kernel headers when DSIWPA_HOST is
++ * defined: testbed/wpa_test.c checks every function against the RFC 2202, IEEE 802.11i and RFC 3394 test vectors on the PC.
++ * The helpers are noinline and structures are copied with memcpy: gcc 4.0.4 (with the DS's byte-write option) crashed on wpa_pmk()
++ * otherwise ("unrecognizable insn").
++ */
++#ifdef DSIWPA_HOST
++#include <string.h>
++typedef unsigned char u8;
++typedef unsigned int u32;
++#define noinline __attribute__((noinline))
++#else
++#include <linux/kernel.h>
++#include <linux/string.h>
++#include <linux/types.h>
++#endif
++
++/* ---------------------------------------------------------------- SHA-1 */
++struct sha1 {
++	u32 h[5];
++	u8 buf[64];
++	u32 n;			/* bytes in buf */
++	u32 total;		/* bytes hashed */
++};
++
++#define ROL(x, n)	(((x) << (n)) | ((x) >> (32 - (n))))
++
++static noinline void sha1_block(u32 *h, const u8 *p)
++{
++	u32 w[80], a, b, c, d, e, t;
++	int i;
++
++	for (i = 0; i < 16; i++)
++		w[i] = (p[i * 4] << 24) | (p[i * 4 + 1] << 16) | (p[i * 4 + 2] << 8) | p[i * 4 + 3];
++	for (; i < 80; i++)
++		w[i] = ROL(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], 1);
++	a = h[0]; b = h[1]; c = h[2]; d = h[3]; e = h[4];
++	for (i = 0; i < 80; i++) {
++		if (i < 20)
++			t = ((b & c) | (~b & d)) + 0x5A827999;
++		else if (i < 40)
++			t = (b ^ c ^ d) + 0x6ED9EBA1;
++		else if (i < 60)
++			t = ((b & c) | (b & d) | (c & d)) + 0x8F1BBCDC;
++		else
++			t = (b ^ c ^ d) + 0xCA62C1D6;
++		t += ROL(a, 5) + e + w[i];
++		e = d; d = c; c = ROL(b, 30); b = a; a = t;
++	}
++	h[0] += a; h[1] += b; h[2] += c; h[3] += d; h[4] += e;
++}
++
++static noinline void sha1_init(struct sha1 *s)
++{
++	s->h[0] = 0x67452301; s->h[1] = 0xEFCDAB89; s->h[2] = 0x98BADCFE; s->h[3] = 0x10325476; s->h[4] = 0xC3D2E1F0;
++	s->n = s->total = 0;
++}
++
++static noinline void sha1_add(struct sha1 *s, const u8 *p, u32 len)
++{
++	s->total += len;
++	while (len) {
++		u32 k = 64 - s->n < len ? 64 - s->n : len;
++
++		memcpy(s->buf + s->n, p, k);
++		s->n += k;
++		p += k;
++		len -= k;
++		if (s->n == 64) {
++			sha1_block(s->h, s->buf);
++			s->n = 0;
++		}
++	}
++}
++
++static noinline void sha1_end(struct sha1 *s, u8 out[20])
++{
++	u32 bits = s->total * 8;
++	u8 pad = 0x80, z = 0, l[8];
++	int i;
++
++	sha1_add(s, &pad, 1);
++	while (s->n != 56)
++		sha1_add(s, &z, 1);
++	for (i = 0; i < 4; i++)
++		l[i] = 0;
++	l[4] = bits >> 24; l[5] = bits >> 16; l[6] = bits >> 8; l[7] = bits;
++	sha1_add(s, l, 8);
++	for (i = 0; i < 5; i++) {
++		out[i * 4] = s->h[i] >> 24;
++		out[i * 4 + 1] = s->h[i] >> 16;
++		out[i * 4 + 2] = s->h[i] >> 8;
++		out[i * 4 + 3] = s->h[i];
++	}
++}
++
++/* ---------------------------------------------------------------- HMAC-SHA1 */
++/* the key's inner and outer states, so PBKDF2 does not rehash the key 8192 times */
++struct hmac {
++	struct sha1 in, out;
++};
++
++static noinline void hmac_key(struct hmac *m, const u8 *key, u32 klen)
++{
++	u8 k[64], pad[64];
++	int i;
++
++	memset(k, 0, 64);
++	if (klen > 64) {
++		struct sha1 s;
++
++		sha1_init(&s);
++		sha1_add(&s, key, klen);
++		sha1_end(&s, k);
++	} else {
++		memcpy(k, key, klen);
++	}
++	for (i = 0; i < 64; i++)
++		pad[i] = k[i] ^ 0x36;
++	sha1_init(&m->in);
++	sha1_add(&m->in, pad, 64);
++	for (i = 0; i < 64; i++)
++		pad[i] = k[i] ^ 0x5C;
++	sha1_init(&m->out);
++	sha1_add(&m->out, pad, 64);
++}
++
++static noinline void hmac_run(const struct hmac *m, const u8 *p, u32 len, const u8 *p2, u32 len2, u8 out[20])
++{
++	struct sha1 s;
++	u8 ih[20];
++
++	memcpy(&s, &m->in, sizeof(s));
++	sha1_add(&s, p, len);
++	if (p2)
++		sha1_add(&s, p2, len2);
++	sha1_end(&s, ih);
++	memcpy(&s, &m->out, sizeof(s));
++	sha1_add(&s, ih, 20);
++	sha1_end(&s, out);
++}
++
++void wpa_hmac_sha1(const u8 *key, u32 klen, const u8 *data, u32 len, u8 out[20])
++{
++	struct hmac m;
++
++	hmac_key(&m, key, klen);
++	hmac_run(&m, data, len, 0, 0, out);
++}
++
++/* ---------------------------------------------------------------- PBKDF2: PMK = PBKDF2-HMAC-SHA1(passphrase, SSID, 4096, 32) */
++void wpa_pmk(const char *pass, const u8 *ssid, u32 ssid_len, u8 pmk[32])
++{
++	/* whole words, no byte stores: gcc 4.0.4 crashed on the byte-wise version (a spilled byte under the DS byte-write option) */
++	static const u8 cnt[2][4] = { { 0, 0, 0, 1 }, { 0, 0, 0, 2 } };
++	struct hmac m;
++	u32 u[5], t[5];
++	int blk, i, j;
++
++	hmac_key(&m, (const u8 *)pass, strlen(pass));
++	for (blk = 0; blk < 2; blk++) {
++		hmac_run(&m, ssid, ssid_len, cnt[blk], 4, (u8 *)u);
++		for (j = 0; j < 5; j++)
++			t[j] = u[j];
++		for (i = 1; i < 4096; i++) {
++			hmac_run(&m, (const u8 *)u, 20, 0, 0, (u8 *)u);
++			for (j = 0; j < 5; j++)
++				t[j] ^= u[j];
++		}
++		memcpy(pmk + blk * 20, t, blk == 0 ? 20 : 12);
++	}
++}
++
++/* ---------------------------------------------------------------- PRF-384: PTK = KCK (16) | KEK (16) | TK (16) */
++static const u8 *bmin(const u8 *a, const u8 *b, int n)
++{
++	return memcmp(a, b, n) < 0 ? a : b;
++}
++
++static const u8 *bmax(const u8 *a, const u8 *b, int n)
++{
++	return memcmp(a, b, n) < 0 ? b : a;
++}
++
++void wpa_ptk(const u8 pmk[32], const u8 *aa, const u8 *spa, const u8 *anonce, const u8 *snonce, u8 ptk[48])
++{
++	static const char label[] = "Pairwise key expansion";
++	u8 data[23 + 6 + 6 + 32 + 32 + 1], out[80];
++	struct hmac m;
++	int i, p = 0;
++
++	memcpy(data, label, 22);
++	data[22] = 0;
++	p = 23;
++	memcpy(data + p, bmin(aa, spa, 6), 6);
++	p += 6;
++	memcpy(data + p, bmax(aa, spa, 6), 6);
++	p += 6;
++	memcpy(data + p, bmin(anonce, snonce, 32), 32);
++	p += 32;
++	memcpy(data + p, bmax(anonce, snonce, 32), 32);
++	p += 32;
++	hmac_key(&m, pmk, 32);
++	for (i = 0; i < 3; i++) {			/* 3 x 20 bytes >= 48 */
++		data[p] = i;
++		hmac_run(&m, data, p + 1, 0, 0, out + i * 20);
++	}
++	memcpy(ptk, out, 48);
++}
++
++/* EAPOL-Key MIC (key descriptor version 2): the first 16 bytes of HMAC-SHA1(KCK, frame with the MIC field zeroed) */
++void wpa_mic(const u8 kck[16], const u8 *frame, u32 len, u8 mic[16])
++{
++	u8 out[20];
++
++	wpa_hmac_sha1(kck, 16, frame, len, out);
++	memcpy(mic, out, 16);
++}
++
++/* ---------------------------------------------------------------- AES-128 decryption, key unwrap (RFC 3394) */
++static const u8 sbox[256] = {
++	0x63,0x7c,0x77,0x7b,0xf2,0x6b,0x6f,0xc5,0x30,0x01,0x67,0x2b,0xfe,0xd7,0xab,0x76,0xca,0x82,0xc9,0x7d,0xfa,0x59,0x47,0xf0,0xad,0xd4,0xa2,0xaf,0x9c,0xa4,0x72,0xc0,
++	0xb7,0xfd,0x93,0x26,0x36,0x3f,0xf7,0xcc,0x34,0xa5,0xe5,0xf1,0x71,0xd8,0x31,0x15,0x04,0xc7,0x23,0xc3,0x18,0x96,0x05,0x9a,0x07,0x12,0x80,0xe2,0xeb,0x27,0xb2,0x75,
++	0x09,0x83,0x2c,0x1a,0x1b,0x6e,0x5a,0xa0,0x52,0x3b,0xd6,0xb3,0x29,0xe3,0x2f,0x84,0x53,0xd1,0x00,0xed,0x20,0xfc,0xb1,0x5b,0x6a,0xcb,0xbe,0x39,0x4a,0x4c,0x58,0xcf,
++	0xd0,0xef,0xaa,0xfb,0x43,0x4d,0x33,0x85,0x45,0xf9,0x02,0x7f,0x50,0x3c,0x9f,0xa8,0x51,0xa3,0x40,0x8f,0x92,0x9d,0x38,0xf5,0xbc,0xb6,0xda,0x21,0x10,0xff,0xf3,0xd2,
++	0xcd,0x0c,0x13,0xec,0x5f,0x97,0x44,0x17,0xc4,0xa7,0x7e,0x3d,0x64,0x5d,0x19,0x73,0x60,0x81,0x4f,0xdc,0x22,0x2a,0x90,0x88,0x46,0xee,0xb8,0x14,0xde,0x5e,0x0b,0xdb,
++	0xe0,0x32,0x3a,0x0a,0x49,0x06,0x24,0x5c,0xc2,0xd3,0xac,0x62,0x91,0x95,0xe4,0x79,0xe7,0xc8,0x37,0x6d,0x8d,0xd5,0x4e,0xa9,0x6c,0x56,0xf4,0xea,0x65,0x7a,0xae,0x08,
++	0xba,0x78,0x25,0x2e,0x1c,0xa6,0xb4,0xc6,0xe8,0xdd,0x74,0x1f,0x4b,0xbd,0x8b,0x8a,0x70,0x3e,0xb5,0x66,0x48,0x03,0xf6,0x0e,0x61,0x35,0x57,0xb9,0x86,0xc1,0x1d,0x9e,
++	0xe1,0xf8,0x98,0x11,0x69,0xd9,0x8e,0x94,0x9b,0x1e,0x87,0xe9,0xce,0x55,0x28,0xdf,0x8c,0xa1,0x89,0x0d,0xbf,0xe6,0x42,0x68,0x41,0x99,0x2d,0x0f,0xb0,0x54,0xbb,0x16 };
++
++static u8 inv_sbox[256];
++
++static u8 xt(u8 x)
++{
++	return (x << 1) ^ ((x & 0x80) ? 0x1B : 0);
++}
++
++static u8 mul(u8 a, u8 b)
++{
++	u8 r = 0;
++
++	while (b) {
++		if (b & 1)
++			r ^= a;
++		a = xt(a);
++		b >>= 1;
++	}
++	return r;
++}
++
++static void aes_expand(const u8 key[16], u8 rk[176])
++{
++	u8 rcon = 1, t[4];
++	int i;
++
++	memcpy(rk, key, 16);
++	for (i = 16; i < 176; i += 4) {
++		memcpy(t, rk + i - 4, 4);
++		if (i % 16 == 0) {
++			u8 x = t[0];
++
++			t[0] = sbox[t[1]] ^ rcon;
++			t[1] = sbox[t[2]];
++			t[2] = sbox[t[3]];
++			t[3] = sbox[x];
++			rcon = xt(rcon);
++		}
++		rk[i] = rk[i - 16] ^ t[0];
++		rk[i + 1] = rk[i - 15] ^ t[1];
++		rk[i + 2] = rk[i - 14] ^ t[2];
++		rk[i + 3] = rk[i - 13] ^ t[3];
++	}
++}
++
++static void aes_decrypt(const u8 rk[176], u8 b[16])
++{
++	u8 t[16];
++	int r, i, c;
++
++	static int inv_ready;
++
++	if (!inv_ready) {				/* built once: the inverse of the S-box */
++		for (i = 0; i < 256; i++)
++			inv_sbox[sbox[i]] = i;
++		inv_ready = 1;
++	}
++	for (i = 0; i < 16; i++)
++		b[i] ^= rk[160 + i];
++	for (r = 9; r >= 0; r--) {
++		/* inverse shift rows, inverse substitute */
++		for (c = 0; c < 4; c++)
++			for (i = 0; i < 4; i++)
++				t[c * 4 + i] = inv_sbox[b[((c - i + 4) % 4) * 4 + i]];
++		for (i = 0; i < 16; i++)
++			b[i] = t[i] ^ rk[r * 16 + i];
++		if (r == 0)
++			break;
++		for (c = 0; c < 4; c++) {		/* inverse mix columns */
++			u8 *s = b + c * 4, a0 = s[0], a1 = s[1], a2 = s[2], a3 = s[3];
++
++			s[0] = mul(a0, 14) ^ mul(a1, 11) ^ mul(a2, 13) ^ mul(a3, 9);
++			s[1] = mul(a0, 9) ^ mul(a1, 14) ^ mul(a2, 11) ^ mul(a3, 13);
++			s[2] = mul(a0, 13) ^ mul(a1, 9) ^ mul(a2, 14) ^ mul(a3, 11);
++			s[3] = mul(a0, 11) ^ mul(a1, 13) ^ mul(a2, 9) ^ mul(a3, 14);
++		}
++	}
++}
++
++/* RFC 3394 unwrap: in = n + 1 blocks of 8 bytes; out = n blocks. 0 = ok (the integrity value A6A6A6A6A6A6A6A6 matched) */
++int wpa_unwrap(const u8 kek[16], const u8 *in, u32 len, u8 *out)
++{
++	u8 rk[176], a[8], b[16];
++	int n = len / 8 - 1, i, j, k;
++
++	if (len % 8 || n < 1 || n > 64)
++		return -1;
++	aes_expand(kek, rk);
++	memcpy(a, in, 8);
++	memcpy(out, in + 8, n * 8);
++	for (j = 5; j >= 0; j--)
++		for (i = n; i >= 1; i--) {
++			u32 t = n * j + i;
++
++			memcpy(b, a, 8);
++			b[7] ^= t;
++			b[6] ^= t >> 8;
++			b[5] ^= t >> 16;
++			b[4] ^= t >> 24;
++			memcpy(b + 8, out + (i - 1) * 8, 8);
++			aes_decrypt(rk, b);
++			memcpy(a, b, 8);
++			memcpy(out + (i - 1) * 8, b + 8, 8);
++		}
++	for (k = 0; k < 8; k++)
++		if (a[k] != 0xA6)
++			return -1;
++	return 0;
++}
+diff --git a/vendors/Nintendo/DSI/wifi-dsi-test b/vendors/Nintendo/DSI/wifi-dsi-test
+index 227834470..a7d5698b4 100644
+--- a/vendors/Nintendo/DSI/wifi-dsi-test
++++ b/vendors/Nintendo/DSI/wifi-dsi-test
+@@ -1,7 +1,7 @@
+ #!/bin/sh
+ # Start > Network > DSi Wi-Fi test: the DSi's own Wi-Fi chip (Atheros, docs/ATHEROS-PLAN.md). With the firmware in
+ # /usr/lib/firmware/dsi-wifi.bin (scripts/add-dsi-wifi-fw.sh on the PC): wlan0 up (firmware upload, scan), connect to the strongest open
+-# network (or the one named as the first argument), DHCP, ping. Without it: one bring-up run. The DS Wi-Fi is switched off first (both
++# network (or a named open or WPA2 network: it asks for name and password), DHCP, ping. Without it: one bring-up run. The DS Wi-Fi is switched off first (both
+ # chips share the antenna). Everything goes into the card log. wlan0 stays up afterwards ("ifconfig wlan0 down" gives the antenna back).
+ F=/usr/lib/firmware/dsi-wifi.bin
+ L=/home/wlan0-test.log		# in the image: readable on the PC even when the card log misses parts
+@@ -16,13 +16,25 @@ then
+ 	exec /bin/sh
+ fi
+ echo "wlan0 test" > $L
++# the WPA2 crypto as this compiler built it for the DSi (scripts/build-wpatest.sh; the argument is the expected PTK)
++[ -x /usr/bin/wpatest ] && /usr/bin/wpatest a0e295ad62cff8f5de24ae1a04dd0dca29dc54696ca14c4956bbd18e745fd36f0dfa950df13630eaeec11d5242054b5a >> $L 2>&1
++echo "Network name (Enter alone: the strongest open network):"
++read NAME
++PASS=""
++if [ -n "$NAME" ]
++then
++	echo "Password (Enter alone: an open network; it is not shown in any log):"
++	read PASS
++fi
+ echo "DSi Wi-Fi: firmware upload and scan (up to a minute)..."
+ ifconfig wlan0 down 2>/dev/null
+ echo clear > /proc/dsiwifi2
+ cat $F > /proc/dsiwifi2fw
+ ifconfig wlan0 up >> $L 2>&1
+-echo "connecting to ${1:-the strongest open network}..."
+-echo "connect $1" > /proc/dsiwifi2
++echo "connecting..."
++[ -n "$PASS" ] && echo "psk $PASS" > /proc/dsiwifi2
++PASS=""
++echo "connect $NAME" > /proc/dsiwifi2
+ N=0
+ while [ $N -lt 45 ]
+ do
+-- 
+2.56.0
+

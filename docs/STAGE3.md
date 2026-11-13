@@ -877,3 +877,15 @@ w98q on the console (/home/wlan0-test.log): connected to the open network GuestN
 google.com`: resolved to 172.253.156.102, 2 of 3 replies, 20 ms**; 144 packets in, 13 out, firmware failure state 0. The BSS report flood
 is gone (only 5 packets between the connect retries). Still open: the connect is answered only after the third command (~35 s), the first
 ping of each run is lost (ARP), packets move byte by byte (CMD52), and only open networks (WPA2 is step 6).
+
+### Step 6: WPA2-PSK built (w98r, w98s; not yet tried on the console)
+
+Patch 0119. `arch/arm/mach-nds/dsiwpa.c` holds SHA-1, HMAC-SHA1, PBKDF2 (the PMK from password and network name), the PTK PRF, the
+EAPOL MIC, AES-128 and the RFC 3394 key unwrap. On the PC (`testbed/wpa_test.sh`, the same file built with DSIWPA_HOST) all 7 test
+vectors pass: SHA-1, HMAC, two PBKDF2 vectors (IEEE 802.11i), the PTK, AES and the key unwrap. gcc 4.0.4 crashed on `wpa_pmk` three
+times ("unrecognizable insn", a byte store with -mswp-byte-writes) until it worked in 32-bit words. Because the old compiler is the risk,
+`scripts/build-wpatest.sh` builds the same test with the kernel's options for the DSi and puts it in the image as `/usr/bin/wpatest`;
+the DSi Wi-Fi test runs it first and logs PASS / FAIL per vector. `dsiwifi.c`: `echo "psk PASS" > /proc/dsiwifi2` (8-63 characters,
+never logged, wiped with the PMK and PTK at wlan0 down); a WPA2 network is joined with auth mode WPA2-PSK, pairwise AES and the group
+cipher from its RSN element; EAPOL message 1 gets message 2 (our nonce, RSN element), message 3 is checked (MIC), its GTK unwrapped
+with the KEK and answered with message 4, then both keys go to the firmware (ADD_CIPHER_KEY). No data is sent before the keys are in.
