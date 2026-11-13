@@ -1,0 +1,745 @@
+From f1c89a23bde683c8eb14768918a0abc5007d2096 Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Fri, 13 Nov 2026 10:03:01 -0600
+Subject: [PATCH] DSi Wi-Fi chip (Atheros): first bring-up test, /proc/dsiwifi2
+
+Step 1-3 of docs/ATHEROS-PLAN.md, run only on request:
+- arm7/twlwifi.c: antenna to the Atheros chip, RTC FOUT 32 kHz clock, power
+  chip reg 0x30, SCFG_WL; SDIO controller 2 (0x04004A00) set-up and polled
+  commands with bounded waits (CMD5/3/7, CMD52), function 1, 4-bit bus,
+  128-byte blocks; manufacturer, chip ID, "firmware loaded" flag, reset into
+  the boot ROM, BMI target ID, dswifi's BMI settings, and when firmware is
+  present: BMI_DONE, wait for ready, EEPROM version, first mailbox word.
+  Sequence and registers after BlocksDS dswifi (MIT).
+- NDS_SD_CMD_TWLWIFI request; /proc/dsiwifi2 (write runs it, read shows the
+  result in words; refused while nds is up); RTC two-byte write helper.
+- /boot/wifi-dsi-test, Start > Network > DSi Wi-Fi test; logbody shows it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ linux-2.6.x/arch/arm/mach-nds/Makefile       |   3 +-
+ linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c   |  10 +
+ linux-2.6.x/arch/arm/mach-nds/arm7/time.c    |  10 +
+ linux-2.6.x/arch/arm/mach-nds/arm7/twlwifi.c | 434 +++++++++++++++++++
+ linux-2.6.x/arch/arm/mach-nds/volume.c       |  74 ++++
+ linux-2.6.x/drivers/block/dldi_c.c           |  22 +
+ linux-2.6.x/include/asm-arm/arch-nds/dsisd.h |   1 +
+ user/microwin/src/demos/nanox/dsdesk.c       |   1 +
+ vendors/Nintendo/DSI/Makefile                |   1 +
+ vendors/Nintendo/DSI/logbody                 |   2 +
+ vendors/Nintendo/DSI/wifi-dsi-test           |  11 +
+ 11 files changed, 568 insertions(+), 1 deletion(-)
+ create mode 100644 linux-2.6.x/arch/arm/mach-nds/arm7/twlwifi.c
+ create mode 100644 vendors/Nintendo/DSI/wifi-dsi-test
+
+diff --git a/linux-2.6.x/arch/arm/mach-nds/Makefile b/linux-2.6.x/arch/arm/mach-nds/Makefile
+index 3fa16f27a..ecce9c3ea 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/Makefile
++++ b/linux-2.6.x/arch/arm/mach-nds/Makefile
+@@ -28,6 +28,7 @@ extra-y += arm7/dsitouch.o
+ extra-y += arm7/dsivol.o
+ extra-y += arm7/dsicam.o
+ extra-y += arm7/wifiprobe.o
++extra-y += arm7/twlwifi.o
+ extra-y += arm7.bin
+ 
+ # this does not seem to have any effect (why?):
+@@ -39,7 +40,7 @@ $(obj)/arm7.bin: $(obj)/arm7.elf
+ 	$(OBJCOPY) -O binary $(obj)/arm7.elf $(obj)/arm7.bin
+ 	rm -f $(obj)/head.o
+ 
+-arm7obj = $(obj)/arm7/head.o $(obj)/arm7/main.o $(obj)/arm7/time.o $(obj)/arm7/spi.o $(obj)/arm7/sound.o $(obj)/arm7/microphone.o $(obj)/arm7/wifi.o $(obj)/arm7/divide.o $(obj)/arm7/sdmmc.o $(obj)/arm7/dsitouch.o $(obj)/arm7/dsivol.o $(obj)/arm7/dsicam.o $(obj)/arm7/wifiprobe.o
++arm7obj = $(obj)/arm7/head.o $(obj)/arm7/main.o $(obj)/arm7/time.o $(obj)/arm7/spi.o $(obj)/arm7/sound.o $(obj)/arm7/microphone.o $(obj)/arm7/wifi.o $(obj)/arm7/divide.o $(obj)/arm7/sdmmc.o $(obj)/arm7/dsitouch.o $(obj)/arm7/dsivol.o $(obj)/arm7/dsicam.o $(obj)/arm7/wifiprobe.o $(obj)/arm7/twlwifi.o
+ 
+ $(obj)/arm7.elf: $(arm7obj) $(src)/arm7/arm7.lds
+ 	$(LD) -nostartfiles -nostdlib -o $(obj)/arm7.elf $(arm7obj) -T $(src)/arm7/arm7.lds
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c b/linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c
+index f827e6d66..0589b6c63 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c
+@@ -43,6 +43,7 @@
+ #include "microphone.h"
+ 
+ extern void wifi_probe(unsigned int *touch, unsigned int *diag, unsigned int *info);
++extern void twl_wifi_probe(u32 *touch, u32 *diag, u32 *info);
+ 
+ typedef volatile u16 vu16;
+ typedef volatile u32 vu32;
+@@ -894,6 +895,15 @@ static void nds_sd_request_inner(struct nds_sd_block *b)
+ 		b->result = NDS_SD_OK;
+ 		return;
+ 
++	case NDS_SD_CMD_TWLWIFI:
++		if (!dsitouch_active()) {			/* DS mode: there is no Atheros chip */
++			b->result = NDS_SD_ERR_PARAM;
++			return;
++		}
++		twl_wifi_probe((u32 *)b->touch, (u32 *)b->diag, (u32 *)b->info);
++		b->result = NDS_SD_OK;
++		return;
++
+ 	case NDS_SD_CMD_POWEROFF:
+ 		dsi_poweroff_diag(b->diag);
+ 		b->result = NDS_SD_OK;
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/time.c b/linux-2.6.x/arch/arm/mach-nds/arm7/time.c
+index 43526eb67..23ae79f6f 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/arm7/time.c
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/time.c
+@@ -63,6 +63,16 @@ static void rtcTransaction(u8 * command, u32 commandLen, u8 * result,
+ 	swiDelay(RTC_DELAY);
+ }
+ 
++/* a two-byte command to the RTC (twlwifi.c: the DSi RTC's FOUT registers, the Wi-Fi module's 32 kHz clock) */
++void nds_rtc_write2(u8 cmd, u8 val)
++{
++	u8 c[2];
++
++	c[0] = cmd;
++	c[1] = val;
++	rtcTransaction(c, 2, 0, 0);
++}
++
+ static u8 BCDToInt(u8 data)
+ {
+ 	return ((data & 0xF) + ((data & 0xF0) >> 4) * 10);
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/twlwifi.c b/linux-2.6.x/arch/arm/mach-nds/arm7/twlwifi.c
+new file mode 100644
+index 000000000..b1195da23
+--- /dev/null
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/twlwifi.c
+@@ -0,0 +1,434 @@
++/*
++ * twlwifi.c - first contact with the DSi's own Wi-Fi chip (Atheros AR60xx on the second SDIO controller, 0x04004A00).
++ * Step 1-3 of docs/ATHEROS-PLAN.md, run on request from the ARM9 (/proc/dsiwifi2), never at boot:
++ *   switch the antenna to the Atheros chip, its 32 kHz clock (RTC FOUT) and power, set up the SDIO controller, bring the card up
++ *   (CMD5/CMD3/CMD7, function 1, 4-bit bus, 128-byte blocks), read revision, manufacturer and chip ID, see whether the System Menu left
++ *   firmware in the chip, reset it into its boot ROM, ask the boot ROM (BMI) for its version and, when firmware is there, start it and
++ *   wait for "ready". Everything that waits for the chip is bounded: a chip that does not answer must not hang the ARM7.
++ * Results: info[0] = last step reached, info[1] = controller status at the first failure, info[2] = flags; diag[] and touch[] = values
++ * (see the ARM9 side, arch/arm/mach-nds/volume.c).
++ *
++ * The SDIO command sequence and register use follow BlocksDS dswifi (source/arm7/twl/sdio.twl.c and card.twl.c):
++ * SPDX-License-Identifier: MIT
++ * Copyright (C) 2021 Max Thomas (ShinyQuagsire), Copyright (C) 2023-2025 Antonio Nino Diaz (dswifi)
++ * Copyright (c) 2026 DSLinuxDSi project (port to the DSLinux ARM7, polling with bounded waits)
++ * Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the
++ * "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish,
++ * distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to
++ * the following conditions: The above copyright notice and this permission notice shall be included in all copies or substantial portions
++ * of the Software. THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE
++ * WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
++ * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
++ * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
++ */
++#include "linux/config.h"
++#include "asm/types.h"
++
++#include "dsivol.h"
++
++#define R16(a)	(*(volatile u16 *)(a))
++#define R32(a)	(*(volatile u32 *)(a))
++
++#define GPIO_WIFI	0x04004C04	/* bit 8: 1 = DS chip, 0 = Atheros */
++#define POWCNT2		0x04000304
++#define SCFG_WL		0x04004020
++
++/* TMIO controller 2 */
++#define SDIO		0x04004A00
++#define S_CMD		(SDIO + 0x000)
++#define S_PORT_SEL	(SDIO + 0x002)
++#define S_PARAM0	(SDIO + 0x004)
++#define S_PARAM1	(SDIO + 0x006)
++#define S_STOP		(SDIO + 0x008)
++#define S_BLK_CNT16	(SDIO + 0x00A)
++#define S_RESP0		(SDIO + 0x00C)
++#define S_STAT0		(SDIO + 0x01C)
++#define S_STAT1		(SDIO + 0x01E)
++#define S_MASK		(SDIO + 0x020)
++#define S_CLK		(SDIO + 0x024)
++#define S_BLK_LEN16	(SDIO + 0x026)
++#define S_CARD_OPT	(SDIO + 0x028)
++#define S_ERR0		(SDIO + 0x02C)
++#define S_ERR1		(SDIO + 0x02E)
++#define S_DATA16_CNT	(SDIO + 0x0D8)
++#define S_RESET		(SDIO + 0x0E0)
++#define S_IRQ32		(SDIO + 0x100)
++#define S_BLK_LEN32	(SDIO + 0x104)
++#define S_BLK_CNT32	(SDIO + 0x108)
++
++#define STAT0_RESPEND	0x0001
++#define STAT1_CMD_BUSY	0x4000
++#define STAT1_ERR	(0x8000 | 0x0040 | 0x0020 | 0x0010 | 0x0008 | 0x0004 | 0x0002 | 0x0001)
++
++/* TMIO command word: index | response type << 8 (3 none, 4 R1-like 48 bit, 5 48 bit busy, 7 48 bit OCR without CRC) */
++#define C_CMD3		(3 | (4 << 8))
++#define C_CMD5		(5 | (7 << 8))
++#define C_CMD7		(7 | (5 << 8))
++#define C_CMD52		(52 | (4 << 8))
++
++/* Atheros function-1 registers */
++#define F1_RX_LOOKAHEAD_VALID	0x405
++#define F1_RX_LOOKAHEAD0	0x408
++#define F1_WINDOW_DATA		0x474
++#define F1_WINDOW_WRITE_ADDR	0x478
++#define F1_WINDOW_READ_ADDR	0x47C
++
++#define CHIP_ID_AR6002	0x02000001
++#define HI_AR6002	0x00500400	/* "host interest" area: what the host and the firmware tell each other */
++#define HI_AR601X	0x00520000
++
++#define BMI_DONE		1
++#define BMI_READ_SOC_REGISTER	6
++#define BMI_WRITE_SOC_REGISTER	7
++#define BMI_GET_TARGET_ID	8
++
++/* RTC: the DSi's clock chip gives the Wi-Fi module its 32 kHz sleep clock (FOUT) */
++extern void nds_rtc_write2(u8 cmd, u8 val);
++
++static u32 st;		/* bit 0 response seen, bit 2 error or timeout (as dswifi's ctx->status) */
++static u32 resp;
++static u32 fail_stat, fail_err;	/* controller status and error detail at the first failure */
++
++static void tdelay(u32 n)
++{
++	volatile u32 i;
++
++	for (i = 0; i < n; i++)
++		;
++}
++
++static void mask16(u32 reg, u16 clear, u16 set)
++{
++	R16(reg) = (R16(reg) & ~clear) | set;
++}
++
++static void controller_init(void)
++{
++	mask16(S_IRQ32, 0x0800, 0);
++	mask16(S_IRQ32, 0x1000, 0);
++	mask16(S_IRQ32, 0, 0x0402);
++	mask16(S_DATA16_CNT, 0x0022, 0x0002);
++	mask16(S_DATA16_CNT, 0x0020, 0);
++	R16(S_BLK_LEN32) = 128;
++	R16(S_BLK_CNT32) = 1;
++	mask16(S_RESET, 0x0003, 0);
++	mask16(S_RESET, 0, 0x0003);
++	R32(S_MASK) = 0xFFFFFFFF;		/* no controller interrupts: this driver polls */
++	mask16(SDIO + 0x0FC, 0, 0x00DB);
++	mask16(SDIO + 0x0FE, 0, 0x00DB);
++	mask16(S_PORT_SEL, 3, 0);
++	R16(S_CLK) = 0x0020;
++	R16(S_CARD_OPT) = 0x40EE;
++	mask16(S_IRQ32, 0x8000, 0);
++	mask16(S_IRQ32, 0, 0x0100);
++	mask16(S_IRQ32, 0x0100, 0);
++	mask16(S_PORT_SEL, 3, 0);
++	R16(S_BLK_LEN16) = 128;
++	R16(S_STOP) = 0x0100;
++}
++
++/* clock divider 0 (fastest, as dswifi), bus width 4 or 1 */
++static void switch_device(int width4)
++{
++	mask16(S_PORT_SEL, 3, 0);
++	mask16(S_CLK, 0x100, 0);
++	mask16(S_CLK, 0x2FF, 0);
++	mask16(S_CLK, 0, 0x100);
++	if (width4)
++		mask16(S_CARD_OPT, 0x8000, 0);
++	else
++		mask16(S_CARD_OPT, 0, 0x8000);
++}
++
++/* a command without data; st bit 0 = response, bit 2 = error/timeout */
++static void cmd(u16 c, u32 arg, int want_resp)
++{
++	u32 t;
++	u16 s0 = 0, s1 = 0;
++
++	st = 0;
++	for (t = 0; (R16(S_STAT1) & STAT1_CMD_BUSY) && t < 200000; t++)
++		;
++	R16(S_STAT0) = 0;
++	R16(S_STAT1) = 0;
++	R16(S_PARAM0) = arg & 0xFFFF;
++	R16(S_PARAM1) = arg >> 16;
++	R16(S_BLK_LEN16) = 128;
++	R16(S_BLK_CNT16) = 0;
++	R16(S_CMD) = c;
++	for (t = 0; t < 262144; t++) {
++		s1 = R16(S_STAT1);
++		if (s1 & STAT1_ERR) {
++			st |= 4;
++			break;
++		}
++		if (!(s1 & STAT1_CMD_BUSY)) {
++			s0 = R16(S_STAT0);
++			if (s0 & STAT0_RESPEND)
++				st |= 1;
++			if (!want_resp || (s0 & STAT0_RESPEND))
++				break;
++		}
++	}
++	if (t == 262144)
++		st |= 4;
++	if ((st & 4) && !fail_stat) {
++		fail_stat = ((u32)R16(S_STAT1) << 16) | R16(S_STAT0) | 0x80000000u;	/* bit 31 marks "recorded" */
++		fail_err = ((u32)R16(S_ERR1) << 16) | R16(S_ERR0);
++	}
++	R16(S_STAT0) = 0;
++	R16(S_STAT1) = 0;
++	resp = R16(S_RESP0) | ((u32)R16(S_RESP0 + 2) << 16);
++}
++
++static int wr8(u32 func, u32 addr, u8 val)
++{
++	cmd(C_CMD52, 0x80000000u | (func << 28) | ((addr & 0x1FFFF) << 9) | val, 1);
++	return (st & 4) ? -1 : 0;
++}
++
++static u8 rd8(u32 func, u32 addr)
++{
++	cmd(C_CMD52, (func << 28) | ((addr & 0x1FFFF) << 9), 1);
++	return (st & 4) ? 0xFF : (u8)resp;
++}
++
++static u32 rd32(u32 func, u32 addr)
++{
++	return rd8(func, addr) | ((u32)rd8(func, addr + 1) << 8) | ((u32)rd8(func, addr + 2) << 16) | ((u32)rd8(func, addr + 3) << 24);
++}
++
++static void wr32_f1(u32 addr, u32 val)		/* most significant byte first, as dswifi */
++{
++	wr8(1, addr + 3, val >> 24);
++	wr8(1, addr + 2, val >> 16);
++	wr8(1, addr + 1, val >> 8);
++	wr8(1, addr, val);
++}
++
++static u32 intern_rd(u32 addr)
++{
++	wr32_f1(F1_WINDOW_READ_ADDR, addr);
++	return rd32(1, F1_WINDOW_DATA);
++}
++
++static void intern_wr(u32 addr, u32 val)
++{
++	wr32_f1(F1_WINDOW_DATA, val);
++	wr32_f1(F1_WINDOW_WRITE_ADDR, addr);
++}
++
++/* mailbox 0, byte by byte; the last byte of a message goes to 0xFF (end of message) */
++static void mbox_wr32(u32 val, int last)
++{
++	int i;
++
++	for (i = 0; i < 4; i++) {
++		wr8(1, (i == 3 && last) ? 0xFF : 0, val & 0xFF);
++		val >>= 8;
++	}
++}
++
++static int mbox_rd32(u32 *val, u32 tries)
++{
++	u32 t, v = 0;
++	int i;
++
++	for (t = 0; t < tries; t++) {
++		if (rd8(1, F1_RX_LOOKAHEAD_VALID) & 1)
++			break;
++		if (st & 4)			/* the card stopped answering: do not wait out every try */
++			return -1;
++		tdelay(2000);
++	}
++	if (t == tries)
++		return -1;
++	for (i = 0; i < 4; i++)
++		v |= (u32)rd8(1, 0xFF) << (i * 8);
++	*val = v;
++	return 0;
++}
++
++static u32 bmi_rd_reg(u32 addr)
++{
++	u32 v = 0xFFFFFFFF;
++
++	mbox_wr32(BMI_READ_SOC_REGISTER, 0);
++	mbox_wr32(addr, 1);
++	mbox_rd32(&v, 500);
++	return v;
++}
++
++static void bmi_wr_reg(u32 addr, u32 val)
++{
++	mbox_wr32(BMI_WRITE_SOC_REGISTER, 0);
++	mbox_wr32(addr, 0);
++	mbox_wr32(val, 1);
++}
++
++/*
++ * The whole bring-up. touch[8], diag[8], info[3] go back to the ARM9:
++ *   info[0] step reached (see the ARM9 side), info[1] controller status at the first failure, info[2] flags:
++ *     bit 0 4-bit bus, bit 1 CMD5 skipped (card was already initialised), bit 2 firmware started, bit 3 BMI timed out
++ *   diag[0] manufacturer, [1] chip ID, [2] firmware-loaded flag before reset, [3] reset cause, [4] BMI version,
++ *   [5] ready flag after start, [6] EEPROM version, [7] RX lookahead valid
++ *   touch[0] CCCR revision, [1] OCR, [2] bus interface control, [3] error detail at the first failure, [4] host interest address,
++ *   [5] EEPROM address, [6] ready polls, [7] first RX lookahead word
++ */
++void twl_wifi_probe(u32 *touch, u32 *diag, u32 *info)
++{
++	u16 gpio0 = R16(GPIO_WIFI), pwr0 = R16(POWCNT2);
++	u32 hi, uploaded, t, ocr = 0;
++	int i;
++
++	for (i = 0; i < 8; i++)
++		touch[i] = diag[i] = 0;
++	info[0] = info[1] = info[2] = 0;
++	fail_stat = fail_err = 0;
++
++	/* 1: power, antenna, clock */
++	info[0] = 1;
++	R16(POWCNT2) = pwr0 | 2;
++	R16(GPIO_WIFI) = gpio0 & ~0x100;		/* Atheros */
++	tdelay(40000);
++	nds_rtc_write2(0x72, 0x80);			/* FOUT1, FOUT2: the 32 kHz clock for the module */
++	nds_rtc_write2(0x74, 0x00);
++	dsivol_pm_write(0x30, 0x13);
++	R32(SCFG_WL) |= 1;
++
++	/* 2: controller */
++	info[0] = 2;
++	controller_init();
++	switch_device(1);
++	tdelay(60000);
++	rd8(0, 0x00);					/* revision, as a test of the 4-bit bus */
++	if (st & 4) {
++		switch_device(0);
++		fail_stat = 0;
++	} else {
++		info[2] |= 1;
++	}
++
++	/* 3: CMD5 (operating conditions) until ready, CMD3 (address), CMD7 (select); skipped when CMD5 fails because the card is already up */
++	info[0] = 3;
++	R16(S_STOP) = 0x100;
++	for (t = 0; t < 100; t++) {
++		cmd(C_CMD5, ocr, 1);
++		if (st & 4)
++			break;
++		ocr = resp & 0xFFFFFF;
++		if (resp & 0x80000000u)
++			break;
++		tdelay(2000);
++	}
++	touch[1] = resp;
++	if (st & 4) {
++		info[2] |= 2;
++		fail_stat = fail_err = 0;		/* expected when the card was already initialised */
++	} else {
++		info[0] = 4;
++		cmd(C_CMD3, 0, 1);
++		if (st & 4)
++			goto out;
++		cmd(C_CMD7, (resp >> 16) << 16, 1);
++		if (st & 4)
++			goto out;
++	}
++
++	/* 5: function 1 on (no delay between the two writes: dswifi notes a delay there wipes the firmware) */
++	info[0] = 5;
++	wr8(0, 0x02, 0x00);
++	wr8(0, 0x02, 0x02);
++	tdelay(60000);
++	touch[2] = rd8(0, 0x07);
++	if (st & 4)
++		goto out;
++	if (wr8(0, 0x07, touch[2] | 0x82))		/* 4-bit bus, card detect off */
++		goto out;
++	switch_device(1);
++	info[2] |= 1;
++	if (wr8(0, 0x12, 0x02) || wr8(0, 0x110, 128) || wr8(0, 0x111, 0) || wr8(0, 0x10, 128) || wr8(0, 0x11, 0))
++		goto out;
++	tdelay(60000);
++
++	/* 6: identify */
++	info[0] = 6;
++	touch[0] = rd8(0, 0x00);
++	for (t = 0; t < 1000 && rd8(0, 0x03) != 0x02 && !(st & 4); t++)	/* function 1 ready */
++		tdelay(1000);
++	if (t == 1000 || (st & 4))
++		goto out;
++	diag[0] = rd32(0, 0x1007);			/* manufacturer (CIS) */
++	diag[1] = intern_rd(0x000040EC);		/* chip ID */
++	hi = diag[1] == CHIP_ID_AR6002 ? HI_AR6002 : HI_AR601X;
++	touch[4] = hi;
++	uploaded = intern_rd(hi + 0x58);		/* non-zero: firmware already in the chip */
++	diag[2] = uploaded;
++
++	/* 7: reset into the boot ROM (the firmware stays in RAM), reset cause should be 2 */
++	info[0] = 7;
++	intern_wr(0x4000, 0x00000100);
++	tdelay(120000);
++	diag[3] = intern_rd(0x40C0);
++
++	/* 8: boot ROM version (BMI) */
++	info[0] = 8;
++	mbox_wr32(BMI_GET_TARGET_ID, 1);
++	if (mbox_rd32(&diag[4], 500)) {
++		info[2] |= 8;
++		goto out;
++	}
++	if (diag[4] == 0xFFFFFFFF) {			/* extended answer: length, version, more words */
++		u32 len = 0, v;
++
++		mbox_rd32(&len, 500);
++		mbox_rd32(&diag[4], 500);
++		for (t = 2; t < len / 4 && t < 16; t++)
++			mbox_rd32(&v, 500);
++	}
++
++	/* 9: the settings dswifi makes before starting the firmware */
++	info[0] = 9;
++	intern_wr(hi, 2);
++	bmi_wr_reg(0x0180C0, bmi_rd_reg(0x0180C0) | 0x8);
++	bmi_wr_reg(0x0040C4, bmi_rd_reg(0x0040C4) | 1);	/* WLAN_SYSTEM_SLEEP */
++	bmi_wr_reg(0x004028, 0x5);			/* WLAN_CLOCK_CONTROL */
++	bmi_wr_reg(0x004020, 0x0);
++	if (!uploaded)					/* no firmware: an upload is needed (a later step); stop here */
++		goto out;
++
++	/* 10: start the firmware that is already there and wait for it */
++	info[0] = 10;
++	intern_wr(hi + 0x6C, 0x80);
++	intern_wr(hi + 0x74, 0x63);
++	mbox_wr32(BMI_DONE, 1);
++	info[2] |= 4;
++	for (t = 0; t < 2000; t++) {			/* about 2 s */
++		diag[5] = intern_rd(hi + 0x58);
++		if (diag[5] == 1 || (st & 4))
++			break;
++		tdelay(4000);
++	}
++	touch[6] = t;
++	if (diag[5] != 1)
++		goto out;
++	touch[5] = intern_rd(hi + 0x54);		/* EEPROM (board data) address */
++	diag[6] = intern_rd(touch[5] + 0x10);		/* its version */
++
++	/* 11: the firmware's first message (WMI ready) should be waiting in mailbox 0 */
++	info[0] = 11;
++	for (t = 0; t < 500; t++) {
++		diag[7] = rd8(1, F1_RX_LOOKAHEAD_VALID);
++		if ((diag[7] & 1) || (st & 4))
++			break;
++		tdelay(4000);
++	}
++	touch[7] = rd32(1, F1_RX_LOOKAHEAD0);
++	info[0] = 12;					/* all done */
++
++out:
++	info[1] = fail_stat;
++	touch[3] = fail_err;
++	R16(GPIO_WIFI) = gpio0;				/* antenna back to the DS chip, power as it was */
++	R16(POWCNT2) = pwr0;
++}
+diff --git a/linux-2.6.x/arch/arm/mach-nds/volume.c b/linux-2.6.x/arch/arm/mach-nds/volume.c
+index a60a4fb0b..04ce0aa87 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/volume.c
++++ b/linux-2.6.x/arch/arm/mach-nds/volume.c
+@@ -10,6 +10,7 @@
+ #include <linux/proc_fs.h>
+ #include <linux/string.h>
+ #include <asm/uaccess.h>
++#include <linux/netdevice.h>
+ 
+ static int vol_level = -1;
+ static int vol_status = 5;
+@@ -140,6 +141,74 @@ static int settings_write_proc(struct file *file, const char __user *buffer, uns
+ 	return count;
+ }
+ 
++/*
++ * /proc/dsiwifi2: the DSi's own Wi-Fi chip (Atheros), step 1-3 of docs/ATHEROS-PLAN.md. "echo 1 > /proc/dsiwifi2" runs the bring-up on the
++ * ARM7 (arm7/twlwifi.c, a few seconds); reading shows the last result (the card log includes it). It refuses while the DS Wi-Fi (nds) is
++ * up: both chips share the antenna.
++ */
++extern int dsisd_twlwifi(unsigned int *out);
++static unsigned int twl_d[19];
++static int twl_ret = -100;	/* -100 = not run yet, -101 = refused (nds up) */
++
++static const char *twl_step[] = { "nothing", "power, antenna, clock", "SDIO controller", "CMD5 (operating conditions)",
++				  "CMD3/CMD7 (address, select)", "function 1, 4-bit bus, block size", "identify (manufacturer, chip ID)",
++				  "reset into the boot ROM", "boot ROM version (BMI)", "BMI settings", "start the firmware",
++				  "wait for the firmware's first message", "all done" };
++
++static const char *twl_chip(unsigned int id)
++{
++	return id == 0x0D000000 ? "AR6013" : id == 0x0D000001 ? "AR6014" : id == 0x02000001 ? "AR6002" : "unknown";
++}
++
++static int twl_read_proc(char *page, char **start, off_t off, int count, int *eof, void *data)
++{
++	unsigned int *d = twl_d, *t = twl_d, *g = twl_d + 8, *in = twl_d + 16;
++	int len;
++
++	if (twl_ret == -100)
++		len = sprintf(page, "not run yet: echo 1 > /proc/dsiwifi2\n");
++	else if (twl_ret == -101)
++		len = sprintf(page, "refused: switch the DS Wi-Fi off first (ifconfig nds down)\n");
++	else
++		len = sprintf(page, "request %d, reached step %u of 12: %s\n"
++			      "bus %s, CMD5 %s, firmware started %s, BMI %s\n"
++			      "CCCR revision %02x  OCR %08x  bus control %02x\n"
++			      "manufacturer %08x  chip %08x (%s)\n"
++			      "host interest %08x  firmware already loaded %u  reset cause %u (2 expected)\n"
++			      "boot ROM (BMI) version %08x\n"
++			      "after start: ready %u (polls %u)  EEPROM at %08x version %08x\n"
++			      "mailbox: lookahead valid %02x  first word %08x\n"
++			      "first failure: controller status %08x  error detail %08x\n",
++			      twl_ret, in[0], in[0] <= 12 ? twl_step[in[0]] : "?",
++			      (in[2] & 1) ? "4-bit" : "1-bit", (in[2] & 2) ? "skipped (card already up)" : "done",
++			      (in[2] & 4) ? "yes" : "no", (in[2] & 8) ? "timed out" : "answered",
++			      t[0] & 0xff, t[1], t[2] & 0xff, g[0], g[1], twl_chip(g[1]), t[4], g[2], g[3], g[4],
++			      g[5], t[6], t[5], g[6], g[7] & 0xff, t[7], in[1], t[3]);
++	(void)d;
++	*eof = 1;
++	if (off >= len)
++		return 0;
++	*start = page + off;
++	return len - off;
++}
++
++static int twl_write_proc(struct file *file, const char __user *buffer, unsigned long count, void *data)
++{
++	struct net_device *dev = dev_get_by_name("nds");
++	int up = dev && (dev->flags & IFF_UP);
++
++	if (dev)
++		dev_put(dev);
++	if (up) {
++		twl_ret = -101;
++		return count;
++	}
++	twl_ret = dsisd_twlwifi(twl_d);
++	printk(KERN_INFO "dsiwifi2: step %u, chip %08x, firmware loaded %u, BMI %08x, ready %u\n",
++	       twl_d[16], twl_d[9], twl_d[10], twl_d[12], twl_d[13]);
++	return count;
++}
++
+ static int __init nds_volume_init(void)
+ {
+ 	struct proc_dir_entry *e;
+@@ -151,6 +220,11 @@ static int __init nds_volume_init(void)
+ 	}
+ 	create_proc_read_entry("dsimic", 0444, NULL, mic_read_proc, NULL);
+ 	create_proc_read_entry("dsiwifi", 0444, NULL, wifi_read_proc, NULL);
++	e = create_proc_entry("dsiwifi2", 0644, NULL);
++	if (e) {
++		e->read_proc = twl_read_proc;
++		e->write_proc = twl_write_proc;
++	}
+ 	create_proc_read_entry("dsivolume", 0444, NULL, vol_read_proc, NULL);
+ 	return 0;
+ }
+diff --git a/linux-2.6.x/drivers/block/dldi_c.c b/linux-2.6.x/drivers/block/dldi_c.c
+index a1782ac67..b6aac6831 100644
+--- a/linux-2.6.x/drivers/block/dldi_c.c
++++ b/linux-2.6.x/drivers/block/dldi_c.c
+@@ -229,6 +229,28 @@ int dsisd_wifiprobe(unsigned int *out)
+ 	return ret;
+ }
+ 
++/* The Atheros chip bring-up on the ARM7 (arm7/twlwifi.c): out[0..7] touch, out[8..15] diag, out[16..18] info. 0 = ok. It takes a few
++ * seconds at most; the request block keeps whatever the ARM7 had written if it does not finish (out[] is filled either way). */
++int dsisd_twlwifi(unsigned int *out)
++{
++	int ret, i, save;
++
++	down(&sd_mutex);
++	save = sd_timeout;
++	sd_timeout = 15 * HZ;
++	ret = sd_request_locked(NDS_SD_CMD_TWLWIFI, 0, 0);
++	sd_timeout = save;
++	dmac_flush_range((unsigned long)&sd_block, (unsigned long)&sd_block + sizeof(sd_block));	/* also after a timeout */
++	for (i = 0; i < 8; i++) {
++		out[i] = sd_block.touch[i];
++		out[8 + i] = sd_block.diag[i];
++	}
++	for (i = 0; i < 3; i++)
++		out[16 + i] = sd_block.info[i];
++	up(&sd_mutex);
++	return ret;
++}
++
+ /* Power chip status (and the backlight): op 1 sets the backlight register to val (0..4). out[0] battery register, out[1] volume register,
+  * out[2] backlight register (0xffffffff = unreadable). 0 = ok. */
+ int dsisd_pm(unsigned int op, unsigned int val, unsigned int *out)
+diff --git a/linux-2.6.x/include/asm-arm/arch-nds/dsisd.h b/linux-2.6.x/include/asm-arm/arch-nds/dsisd.h
+index 862ef4c62..72e3ce16c 100644
+--- a/linux-2.6.x/include/asm-arm/arch-nds/dsisd.h
++++ b/linux-2.6.x/include/asm-arm/arch-nds/dsisd.h
+@@ -19,6 +19,7 @@
+ #define NDS_SD_CMD_INIT		0
+ #define NDS_SD_CMD_READ		1
+ #define NDS_SD_CMD_WRITE	2
++#define NDS_SD_CMD_TWLWIFI	13	/* not SD: bring up the DSi's Atheros Wi-Fi chip and report (arm7/twlwifi.c): touch[], diag[], info[] */
+ #define NDS_SD_CMD_WIFIPROBE	12	/* not SD: look at the Wi-Fi hardware once (arm7/wifiprobe.c): touch[0..7], diag[0..7], info[0..2] */
+ #define NDS_SD_CMD_PM		11	/* not SD: power chip status and backlight. count 1 = also set the backlight register to sector (0..4); answer: info[0] battery reg 0x20, info[1] volume reg 0x40, info[2] backlight reg 0x41 (0xffffffff if unreadable) */
+ #define NDS_SD_CMD_MICDIAG	10	/* not SD: the microphone counters (touch[] events, diag[] settings), see arm7/microphone.c */
+diff --git a/user/microwin/src/demos/nanox/dsdesk.c b/user/microwin/src/demos/nanox/dsdesk.c
+index 93be88a18..d36b2b8ee 100644
+--- a/user/microwin/src/demos/nanox/dsdesk.c
++++ b/user/microwin/src/demos/nanox/dsdesk.c
+@@ -66,6 +66,7 @@ static const struct item network_items[] = {
+ 	{ "Wi-Fi", "/boot/dssettings", "wifi" },
+ 	{ "Wi-Fi status", "/boot/nxterm", "/boot/wifi-status" },
+ 	{ "SSH server", "/boot/nxterm", "/boot/wifi-ssh" },
++	{ "DSi Wi-Fi test", "/boot/nxterm", "/boot/wifi-dsi-test" },
+ };
+ static const struct item system_items[] = {
+ 	{ "Settings", "/boot/dssettings" },
+diff --git a/vendors/Nintendo/DSI/Makefile b/vendors/Nintendo/DSI/Makefile
+index 37abc9124..3e812b3b6 100644
+--- a/vendors/Nintendo/DSI/Makefile
++++ b/vendors/Nintendo/DSI/Makefile
+@@ -113,6 +113,7 @@ romfs:
+ 	$(ROMFSINST) -p +x /boot/wifi-connect
+ 	$(ROMFSINST) -p +x /boot/wifi-status
+ 	$(ROMFSINST) -p +x /boot/wifi-ssh
++	$(ROMFSINST) -p +x /boot/wifi-dsi-test
+ 	$(ROMFSINST) -p +x /boot/desktop
+ 	$(ROMFSINST) -p +x /boot/desktop-apps
+ 	$(ROMFSINST) -p +x /boot/shutdown
+diff --git a/vendors/Nintendo/DSI/logbody b/vendors/Nintendo/DSI/logbody
+index 74604d769..a81be4379 100644
+--- a/vendors/Nintendo/DSI/logbody
++++ b/vendors/Nintendo/DSI/logbody
+@@ -13,6 +13,8 @@ echo "--- /home/doom/dsdoom.log ---"
+ echo "--- network (nds) ---"
+ ifconfig nds 2>&1
+ iwconfig nds 2>&1
++echo "--- /proc/dsiwifi2 (DSi Wi-Fi chip test) ---"
++/usr/bin/cat /proc/dsiwifi2 2>&1
+ echo "--- /proc/dswifistat (joining) ---"
+ /usr/bin/cat /proc/dswifistat 2>&1
+ echo "--- Wi-Fi window (dsnet.log, DHCP) ---"
+diff --git a/vendors/Nintendo/DSI/wifi-dsi-test b/vendors/Nintendo/DSI/wifi-dsi-test
+new file mode 100644
+index 000000000..012d9cf51
+--- /dev/null
++++ b/vendors/Nintendo/DSI/wifi-dsi-test
+@@ -0,0 +1,11 @@
++#!/bin/sh
++# Start > Network > DSi Wi-Fi test: one bring-up of the DSi's own Wi-Fi chip (Atheros, step 1-3 of docs/ATHEROS-PLAN.md), its answers,
++# then the card log is saved. The DS Wi-Fi is switched off first (both chips share the antenna).
++killall udhcpc 2>/dev/null
++ifconfig nds down 2>/dev/null
++echo "DSi Wi-Fi chip test (a few seconds)..."
++echo 1 > /proc/dsiwifi2
++cat /proc/dsiwifi2
++/bin/sh /boot/savelog
++echo "-- saved in the card log (sd:/linux/DSILOG.TXT) --"
++[ -n "$1" ] || exec /bin/sh
+-- 
+2.56.0
+

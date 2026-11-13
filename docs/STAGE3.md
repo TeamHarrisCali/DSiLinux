@@ -712,3 +712,12 @@ run (3 discovers, 2 selects; w98b needed three runs), gateway in the ARP table, 
 MAC changes per hotspot session (the gateway's MAC differs from w98b). Whether the ping then worked is not in the log (the terminal's
 output is not saved). The hotspot insisting on 5.5/11 Mbit/s as basic rates means it may still send to the console at rates the DS chip
 cannot receive, relying on its retries at lower rates.
+
+### The DSi's own Wi-Fi chip: first bring-up test (w98d)
+
+The user asked for the Atheros chip (WPA2). Step 0 of docs/ATHEROS-PLAN.md: BlocksDS dswifi (MIT) has a complete driver for it and,
+importantly, does not upload firmware: it relies on the firmware the System Menu left in the chip. Whether that firmware is still there
+when DSLinux runs (after Unlaunch, which skips the System Menu) decides how big the job is. w98d (patch 0105) adds a bring-up test on the
+ARM7 (`arm7/twlwifi.c`): antenna, clock, power, the second SDIO controller, card initialisation, manufacturer, chip ID, the firmware flag,
+boot ROM version, and if firmware is there, starting it and waiting for "ready". Run from Start > Network > DSi Wi-Fi test (or
+`echo 1 > /proc/dsiwifi2`), only on request; the result is in the card log. ARM7 program 41.9 KB of 64 KB, ROM 29 KB free.

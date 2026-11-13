@@ -1,6 +1,6 @@
 # Plan: the DSi's second Wi-Fi chip (Atheros, 802.11g, WPA2)
 
-Status: **plan only, not started** (written 2026-11-13; the user will say when to begin).
+Status: **started 2026-11-13.** Step 0 done; steps 1-3 built as a test (w98d, patch 0105), not yet run on the console.
 
 ## Why
 
@@ -91,3 +91,21 @@ the user prefers to start DSi-mode melonDS runs themselves). Steps 4-6 are mostl
 - ROM space (see Size). ARM7 WRAM: the transport must stay small.
 - Licences: dswifi is MIT (usable with attribution in GPL code); `ath6kl` is GPL/ISC; the Nintendo firmware is the user's own copy and is
   never distributed.
+
+## Step 0 results (2026-11-13)
+
+- Reference: BlocksDS **dswifi** (MIT), cloned to `~/Documents/Claude/DSLinuxDSi-third-party/dswifi` (commit 84d91e8). Its
+  `source/arm7/twl/` is a complete driver for this chip: SDIO (`sdio.twl.c`), chip set-up and BMI (`card.twl.c`), HTC/WMI (`ath/`), WPA2
+  handshake (`ieee/wpa.twl.c`, mbedtls for the crypto). Enough protocol reference; the Linux `ath6kl` headers and the BlocksDS example were
+  not needed and not downloaded.
+- **dswifi does not upload firmware.** Its upload code is disabled (`#if 0`); it reads the "host interest" word at +0x58 (non-zero =
+  firmware present, left there by the System Menu), resets the chip into its boot ROM (the firmware stays in RAM), makes a few BMI settings
+  and starts it with BMI_DONE. The disabled code shows what an upload would need for an AR6014: part D and C written and C executed (ROM
+  patches), part A **LZ-compressed** (BMI_LZ_STREAM) to 0x524C00, part B (a database) to 0x53FE18 with its address stored at host
+  interest +0x18. These parts live in HNCA. So whether DSLinux needs an upload depends on whether the firmware survives until DSLinux runs
+  (Unlaunch -> TWiLight skips the System Menu): **the w98d test reads that flag.**
+- Hardware preparation (from dswifi): `GPIO_WIFI` bit 8 clear (Atheros), RTC FOUT registers (commands 0x72 = 0x80, 0x74 = 0x00: the
+  module's 32 kHz clock), power chip register 0x30 = 0x13, `SCFG_WL` bit 0. SDIO controller 2 at 0x04004A00, clock divider 0, 4-bit bus,
+  128-byte blocks. Chip IDs: AR6002 0x02000001, AR6013 0x0D000000, AR6014 0x0D000001; host interest at 0x00520000 (AR601x) or 0x00500400.
+- Our test (`arm7/twlwifi.c`, `/proc/dsiwifi2`, Start > Network > DSi Wi-Fi test) runs steps 1-12 of that sequence with bounded waits and
+  reports where it got to.

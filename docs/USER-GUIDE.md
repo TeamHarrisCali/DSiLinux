@@ -57,6 +57,7 @@ across its top: Desk, Test (self-test), Log (save the log now), Bench.
 | Puzzles > 2048, Sokoban, Sudoku, Life | `dsarcade ...` | arrows or swipes / taps; Sokoban: Space = undo, X / Y = level; Sudoku: tap a cell, then a digit; Life: tap or drag draws, Enter runs |
 | Network > Wi-Fi | `dssettings wifi` | the Wi-Fi window, see below (also a tap on the Wi-Fi bars in the tray) |
 | Network > Wi-Fi status, SSH server | `/boot/wifi-*` | see below |
+| Network > DSi Wi-Fi test | `/boot/wifi-dsi-test` | one bring-up of the DSi's own Wi-Fi chip (development test, see docs/ATHEROS-PLAN.md); switches the DS Wi-Fi off, saves the log |
 | System > Settings | `dssettings` | brightness, pointer speed, desktop colour / pattern / wallpaper (`/home/wallpapers`, photos), clock, info |
 | System > Bench, Save log | `dsbench`, `/boot/savelog` | |
 
