@@ -889,3 +889,14 @@ the DSi Wi-Fi test runs it first and logs PASS / FAIL per vector. `dsiwifi.c`: `
 never logged, wiped with the PMK and PTK at wlan0 down); a WPA2 network is joined with auth mode WPA2-PSK, pairwise AES and the group
 cipher from its RSN element; EAPOL message 1 gets message 2 (our nonce, RSN element), message 3 is checked (MIC), its GTK unwrapped
 with the KEK and answered with message 4, then both keys go to the firmware (ADD_CIPHER_KEY). No data is sent before the keys are in.
+
+### w98s on the console: crypto passes, the connect was never sent (w98t)
+
+w98s's /home/wlan0-test.log: **wpatest passed all 7 vectors on the console** (HMAC, PBKDF2, key unwrap, PTK): gcc 4.0.4's code for
+dsiwpa.c is right. Upload, HTC/WMI and the scan as before (6 networks, all "channel 1", no scan-complete event, no command error).
+Then "no open or WPA2 network of that name in the scan" three times: the typed name was not among them, so no connect command went
+out and WPA2 was not exercised. w98t (patch 0120): the requested name is logged (length too), trailing spaces dropped, matched exactly
+and then ignoring case; a name not in the scan is joined with channel 0 and no BSSID so the firmware searches all channels itself (as
+ath6kl connects), WPA2 with AES if a password was given, with a directed probe for the name (also finds hidden networks). The scan now
+asks for the firmware's channel list (as dswifi) and logs it. gcc 4.0.4 crashed on do_connect() until the new code moved into noinline
+helpers.

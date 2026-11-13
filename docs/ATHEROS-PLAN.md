@@ -2,7 +2,7 @@
 
 Status: **started 2026-11-13.** Steps 0-5 **verified on the console**: firmware uploaded from the DSi's own HNCA file (w98k), HTC/WMI and a
 scan listing WPA2 networks (w98l), and `wlan0` joined an open network, got an address by DHCP and pinged 8.8.8.8 and google.com (w98q).
-Step 6 (WPA2-PSK) **built, not yet tried on the console** (w98s; the crypto passes its test vectors on the PC).
+Step 6 (WPA2-PSK) **built, not yet tried on the console** (w98t). The crypto passes its test vectors on the PC and, built by the DSi's compiler, on the console (w98s).
 Next: try step 6 on the console, faster transfers (CMD53 blocks), a quicker connect, then the Wi-Fi window (step 7).
 
 ## Why
