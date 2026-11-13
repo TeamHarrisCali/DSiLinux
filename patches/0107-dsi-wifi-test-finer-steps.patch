@@ -1,0 +1,303 @@
+From 366e29b9b6781fe16f6c38827783bdbc75149760 Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Fri, 13 Nov 2026 10:39:35 -0600
+Subject: [PATCH] DSi Wi-Fi test: finer steps, results kept on the ARM7, no
+ stale values
+
+The w98d run "stopped at step 1" with no other values: the ARM9 had given
+up after 15 s and read a request block that it never cleared, so leftovers
+of an earlier request could pass for results.
+- The ARM9 clears touch/diag/info before the request; the run may take 30 s.
+- Step 1 split: power/antenna, RTC FOUT, power chip 0x30, SCFG_WL (now a
+  16-bit write); 15 steps; bit 8 of info[0] = the run finished.
+- The ARM7 keeps the last run's results; reading /proc/dsiwifi2 fetches
+  them (request count 1), so a run the ARM9 stopped waiting for still shows
+  where it ended.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c   |  6 +-
+ linux-2.6.x/arch/arm/mach-nds/arm7/twlwifi.c | 62 +++++++++++++++-----
+ linux-2.6.x/arch/arm/mach-nds/volume.c       | 20 ++++---
+ linux-2.6.x/drivers/block/dldi_c.c           | 14 +++--
+ 4 files changed, 72 insertions(+), 30 deletions(-)
+
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c b/linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c
+index 0589b6c63..c72fa62b2 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c
+@@ -44,6 +44,7 @@
+ 
+ extern void wifi_probe(unsigned int *touch, unsigned int *diag, unsigned int *info);
+ extern void twl_wifi_probe(u32 *touch, u32 *diag, u32 *info);
++extern void twl_wifi_report(u32 *touch, u32 *diag, u32 *info);
+ 
+ typedef volatile u16 vu16;
+ typedef volatile u32 vu32;
+@@ -900,7 +901,10 @@ static void nds_sd_request_inner(struct nds_sd_block *b)
+ 			b->result = NDS_SD_ERR_PARAM;
+ 			return;
+ 		}
+-		twl_wifi_probe((u32 *)b->touch, (u32 *)b->diag, (u32 *)b->info);
++		if (b->count == 1)			/* report the last run's results */
++			twl_wifi_report((u32 *)b->touch, (u32 *)b->diag, (u32 *)b->info);
++		else
++			twl_wifi_probe((u32 *)b->touch, (u32 *)b->diag, (u32 *)b->info);
+ 		b->result = NDS_SD_OK;
+ 		return;
+ 
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/twlwifi.c b/linux-2.6.x/arch/arm/mach-nds/arm7/twlwifi.c
+index b1195da23..b3dcf7088 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/arm7/twlwifi.c
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/twlwifi.c
+@@ -268,14 +268,37 @@ static void bmi_wr_reg(u32 addr, u32 val)
+ 
+ /*
+  * The whole bring-up. touch[8], diag[8], info[3] go back to the ARM9:
+- *   info[0] step reached (see the ARM9 side), info[1] controller status at the first failure, info[2] flags:
++ *   info[0] step reached (see the ARM9 side; bit 8 = the run finished), info[1] controller status at the first failure, info[2] flags:
+  *     bit 0 4-bit bus, bit 1 CMD5 skipped (card was already initialised), bit 2 firmware started, bit 3 BMI timed out
+  *   diag[0] manufacturer, [1] chip ID, [2] firmware-loaded flag before reset, [3] reset cause, [4] BMI version,
+  *   [5] ready flag after start, [6] EEPROM version, [7] RX lookahead valid
+  *   touch[0] CCCR revision, [1] OCR, [2] bus interface control, [3] error detail at the first failure, [4] host interest address,
+  *   [5] EEPROM address, [6] ready polls, [7] first RX lookahead word
+  */
++/* the last run's results, kept here so the ARM9 can fetch them later (twl_wifi_report) even if it stopped waiting for the run */
++static u32 r_touch[8], r_diag[8], r_info[3];
++
++void twl_wifi_report(u32 *touch, u32 *diag, u32 *info)
++{
++	int i;
++
++	for (i = 0; i < 8; i++) {
++		touch[i] = r_touch[i];
++		diag[i] = r_diag[i];
++	}
++	for (i = 0; i < 3; i++)
++		info[i] = r_info[i];
++}
++
++static void twl_run(u32 *touch, u32 *diag, u32 *info);
++
+ void twl_wifi_probe(u32 *touch, u32 *diag, u32 *info)
++{
++	twl_run(r_touch, r_diag, r_info);
++	twl_wifi_report(touch, diag, info);
++}
++
++static void twl_run(u32 *touch, u32 *diag, u32 *info)
+ {
+ 	u16 gpio0 = R16(GPIO_WIFI), pwr0 = R16(POWCNT2);
+ 	u32 hi, uploaded, t, ocr = 0;
+@@ -286,18 +309,24 @@ void twl_wifi_probe(u32 *touch, u32 *diag, u32 *info)
+ 	info[0] = info[1] = info[2] = 0;
+ 	fail_stat = fail_err = 0;
+ 
+-	/* 1: power, antenna, clock */
++	/* 1: power, antenna */
+ 	info[0] = 1;
+ 	R16(POWCNT2) = pwr0 | 2;
+ 	R16(GPIO_WIFI) = gpio0 & ~0x100;		/* Atheros */
+ 	tdelay(40000);
+-	nds_rtc_write2(0x72, 0x80);			/* FOUT1, FOUT2: the 32 kHz clock for the module */
++	/* 2: the module's 32 kHz clock (RTC FOUT1, FOUT2) */
++	info[0] = 2;
++	nds_rtc_write2(0x72, 0x80);
+ 	nds_rtc_write2(0x74, 0x00);
++	/* 3: power chip register 0x30 */
++	info[0] = 3;
+ 	dsivol_pm_write(0x30, 0x13);
+-	R32(SCFG_WL) |= 1;
++	/* 4: SCFG_WL (a 16-bit register) */
++	info[0] = 4;
++	R16(SCFG_WL) |= 1;
+ 
+-	/* 2: controller */
+-	info[0] = 2;
++	/* 5: controller */
++	info[0] = 5;
+ 	controller_init();
+ 	switch_device(1);
+ 	tdelay(60000);
+@@ -310,7 +339,7 @@ void twl_wifi_probe(u32 *touch, u32 *diag, u32 *info)
+ 	}
+ 
+ 	/* 3: CMD5 (operating conditions) until ready, CMD3 (address), CMD7 (select); skipped when CMD5 fails because the card is already up */
+-	info[0] = 3;
++	info[0] = 6;
+ 	R16(S_STOP) = 0x100;
+ 	for (t = 0; t < 100; t++) {
+ 		cmd(C_CMD5, ocr, 1);
+@@ -326,7 +355,7 @@ void twl_wifi_probe(u32 *touch, u32 *diag, u32 *info)
+ 		info[2] |= 2;
+ 		fail_stat = fail_err = 0;		/* expected when the card was already initialised */
+ 	} else {
+-		info[0] = 4;
++		info[0] = 7;
+ 		cmd(C_CMD3, 0, 1);
+ 		if (st & 4)
+ 			goto out;
+@@ -336,7 +365,7 @@ void twl_wifi_probe(u32 *touch, u32 *diag, u32 *info)
+ 	}
+ 
+ 	/* 5: function 1 on (no delay between the two writes: dswifi notes a delay there wipes the firmware) */
+-	info[0] = 5;
++	info[0] = 8;
+ 	wr8(0, 0x02, 0x00);
+ 	wr8(0, 0x02, 0x02);
+ 	tdelay(60000);
+@@ -352,7 +381,7 @@ void twl_wifi_probe(u32 *touch, u32 *diag, u32 *info)
+ 	tdelay(60000);
+ 
+ 	/* 6: identify */
+-	info[0] = 6;
++	info[0] = 9;
+ 	touch[0] = rd8(0, 0x00);
+ 	for (t = 0; t < 1000 && rd8(0, 0x03) != 0x02 && !(st & 4); t++)	/* function 1 ready */
+ 		tdelay(1000);
+@@ -366,13 +395,13 @@ void twl_wifi_probe(u32 *touch, u32 *diag, u32 *info)
+ 	diag[2] = uploaded;
+ 
+ 	/* 7: reset into the boot ROM (the firmware stays in RAM), reset cause should be 2 */
+-	info[0] = 7;
++	info[0] = 10;
+ 	intern_wr(0x4000, 0x00000100);
+ 	tdelay(120000);
+ 	diag[3] = intern_rd(0x40C0);
+ 
+ 	/* 8: boot ROM version (BMI) */
+-	info[0] = 8;
++	info[0] = 11;
+ 	mbox_wr32(BMI_GET_TARGET_ID, 1);
+ 	if (mbox_rd32(&diag[4], 500)) {
+ 		info[2] |= 8;
+@@ -388,7 +417,7 @@ void twl_wifi_probe(u32 *touch, u32 *diag, u32 *info)
+ 	}
+ 
+ 	/* 9: the settings dswifi makes before starting the firmware */
+-	info[0] = 9;
++	info[0] = 12;
+ 	intern_wr(hi, 2);
+ 	bmi_wr_reg(0x0180C0, bmi_rd_reg(0x0180C0) | 0x8);
+ 	bmi_wr_reg(0x0040C4, bmi_rd_reg(0x0040C4) | 1);	/* WLAN_SYSTEM_SLEEP */
+@@ -398,7 +427,7 @@ void twl_wifi_probe(u32 *touch, u32 *diag, u32 *info)
+ 		goto out;
+ 
+ 	/* 10: start the firmware that is already there and wait for it */
+-	info[0] = 10;
++	info[0] = 13;
+ 	intern_wr(hi + 0x6C, 0x80);
+ 	intern_wr(hi + 0x74, 0x63);
+ 	mbox_wr32(BMI_DONE, 1);
+@@ -416,7 +445,7 @@ void twl_wifi_probe(u32 *touch, u32 *diag, u32 *info)
+ 	diag[6] = intern_rd(touch[5] + 0x10);		/* its version */
+ 
+ 	/* 11: the firmware's first message (WMI ready) should be waiting in mailbox 0 */
+-	info[0] = 11;
++	info[0] = 14;
+ 	for (t = 0; t < 500; t++) {
+ 		diag[7] = rd8(1, F1_RX_LOOKAHEAD_VALID);
+ 		if ((diag[7] & 1) || (st & 4))
+@@ -424,9 +453,10 @@ void twl_wifi_probe(u32 *touch, u32 *diag, u32 *info)
+ 		tdelay(4000);
+ 	}
+ 	touch[7] = rd32(1, F1_RX_LOOKAHEAD0);
+-	info[0] = 12;					/* all done */
++	info[0] = 15;					/* all done */
+ 
+ out:
++	info[0] |= 0x100;				/* the run finished (not stuck): bit 8 */
+ 	info[1] = fail_stat;
+ 	touch[3] = fail_err;
+ 	R16(GPIO_WIFI) = gpio0;				/* antenna back to the DS chip, power as it was */
+diff --git a/linux-2.6.x/arch/arm/mach-nds/volume.c b/linux-2.6.x/arch/arm/mach-nds/volume.c
+index 04ce0aa87..a9014f96d 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/volume.c
++++ b/linux-2.6.x/arch/arm/mach-nds/volume.c
+@@ -146,14 +146,15 @@ static int settings_write_proc(struct file *file, const char __user *buffer, uns
+  * ARM7 (arm7/twlwifi.c, a few seconds); reading shows the last result (the card log includes it). It refuses while the DS Wi-Fi (nds) is
+  * up: both chips share the antenna.
+  */
+-extern int dsisd_twlwifi(unsigned int *out);
++extern int dsisd_twlwifi(unsigned int *out, int report);
+ static unsigned int twl_d[19];
+ static int twl_ret = -100;	/* -100 = not run yet, -101 = refused (nds up) */
+ 
+-static const char *twl_step[] = { "nothing", "power, antenna, clock", "SDIO controller", "CMD5 (operating conditions)",
+-				  "CMD3/CMD7 (address, select)", "function 1, 4-bit bus, block size", "identify (manufacturer, chip ID)",
+-				  "reset into the boot ROM", "boot ROM version (BMI)", "BMI settings", "start the firmware",
+-				  "wait for the firmware's first message", "all done" };
++static const char *twl_step[] = { "nothing", "power, antenna", "RTC clock output (FOUT)", "power chip register 0x30", "SCFG_WL",
++				  "SDIO controller", "CMD5 (operating conditions)", "CMD3/CMD7 (address, select)",
++				  "function 1, 4-bit bus, block size", "identify (manufacturer, chip ID)", "reset into the boot ROM",
++				  "boot ROM version (BMI)", "BMI settings", "start the firmware", "wait for the firmware's first message",
++				  "all done" };
+ 
+ static const char *twl_chip(unsigned int id)
+ {
+@@ -167,10 +168,12 @@ static int twl_read_proc(char *page, char **start, off_t off, int count, int *eo
+ 
+ 	if (twl_ret == -100)
+ 		len = sprintf(page, "not run yet: echo 1 > /proc/dsiwifi2\n");
++	else if (twl_ret != -101 && dsisd_twlwifi(twl_d, 1) != 0)
++		len = sprintf(page, "the ARM7 does not answer (still busy with the run?); the run's request ended with %d\n", twl_ret);
+ 	else if (twl_ret == -101)
+ 		len = sprintf(page, "refused: switch the DS Wi-Fi off first (ifconfig nds down)\n");
+ 	else
+-		len = sprintf(page, "request %d, reached step %u of 12: %s\n"
++		len = sprintf(page, "request %d (-1 = the ARM9 stopped waiting), reached step %u of 15: %s, run %s\n"
+ 			      "bus %s, CMD5 %s, firmware started %s, BMI %s\n"
+ 			      "CCCR revision %02x  OCR %08x  bus control %02x\n"
+ 			      "manufacturer %08x  chip %08x (%s)\n"
+@@ -179,7 +182,8 @@ static int twl_read_proc(char *page, char **start, off_t off, int count, int *eo
+ 			      "after start: ready %u (polls %u)  EEPROM at %08x version %08x\n"
+ 			      "mailbox: lookahead valid %02x  first word %08x\n"
+ 			      "first failure: controller status %08x  error detail %08x\n",
+-			      twl_ret, in[0], in[0] <= 12 ? twl_step[in[0]] : "?",
++			      twl_ret, in[0] & 0xff, (in[0] & 0xff) <= 15 ? twl_step[in[0] & 0xff] : "?",
++			      (in[0] & 0x100) ? "finished" : "NOT finished (stuck or still running)",
+ 			      (in[2] & 1) ? "4-bit" : "1-bit", (in[2] & 2) ? "skipped (card already up)" : "done",
+ 			      (in[2] & 4) ? "yes" : "no", (in[2] & 8) ? "timed out" : "answered",
+ 			      t[0] & 0xff, t[1], t[2] & 0xff, g[0], g[1], twl_chip(g[1]), t[4], g[2], g[3], g[4],
+@@ -203,7 +207,7 @@ static int twl_write_proc(struct file *file, const char __user *buffer, unsigned
+ 		twl_ret = -101;
+ 		return count;
+ 	}
+-	twl_ret = dsisd_twlwifi(twl_d);
++	twl_ret = dsisd_twlwifi(twl_d, 0);
+ 	printk(KERN_INFO "dsiwifi2: step %u, chip %08x, firmware loaded %u, BMI %08x, ready %u\n",
+ 	       twl_d[16], twl_d[9], twl_d[10], twl_d[12], twl_d[13]);
+ 	return count;
+diff --git a/linux-2.6.x/drivers/block/dldi_c.c b/linux-2.6.x/drivers/block/dldi_c.c
+index b6aac6831..a3f572ffc 100644
+--- a/linux-2.6.x/drivers/block/dldi_c.c
++++ b/linux-2.6.x/drivers/block/dldi_c.c
+@@ -229,16 +229,20 @@ int dsisd_wifiprobe(unsigned int *out)
+ 	return ret;
+ }
+ 
+-/* The Atheros chip bring-up on the ARM7 (arm7/twlwifi.c): out[0..7] touch, out[8..15] diag, out[16..18] info. 0 = ok. It takes a few
+- * seconds at most; the request block keeps whatever the ARM7 had written if it does not finish (out[] is filled either way). */
+-int dsisd_twlwifi(unsigned int *out)
++/* The Atheros chip bring-up on the ARM7 (arm7/twlwifi.c): out[0..7] touch, out[8..15] diag, out[16..18] info. 0 = ok. report = 1 fetches
++ * the last run's results instead of running. A run takes a few seconds at most; the request block keeps whatever the ARM7 had written if it does not finish (out[] is filled either way). */
++int dsisd_twlwifi(unsigned int *out, int report)
+ {
+ 	int ret, i, save;
+ 
+ 	down(&sd_mutex);
++	for (i = 0; i < 8; i++)		/* no leftovers from an earlier request may pass for results */
++		sd_block.touch[i] = sd_block.diag[i] = 0;
++	for (i = 0; i < 3; i++)
++		sd_block.info[i] = 0;
+ 	save = sd_timeout;
+-	sd_timeout = 15 * HZ;
+-	ret = sd_request_locked(NDS_SD_CMD_TWLWIFI, 0, 0);
++	sd_timeout = report ? 3 * HZ : 30 * HZ;
++	ret = sd_request_locked(NDS_SD_CMD_TWLWIFI, 0, report ? 1 : 0);
+ 	sd_timeout = save;
+ 	dmac_flush_range((unsigned long)&sd_block, (unsigned long)&sd_block + sizeof(sd_block));	/* also after a timeout */
+ 	for (i = 0; i < 8; i++) {
+-- 
+2.56.0
+

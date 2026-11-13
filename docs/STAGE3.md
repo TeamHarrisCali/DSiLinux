@@ -732,3 +732,15 @@ place, so `scripts/install-apps.sh` copies this build's binaries, sets the flat 
 container) and writes them into the image with debugfs, then checks the sizes; `release.sh` runs it after copying the ROM. Checked on a
 throwaway 256 MB image (all 14 installed, flag `0x3 Load-to-Ram Has-PIC-GOT`). ROM: 828 KB free (was 29 KB). w98e was built while the card
 was in the console: copy the ROM and run install-apps.sh when the card is back. Not yet run on the console.
+
+### w98d DSi Wi-Fi test result; w98e/w98f on the card
+
+The w98d test log: `dsisd: ARM7 did not answer (cmd 13)` after 15 s, then `dsiwifi2: step 1, chip 0, ...`, and several log sections
+(network, dswifistat, dsiwifi2) missing because the log's own writes timed out while the ARM7 was busy. The ARM7 handles SD requests in
+its interrupt handler, so nothing else ran meanwhile; it recovered later (the log was written). "Step 1" cannot be trusted: the ARM9 never
+cleared the request block, so after the timeout it may have read an earlier request's leftovers; the ARM7 may equally have been busy
+with something else first (the test script switches the DS Wi-Fi off just before). w98f (patch 0107): the block is cleared first, step 1
+is split into four (antenna, RTC clock output, power chip, SCFG_WL as a 16-bit write), the ARM9 waits 30 s, and the ARM7 keeps the
+results so a later read of /proc/dsiwifi2 shows where the run really ended ("run finished" / "NOT finished").
+w98f is on the card together with the programs moved out of the ROM (w98e): install-apps.sh wrote all 14 into ROOTFS.IMG /usr/bin; the
+image checks clean.
