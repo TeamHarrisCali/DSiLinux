@@ -680,3 +680,15 @@ a prefetch abort (a jump to an address no MPU region allows) went to a stub that
 bad jump for ever, at full speed, with no name in the message. Which program did it is unknown (Doom, Game Boy, 3D gears, the maze and the
 Wi-Fi window had been started). w98a (patch 0102): a prefetch abort prints the program, pid, pc, lr, sp and code start once and stops the
 program with SIGSEGV. Scan dwell 150 -> 200 ms per channel.
+
+### w98a: joined, no address; the access point sends the console away (w98b)
+
+w98a log (the hotspot now named "Nothing", channel 6, open, signal 167 of the scan's range 22-167 now that signals are averaged): both
+connects joined, then udhcpc sent 3 discovers with no lease; at log time the state was `up` only (auth 4, assoc 2, tx-done 7 since the
+last connect). In the ARM7 code only a **deauthentication** from the access point leads to exactly that state (it clears "associated" and
+"authenticated" and logs in again), so the hotspot accepted the console and then sent it away. Its reason code was thrown away, and
+**disassociation** frames were ignored entirely (the console would keep sending as if joined). w98b (patch 0103): a join event log in
+`/proc/dswifistat` (`events: auth-sent(0)@12 auth-answer(0)@13 assoc-sent ... DEAUTH(reason)@... first-data-tx ...`), disassociation
+handled (logged, association requested again), the re-login after a deauthentication uses the network's key mode instead of "none", and
+the Wi-Fi window logs the join state when DHCP fails and retries once after re-joining. The reason code will say why the phone sends the
+console away (e.g. 7 = data from a station it does not consider associated, 4 = inactivity).

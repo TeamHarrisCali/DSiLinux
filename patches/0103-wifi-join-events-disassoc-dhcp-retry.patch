@@ -1,0 +1,262 @@
+From a7fcc4be59fb9cd5327fc2132fc9fae269f5b51a Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Fri, 13 Nov 2026 09:18:38 -0600
+Subject: [PATCH] Wi-Fi: join event log, handle disassociation, DHCP retry
+
+- ARM7 join event log (last 12: auth/assoc sent and answered, deauth and
+  disassoc with reason codes, first data frame each way after joining,
+  AP lookup) in the stats; /proc/dswifistat prints it with data counts.
+- Disassociation frames were ignored (the console kept sending as if
+  joined); now logged and the association is requested again.
+- After a deauthentication the new login used WEPMODE_NONE; now the
+  network's key mode.
+- Wi-Fi window: on DHCP failure log the join state, wait for a re-join and
+  run DHCP once more.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ linux-2.6.x/arch/arm/mach-nds/arm7/wifi.c   | 68 ++++++++++++++++++++-
+ linux-2.6.x/drivers/net/wireless/nds.c      | 14 +++++
+ linux-2.6.x/include/asm-arm/arch-nds/wifi.h |  4 ++
+ user/microwin/src/demos/nanox/dsnet.c       | 19 +++++-
+ 4 files changed, 100 insertions(+), 5 deletions(-)
+
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/wifi.c b/linux-2.6.x/arch/arm/mach-nds/arm7/wifi.c
+index cdb4cad11..662d959fb 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/arm7/wifi.c
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/wifi.c
+@@ -55,6 +55,7 @@ static void Wifi_CopyMacAddr(volatile void *dest, volatile void *src);
+ static void Wifi_SendAuthPacket(int wepmode);
+ static void Wifi_SendBackChallengeText(u8 * challenge);
+ static void Wifi_SendAssocPacket(void);
++static int Wifi_ProcessDisassociationFrame(int macbase, int framelen);
+ static void Wifi_Intr_RxEnd(void);
+ 
+ /* Stuff to read flash, for setting up wifi device */
+@@ -107,6 +108,24 @@ static void wtrace(u32 n)
+ 		wifi_data.stats[WIFI_TRACE] = n;
+ }
+ 
++/*
++ * Join event log for /proc/dswifistat: event << 24 | argument << 8 | time (beacon-time interrupts, about 100 ms each, low 8 bits).
++ * 1 authentication sent (key mode), 2 authentication answer (status), 3 association sent, 4 association answer (status),
++ * 5 deauthenticated (reason), 6 disassociated (reason), 7 first data frame sent after joining (length), 8 first data frame received
++ * after joining (length), 9 looked for the network (1 = found in the list, 0 = not yet heard).
++ */
++#define JLOG_N	12
++static int jlog_tx_seen, jlog_rx_seen;
++
++static void jlog(u32 ev, u32 arg)
++{
++	if (!wifi_data.stats)
++		return;
++	wifi_data.stats[WIFI_STATS_JLOG_0 + wifi_data.stats[WIFI_STATS_JLOG_POS] % JLOG_N] =
++	    (ev << 24) | ((arg & 0xffff) << 8) | (wifi_data.stats[WIFI_STATS_TBTT] & 0xff);
++	wifi_data.stats[WIFI_STATS_JLOG_POS]++;
++}
++
+ /* The chip is waited for with a limit: a chip that does not answer must not hang the ARM7 (SD card, sound, touch all live here) */
+ #define WIFI_SIO_TRIES	0x10000
+ 
+@@ -401,8 +420,10 @@ static void wifi_try_to_associate(void)
+ 	if (i == WIFI_MAX_AP) {
+ 		/* haven't see it yet, just wait */
+ 		wifi_data.state |= WIFI_STATE_ASSOCIATING;
++		jlog(9, 0);
+ 		return;
+ 	}
++	jlog(9, 1);
+ 
+ 	Wifi_CopyMacAddr(wifi_data.bssid, wifi_data.aplist[i].bssid);
+ 	Wifi_CopyMacAddr(wifi_data.apmac, wifi_data.aplist[i].bssid);
+@@ -1198,6 +1219,8 @@ static int Wifi_ProcessReassocResponse(int macbase, int framelen)
+ 
+ 	status = fixed_params[1];
+ 	wifi_data.stats[WIFI_STATS_JOIN_STATUS] = (wifi_data.stats[WIFI_STATS_JOIN_STATUS] & 0xffff) | ((u32)status << 16);
++	jlog(4, status);
++	jlog_tx_seen = jlog_rx_seen = 0;
+ 	if (status == 0) {	// status code, 0==success
+ 		WIFI_AIDS = fixed_params[2];
+ 		WIFI_REG(0x2A) = fixed_params[2];
+@@ -1270,6 +1293,7 @@ static int Wifi_ProcessAuthenticationFrame(int macbase, int framelen)
+ 	auth_sequence = fixed_params[1];
+ 	status = fixed_params[2];
+ 	wifi_data.stats[WIFI_STATS_JOIN_STATUS] = (wifi_data.stats[WIFI_STATS_JOIN_STATUS] & 0xffff0000) | status;
++	jlog(2, status);
+ 	// open system
+ 	if (auth_algorithm == 0) {
+ 		// a good response
+@@ -1307,6 +1331,32 @@ static int Wifi_ProcessAuthenticationFrame(int macbase, int framelen)
+ 	return WFLAG_PACKET_MGT;
+ }
+ 
++/*
++ * The access point ended the association (but not the authentication). The original code ignored this: the console went on sending as
++ * if joined and the access point dropped everything. Now it is logged and the association is asked for again (wifi_join_tick() repeats
++ * that every second until it is accepted).
++ */
++static int Wifi_ProcessDisassociationFrame(int macbase, int framelen)
++{
++	Wifi_RxHeader packetheader;
++	int datalen;
++	u8 data[64];
++
++	Wifi_MACCopy((u16 *) & packetheader, macbase, 0, 12);
++	datalen = packetheader.byteLength;
++	if (datalen > 64)
++		datalen = 64;
++	Wifi_MACCopy((u16 *) data, macbase, 12, (datalen + 1) & ~1);
++	if (!Wifi_CmpMacAddr(data + 4, wifi_data.MacAddr) || !Wifi_CmpMacAddr(data + 16, wifi_data.bssid))
++		return WFLAG_PACKET_MGT;
++	jlog(6, ((u16 *) (data + 24))[0]);
++	if (wifi_data.state & WIFI_STATE_ASSOCIATED) {
++		wifi_data.state &= ~WIFI_STATE_ASSOCIATED;
++		Wifi_SendAssocPacket();
++	}
++	return WFLAG_PACKET_MGT;
++}
++
+ static int Wifi_ProcessDeAuthenticationFrame(int macbase, int framelen)
+ {
+ 	Wifi_RxHeader packetheader;
+@@ -1331,6 +1381,7 @@ static int Wifi_ProcessDeAuthenticationFrame(int macbase, int framelen)
+ 	}
+ 	// bad things! they booted us!.
+ 	// back to square 1.
++	jlog(5, ((u16 *) (data + 24))[0]);	/* the reason code is the frame body */
+ 	if (wifi_data.curMode == WIFI_AP_ADHOC) {
+ 		wifi_data.state |= WIFI_STATE_AUTHENTICATED;
+ 		wifi_data.state &= ~(WIFI_STATE_ASSOCIATED);
+@@ -1348,7 +1399,7 @@ static int Wifi_ProcessDeAuthenticationFrame(int macbase, int framelen)
+ 		wifi_led_write((power_read(POWER_CONTROL) &
+ 			     ~POWER0_LED_FAST) | POWER0_LED_BLINK);
+ 
+-		Wifi_SendAuthPacket(WEPMODE_NONE);
++		Wifi_SendAuthPacket(wifi_data.curWepmode);	/* was WEPMODE_NONE: a WEP network then refused the new login */
+ 	}
+ 
+       out:
+@@ -1385,8 +1436,9 @@ static int Wifi_ProcessReceivedFrame(int macbase, int framelen)
+ 	case 0x10:		// 0100 00 Probe Request
+ 	case 0x14:		// 0101 00 Probe Response
+ 	case 0x24:		// 1001 00 ATIM
+-	case 0x28:		// 1010 00 Disassociation
+ 		return WFLAG_PACKET_MGT;
++	case 0x28:		// 1010 00 Disassociation
++		return Wifi_ProcessDisassociationFrame(macbase, framelen);
+ 	case 0x2C:		// 1011 00 Authentication
+ 		// check auth response to ensure we're in
+ 		return Wifi_ProcessAuthenticationFrame(macbase, framelen);
+@@ -1483,6 +1535,10 @@ static void Wifi_Intr_RxEnd(void)
+ 		if ((wifi_data.state & WIFI_STATE_ASSOCIATED) && temp == WFLAG_PACKET_DATA) {	// if packet type is requested, forward it to the rx queue
+ 			if (wifi_data.state & (WIFI_STATE_RXPENDING))
+ 				break;
++			if (!jlog_rx_seen) {
++				jlog_rx_seen = 1;
++				jlog(8, full_packetlen);
++			}
+ 			if (!Wifi_QueueRxMacData(base, full_packetlen)) {
+ 				wifi_data.state |= WIFI_STATE_RXPENDING;
+ 				wifi_data.stats[WIFI_STATS_RXPACKETS]++;
+@@ -1664,6 +1720,12 @@ void wifi_send_ether_packet(u16 length, u_char * data)
+ 	u16 framehdr[6 + 12 + 2];
+ 	int i;
+ 
++	wifi_data.stats[WIFI_STATS_TX_DATA]++;
++	if (!jlog_tx_seen) {
++		jlog_tx_seen = 1;
++		jlog(7, length);
++	}
++
+ 	for (i = 0; i < 20; i++)
+ 		framehdr[i] = 0;
+ 
+@@ -1812,6 +1874,7 @@ static void Wifi_SendAuthPacket(int wepmode)
+ 	((u16 *) data)[5] = i + 6 - 12 + 4;	// length
+ 
+ 	wifi_data.stats[WIFI_STATS_AUTH_TRIES]++;
++	jlog(1, wepmode);
+ 	wifi_send_raw(i + 6, data);
+ }
+ 
+@@ -1852,6 +1915,7 @@ static void Wifi_SendAssocPacket(void)
+ 	int i, j, numrates;
+ 
+ 	wifi_data.stats[WIFI_STATS_ASSOC_TRIES]++;
++	jlog(3, 0);
+ 	i = Wifi_GenMgtHeader(data, 0x0000);
+ 
+ 	if (wifi_data.curWepmode) {
+diff --git a/linux-2.6.x/drivers/net/wireless/nds.c b/linux-2.6.x/drivers/net/wireless/nds.c
+index a8acc1b8b..0a868e24a 100644
+--- a/linux-2.6.x/drivers/net/wireless/nds.c
++++ b/linux-2.6.x/drivers/net/wireless/nds.c
+@@ -1319,6 +1319,20 @@ static int dswifistat_read_proc(char *page, char **start, off_t off, int count,
+ 		       arm7_stats[WIFI_STATS_TX_DONE], arm7_stats[WIFI_STATS_TX_ERR], arm7_stats[WIFI_STATS_TBTT], arm7_stats[WIFI_STATS_TXSTAT] & 0xffff,
+ 		       arm7_stats[WIFI_STATS_TXHDR], arm7_stats[WIFI_STATS_TXHDR2],
+ 		       arm7_stats[WIFI_STATS_RX_FROM_AP], arm7_stats[WIFI_STATS_RX_TO_US], arm7_stats[WIFI_STATS_RX_AUTH]);
++	/* data frames both ways, then the join events, oldest first (time = beacon-time ticks of ~100 ms, low 8 bits) */
++	len += sprintf(page + len, "data tx %u rx %u\nevents:", arm7_stats[WIFI_STATS_TX_DATA], arm7_stats[WIFI_STATS_RXPACKETS]);
++	{
++		static const char *ev[] = { "?", "auth-sent", "auth-answer", "assoc-sent", "assoc-answer", "DEAUTH", "DISASSOC",
++					    "first-data-tx", "first-data-rx", "look-for-ap" };
++		u32 n = arm7_stats[WIFI_STATS_JLOG_POS], k = n > 12 ? n - 12 : 0;
++
++		for (; k < n; k++) {
++			u32 e = arm7_stats[WIFI_STATS_JLOG_0 + k % 12], c = e >> 24;
++
++			len += sprintf(page + len, " %s(%u)@%u", c < 10 ? ev[c] : "?", (e >> 8) & 0xffff, e & 0xff);
++		}
++		len += sprintf(page + len, "\n");
++	}
+ 	/* the chip's counters 0x1B0..0x1DE, 16 bit each (0x1C0: transmit errors) */
+ 	len += sprintf(page + len, "hw");
+ 	for (i = WIFI_STATS_HW_1B0; i < WIFI_STATS_HW_1DC; i++)
+diff --git a/linux-2.6.x/include/asm-arm/arch-nds/wifi.h b/linux-2.6.x/include/asm-arm/arch-nds/wifi.h
+index b7ee82d81..c0d09b006 100644
+--- a/linux-2.6.x/include/asm-arm/arch-nds/wifi.h
++++ b/linux-2.6.x/include/asm-arm/arch-nds/wifi.h
+@@ -65,6 +65,10 @@ enum WIFI_STATS {
+ 	WIFI_STATS_TXSTAT,	/* the transmit status register (0xB8) at the last transmit end */
+ 	WIFI_STATS_TXHDR,	/* words 0 and 1 of the management transmit buffer's header after the last transmit end (status written back by the chip) */
+ 	WIFI_STATS_TXHDR2,	/* words 2 and 3 */
++	WIFI_STATS_TX_DATA,	/* data frames handed to the chip */
++	WIFI_STATS_JLOG_POS,	/* join event log: number of events so far; the last 12 are in JLOG_0..11 */
++	WIFI_STATS_JLOG_0, WIFI_STATS_JLOG_1, WIFI_STATS_JLOG_2, WIFI_STATS_JLOG_3, WIFI_STATS_JLOG_4, WIFI_STATS_JLOG_5,
++	WIFI_STATS_JLOG_6, WIFI_STATS_JLOG_7, WIFI_STATS_JLOG_8, WIFI_STATS_JLOG_9, WIFI_STATS_JLOG_10, WIFI_STATS_JLOG_11,
+ 
+ 	WIFI_STATS_MAX
+ };
+diff --git a/user/microwin/src/demos/nanox/dsnet.c b/user/microwin/src/demos/nanox/dsnet.c
+index 9267f8224..800d153fc 100644
+--- a/user/microwin/src/demos/nanox/dsnet.c
++++ b/user/microwin/src/demos/nanox/dsnet.c
+@@ -468,9 +468,22 @@ static void connect_to(struct net *n, const char *key)
+ 		return;
+ 	}
+ 	dlog("joined");
+-	say("Asking for an address (DHCP)...");
+-	run("udhcpc -n -q -i nds > /tmp/dsnet-dhcp.log 2>&1");
+-	wifi_ip(ip);
++	{
++		int tries;
++
++		for (tries = 0; tries < 2; tries++) {
++			say(tries ? "No answer: joining again, DHCP..." : "Asking for an address (DHCP)...");
++			run("udhcpc -n -q -i nds >> /tmp/dsnet-dhcp.log 2>&1");
++			wifi_ip(ip);
++			if (ip[0])
++				break;
++			/* what the join looked like at that moment (the access point may have sent the console away) */
++			dlog("no address (DHCP); join state:");
++			run("cat /proc/dswifistat >> /tmp/dsnet.log 2>&1");
++			if (tries == 0 && !join_wait(n->ssid, n->gonly))
++				break;
++		}
++	}
+ 	dlog(ip[0] ? ip : "no address (DHCP): /tmp/dsnet-dhcp.log");
+ 	if (ip[0]) {
+ 		snprintf(cur_ssid, sizeof(cur_ssid), "%s", n->ssid);
+-- 
+2.56.0
+
