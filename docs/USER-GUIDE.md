@@ -28,8 +28,10 @@ across its top: Desk, Test (self-test), Log (save the log now), Bench.
 
 - **Start menu** (bottom left): Terminal, Files, the groups Accessories, Multimedia, Games, Puzzles, Network, System, then Exit desktop and Shut down.
   Groups open to the side while the pointer is on them; the menu closes by itself after 8 seconds.
-- **Taskbar:** one button per window (click: bring it to the front, click the active one: minimise it). **Tray:** Wi-Fi bars (grey = Wi-Fi on but
-  no address yet, black = online), battery (green / yellow / red, a yellow mark while charging), volume (changes pop up a percentage), clock.
+- **Taskbar:** one button per window (click: bring it to the front, click the active one: minimise it). **Tray**, pictures only: Wi-Fi bars
+  (white = Wi-Fi off, grey = on but no address yet, black = online), battery (filled to the level, green / yellow / red, a yellow mark while
+  charging), volume (0-3 sound waves, a red cross when muted), then the clock. Point at a picture (or tap it) to see the details: battery and
+  volume percentage, the network and address. A tap on the Wi-Fi bars opens the Wi-Fi window. Volume changes also pop up a bar at the top.
 
 ## Programs
 
@@ -53,7 +55,8 @@ across its top: Desk, Test (self-test), Log (save the log now), Bench.
 | Games > DOOM | `/home/doom/dsdoom` | shareware episode; buttons in the table above |
 | Games > Minesweeper, Tetris | `landmine`, `ntetris` | |
 | Puzzles > 2048, Sokoban, Sudoku, Life | `dsarcade ...` | arrows or swipes / taps; Sokoban: Space = undo, X / Y = level; Sudoku: tap a cell, then a digit; Life: tap or drag draws, Enter runs |
-| Network > Wi-Fi scan / connect / status, SSH server | `/boot/wifi-*` | see below |
+| Network > Wi-Fi | `dssettings wifi` | the Wi-Fi window, see below (also a tap on the Wi-Fi bars in the tray) |
+| Network > Wi-Fi status, SSH server | `/boot/wifi-*` | see below |
 | System > Settings | `dssettings` | brightness, pointer speed, desktop colour / pattern / wallpaper (`/home/wallpapers`, photos), clock, info |
 | System > Bench, Save log | `dsbench`, `/boot/savelog` | |
 
@@ -64,9 +67,13 @@ Every program closes with q or Esc, or with the window's close box.
 The DSi's DS-compatible Wi-Fi chip is used: it joins **open or WEP networks on 2.4 GHz** (802.11b), not WPA/WPA2. A phone hotspot works if its
 security can be set to "None" (iPhones cannot); a laptop hotspot works if it is open and allows 802.11b rates. Your PC must be on the same network.
 
-1. **Network > Wi-Fi scan:** lists the networks and whether they are encrypted.
-2. **Network > Wi-Fi connect:** the first time it asks for the network name and the WEP key (empty = open network) and keeps them in `/home/wifi.conf`;
-   then it joins and asks for an address (DHCP). To change network: `rm /home/wifi.conf` in the terminal and connect again.
+1. **Network > Wi-Fi** (or tap the Wi-Fi bars in the tray) opens the Wi-Fi window:
+   - **Wi-Fi: On / Off** switches the radio. **Scan** lists the networks (switching Wi-Fi on first if it is off), strongest first, with signal
+     bars, a padlock for WEP, and "saved" / "online".
+   - Choose one (d-pad, or tap) and **Connect** (A / Enter, or tap it again). A WEP network asks for its key the first time (5 or 13 letters,
+     or 10 / 26 hex digits); after a working connection it is saved in `/home/wifi.known` and `/home/wifi.conf`. **Forget** removes a saved key.
+   - Keys: s or B = scan, w = Wi-Fi on/off, f = forget, q / Esc = close.
+2. In the terminal: `/boot/wifi-scan` prints the same list (`cat /proc/dswifi` is the raw list), `/boot/wifi-connect` asks for name and key.
 3. **Network > Wi-Fi status:** address, Wi-Fi state, routes. The tray shows the same at a glance.
 4. **Network > SSH server:** makes the host key once (about a minute) and starts Dropbear. Password logins are switched off as soon as
    `/home/.ssh/authorized_keys` exists (an RSA public key). The server is old; from a current PC:

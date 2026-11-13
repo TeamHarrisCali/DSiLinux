@@ -1,0 +1,1135 @@
+From 7162620c0b3599dd5f0b695ae649c16d86c21ad3 Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Fri, 13 Nov 2026 00:16:03 -0600
+Subject: [PATCH] Wi-Fi window, tray pictures with tooltips, /proc/dswifi
+ network list
+
+- nds driver: /proc/dswifi scans, fetches the ARM7's AP list, invalidates the
+  cache over it and prints "bssid channel open|wep signal name" per network;
+  nds_get_scan invalidates the list too.
+- dsnet.c (linked into dssettings, "dssettings wifi"): Wi-Fi on/off, scan
+  (turns Wi-Fi on), list with signal/WEP/saved/online, connect with WEP key
+  entry, saved networks in /home/wifi.known, forget.
+- dsdesk: tray shows Wi-Fi, battery and volume as pictures only, with a
+  tooltip on hover or tap; a tap on the Wi-Fi bars opens the Wi-Fi window.
+  Network menu: Wi-Fi, Wi-Fi status, SSH server.
+- wifi-scan prints /proc/dswifi.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ linux-2.6.x/drivers/net/wireless/nds.c     |  49 ++
+ user/microwin/src/demos/nanox/Makefile     |   7 +-
+ user/microwin/src/demos/nanox/dsdesk.c     | 268 +++++++---
+ user/microwin/src/demos/nanox/dsnet.c      | 564 +++++++++++++++++++++
+ user/microwin/src/demos/nanox/dssettings.c |   4 +
+ vendors/Nintendo/DSI/wifi-scan             |  12 +-
+ 6 files changed, 836 insertions(+), 68 deletions(-)
+ create mode 100644 user/microwin/src/demos/nanox/dsnet.c
+
+diff --git a/linux-2.6.x/drivers/net/wireless/nds.c b/linux-2.6.x/drivers/net/wireless/nds.c
+index c85c50cf5..4918699e0 100644
+--- a/linux-2.6.x/drivers/net/wireless/nds.c
++++ b/linux-2.6.x/drivers/net/wireless/nds.c
+@@ -543,6 +543,8 @@ static int nds_get_scan(struct net_device *dev,
+ 	ap_query_complete = 0;
+ 	nds_fifo_send(FIFO_WIFI_CMD(FIFO_WIFI_CMD_AP_QUERY, 1));
+ 	wait_event_interruptible_timeout(ndswifi_wait, ap_query_complete != 0, 3 * HZ);
++	/* and again now that the ARM7 has stopped writing: lines read since the first invalidate would be stale */
++	dmac_inv_range((unsigned long)&aplist[0], (unsigned long)&aplist[WIFI_MAX_AP]);
+ 
+ 	for (i = 0; i < WIFI_MAX_AP; i++) {
+ 		if (!aplist[i].channel)
+@@ -1226,6 +1228,52 @@ static struct fifo_cb nds_cmd_fifocb = {
+ 	.handler.wifi_handler = nds_cmd_from_arm7
+ };
+ 
++/*
++ * /proc/dswifi (DSLinuxDSi): the networks the chip has heard, one per line, for programs that should not depend on iwlist (the image's
++ * iwlist speaks wireless extensions 17, this driver 19, whose scan format differs: the network names got lost). Reading it starts a
++ * channel scan (up to 3 s), then lists:   bssid channel open|wep signal name
++ */
++static int dswifi_read_proc(char *page, char **start, off_t off, int count, int *eof, void *data)
++{
++	int i, len = 0;
++
++	if (off > 0) {			/* everything was given out by the first read */
++		*eof = 1;
++		return 0;
++	}
++	scan_complete = 0;
++	nds_fifo_send(FIFO_WIFI_CMD(FIFO_WIFI_CMD_SCAN, 0));
++	wait_event_interruptible_timeout(ndswifi_wait, scan_complete != 0, 3 * HZ);
++	ap_query_complete = 0;
++	nds_fifo_send(FIFO_WIFI_CMD(FIFO_WIFI_CMD_AP_QUERY, 1));	/* stop list updates while it is read */
++	wait_event_interruptible_timeout(ndswifi_wait, ap_query_complete != 0, 3 * HZ);
++	dmac_inv_range((unsigned long)&aplist[0], (unsigned long)&aplist[WIFI_MAX_AP]);	/* what the ARM7 wrote, not old cache lines */
++	for (i = 0; i < WIFI_MAX_AP && len < PAGE_SIZE - 80; i++) {
++		char name[33];
++		int n = aplist[i].ssid_len, k;
++
++		if (!aplist[i].channel)
++			continue;
++		if (n < 0 || n > 32)
++			n = 0;
++		for (k = 0; k < n; k++) {
++			char c = aplist[i].ssid[k];
++
++			name[k] = (c >= 32 && c < 127) ? c : '?';
++		}
++		name[n] = 0;
++		len += sprintf(page + len, "%02x:%02x:%02x:%02x:%02x:%02x %d %s %d %s\n",
++			       aplist[i].bssid[0], aplist[i].bssid[1], aplist[i].bssid[2], aplist[i].bssid[3], aplist[i].bssid[4],
++			       aplist[i].bssid[5], aplist[i].channel, (aplist[i].flags & WFLAG_APDATA_WEP) ? "wep" : "open",
++			       aplist[i].rssi, name);
++	}
++	ap_query_complete = 0;
++	nds_fifo_send(FIFO_WIFI_CMD(FIFO_WIFI_CMD_AP_QUERY, 0));	/* updates on again */
++	wait_event_interruptible_timeout(ndswifi_wait, ap_query_complete != 0, 3 * HZ);
++	*eof = 1;
++	return len;
++}
++
+ static int __init init_nds(void)
+ {
+ 	u8 *p = NULL;
+@@ -1240,6 +1288,7 @@ static int __init init_nds(void)
+ 
+ 	/* need to talk to the device, to set it up */
+ 	register_fifocb(&nds_cmd_fifocb);
++	create_proc_read_entry("dswifi", 0444, NULL, dswifi_read_proc, NULL);
+ 
+ 	/* Initialise stats buffer and send address to ARM7 */
+ 	for (i = 0; i < WIFI_STATS_MAX; i++)
+diff --git a/user/microwin/src/demos/nanox/Makefile b/user/microwin/src/demos/nanox/Makefile
+index a7bf461f4..31709aa3a 100644
+--- a/user/microwin/src/demos/nanox/Makefile
++++ b/user/microwin/src/demos/nanox/Makefile
+@@ -91,7 +91,8 @@ OBJS =	demo.o \
+ 	dssettings.o \
+ 	dsgame.o \
+ 	dsarcade.o \
+-	dsgb.o
++	dsgb.o \
++	dsnet.o
+ 
+ TARGETS = \
+ 	$(TOP)/bin/dsdesk $(TOP)/bin/dsnotes $(TOP)/bin/dsfiles $(TOP)/bin/dsbench $(TOP)/bin/dsgl3d $(TOP)/bin/dsgx $(TOP)/bin/dsplay $(TOP)/bin/dsmemo $(TOP)/bin/dscam $(TOP)/bin/dsgallery $(TOP)/bin/dssettings $(TOP)/bin/dsgame $(TOP)/bin/dsarcade $(TOP)/bin/dsgb \
+@@ -213,9 +214,9 @@ $(TOP)/bin/dsgb: dsgb.o dsgb_core.h peanut_gb.h w95.h $(NANOXCLIENTLIBS) $(TOP)/
+ 	@echo "Linking $@ ..."
+ 	$(CC) $(CFLAGS) $(LDFLAGS) $< -o $@ $(LD_NANOXCLIENTLIBS)
+ 
+-$(TOP)/bin/dssettings: dssettings.o w95.h $(NANOXCLIENTLIBS) $(TOP)/config
++$(TOP)/bin/dssettings: dssettings.o dsnet.o w95.h $(NANOXCLIENTLIBS) $(TOP)/config
+ 	@echo "Linking $@ ..."
+-	$(CC) $(CFLAGS) $(LDFLAGS) dssettings.o -o $@ $(LD_NANOXCLIENTLIBS)
++	$(CC) $(CFLAGS) $(LDFLAGS) dssettings.o dsnet.o -o $@ $(LD_NANOXCLIENTLIBS)
+ 
+ $(TOP)/bin/dsmemo: dsmemo.o w95.h $(NANOXCLIENTLIBS) $(TOP)/config
+ 	@echo "Linking $@ ..."
+diff --git a/user/microwin/src/demos/nanox/dsdesk.c b/user/microwin/src/demos/nanox/dsdesk.c
+index c452daf7c..93be88a18 100644
+--- a/user/microwin/src/demos/nanox/dsdesk.c
++++ b/user/microwin/src/demos/nanox/dsdesk.c
+@@ -63,8 +63,7 @@ static const struct item puzzles[] = {
+ 	{ "Life", "/boot/dsarcade", "life" },
+ };
+ static const struct item network_items[] = {
+-	{ "Wi-Fi scan", "/boot/nxterm", "/boot/wifi-scan" },
+-	{ "Wi-Fi connect", "/boot/nxterm", "/boot/wifi-connect" },
++	{ "Wi-Fi", "/boot/dssettings", "wifi" },
+ 	{ "Wi-Fi status", "/boot/nxterm", "/boot/wifi-status" },
+ 	{ "SSH server", "/boot/nxterm", "/boot/wifi-ssh" },
+ };
+@@ -233,6 +232,18 @@ static void launch(const char *prog, const char *arg)
+ #define VOL_SECONDS	2
+ static int bar_dirty;
+ 
++/* the tray's pictures: where draw_bar() put them, for pointing and tapping */
++#define TRAY_WIFI	0
++#define TRAY_BAT	1
++#define TRAY_VOL	2
++#define TRAY_W		50	/* the three pictures, without the clock */
++#define TIP_SECONDS	4
++static int tray_x0[3], tray_x1[3];
++static GR_WINDOW_ID tipwin;
++static int tip_item = -1, tip_w;
++static time_t tip_since;
++static char tip_text[48];
++
+ /*
+  * Desktop background and settings. /home/settings.conf (written by the Settings app) has a line  desktop=C:n  (plain colour n),
+  * desktop=P:n (built in pattern n) or desktop=F:/path/file.bmp (a 256x192 24 bit BMP, e.g. a photo). A wallpaper is a pixmap that
+@@ -333,8 +344,9 @@ static void apply_desktop(void)
+ }
+ 
+ /* battery from /proc/dsisettings (the ARM7 reads the power chip: a few ms, so never while a memo records) */
+-/* Wi-Fi in the tray: nothing while the interface is down, grey bars while it is up without an address, black bars when it has one */
++/* Wi-Fi in the tray: white bars while the interface is down, grey bars while it is up without an address, black bars when it has one */
+ static int wifi_state = -1;	/* -1 unknown, 0 down, 1 up, 2 up with an IPv4 address */
++static char wifi_ip[20];
+ 
+ static void poll_wifi(void)
+ {
+@@ -343,16 +355,28 @@ static void poll_wifi(void)
+ 
+ 	if (fd < 0)
+ 		return;
++	wifi_ip[0] = 0;
+ 	memset(&ifr, 0, sizeof(ifr));
+ 	strcpy(ifr.ifr_name, "nds");
+ 	if (ioctl(fd, SIOCGIFFLAGS, &ifr) == 0 && (ifr.ifr_flags & IFF_UP)) {
+ 		st = 1;
+ 		memset(&ifr.ifr_addr, 0, sizeof(ifr.ifr_addr));
+ 		ifr.ifr_addr.sa_family = AF_INET;
+-		if (ioctl(fd, SIOCGIFADDR, &ifr) == 0 && ((struct sockaddr_in *)&ifr.ifr_addr)->sin_addr.s_addr != 0)
++		if (ioctl(fd, SIOCGIFADDR, &ifr) == 0 && ((struct sockaddr_in *)&ifr.ifr_addr)->sin_addr.s_addr != 0) {
++			unsigned char *a = (unsigned char *)&((struct sockaddr_in *)&ifr.ifr_addr)->sin_addr;
++
+ 			st = 2;
++			sprintf(wifi_ip, "%d.%d.%d.%d", a[0], a[1], a[2], a[3]);
++		}
+ 	}
+ 	close(fd);
++#ifdef NANOX_TESTBED
++	if (getenv("DSDESK_WIFI")) {		/* PC test bed: pretend a state (0, 1, 2) */
++		st = atoi(getenv("DSDESK_WIFI"));
++		if (st == 2)
++			strcpy(wifi_ip, "192.168.43.17");
++	}
++#endif
+ 	if (st != wifi_state) {
+ 		wifi_state = st;
+ 		bar_dirty = 1;
+@@ -369,6 +393,12 @@ static void poll_battery(void)
+ 	if (access("/tmp/rec.lock", F_OK) == 0)
+ 		return;
+ 	f = fopen("/proc/dsisettings", "r");
++#ifdef NANOX_TESTBED
++	if (!f && bat_level < 0) {		/* PC test bed: a battery at 73 % */
++		bat_level = 11;
++		bar_dirty = 1;
++	}
++#endif
+ 	if (!f)
+ 		return;
+ 	if (fscanf(f, "battery=%d charger=%d volume=%d backlight=%d padgain=%d", &b, &c, &v, &bl, &pg) >= 2 &&
+@@ -391,6 +421,14 @@ static int read_volume(int *level, int *pct, int *status)
+ 	FILE *f = fopen("/proc/dsivolume", "r");
+ 	int ok;
+ 
++#ifdef NANOX_TESTBED
++	if (!f) {				/* PC test bed: the volume at 60 % */
++		*level = 19;
++		*pct = 60;
++		*status = 0;
++		return 1;
++	}
++#endif
+ 	if (!f)
+ 		return 0;
+ 	ok = fscanf(f, "level=%d max=%*d percent=%d status=%d", level, pct, status) == 3;
+@@ -470,6 +508,80 @@ static void poll_volume(void)
+ 	}
+ }
+ 
++/* a tooltip above the tray picture the pointer is on (or was tapped): the battery and volume percentages, the Wi-Fi state */
++static void draw_tip(void)
++{
++	if (!tipwin)
++		return;
++	w95_fill(tipwin, gc, W95_DARK, 0, 0, tip_w, th + 4);
++	w95_fill(tipwin, gc, GR_RGB(255, 255, 225), 1, 1, tip_w - 2, th + 2);
++	w95_text(tipwin, gc, W95_DARK, 3, 2, tip_text);
++}
++
++static void hide_tip(void)
++{
++	if (tipwin)
++		GrDestroyWindow(tipwin);
++	tipwin = 0;
++	tip_item = -1;
++}
++
++static void show_tip(int item)
++{
++	int x;
++
++	if (item == TRAY_WIFI) {
++		FILE *f;
++		char line[64], essid[33] = "";
++
++		if (wifi_state == 2 && (f = fopen("/home/wifi.conf", "r"))) {	/* the network the Wi-Fi window / wifi-connect joined */
++			while (fgets(line, sizeof(line), f))
++				if (sscanf(line, "essid=\"%32[^\"]\"", essid) == 1)
++					break;
++			fclose(f);
++		}
++		if (wifi_state == 2)
++			snprintf(tip_text, sizeof(tip_text), "%s%s%s", essid, essid[0] ? " " : "", wifi_ip);
++		else
++			snprintf(tip_text, sizeof(tip_text), "Wi-Fi %s - tap: Wi-Fi", wifi_state == 1 ? "on" : "off");
++	} else if (item == TRAY_BAT) {
++		if (bat_level < 0)
++			strcpy(tip_text, "Battery: unknown");
++		else
++			snprintf(tip_text, sizeof(tip_text), "Battery %d%%%s", bat_level * 100 / 15, bat_chg ? ", charging" : "");
++	} else {
++		if (vol_cur < 0)
++			strcpy(tip_text, "Volume: unknown");
++		else if (vol_cur == 0)
++			strcpy(tip_text, "Volume: muted");
++		else
++			snprintf(tip_text, sizeof(tip_text), "Volume %d%%", vol_cur);
++	}
++	hide_tip();
++	tip_item = item;
++	tip_since = time(NULL);
++	tip_w = w95_textw(gc, tip_text) + 6;
++	x = (tray_x0[item] + tray_x1[item]) / 2 - tip_w / 2;
++	if (x + tip_w > si.cols - 1)
++		x = si.cols - 1 - tip_w;
++	if (x < 0)
++		x = 0;
++	tipwin = GrNewWindowEx(GR_WM_PROPS_NODECORATE | GR_WM_PROPS_NOFOCUS | GR_WM_PROPS_NOMOVE, "tip", GR_ROOT_WINDOW_ID,
++			       x, si.rows - barh - th - 6, tip_w, th + 4, W95_FACE);
++	GrSelectEvents(tipwin, GR_EVENT_MASK_EXPOSURE);
++	GrMapWindow(tipwin);
++}
++
++static int tray_item_at(int x)
++{
++	int k;
++
++	for (k = 0; k < 3; k++)
++		if (x >= tray_x0[k] && x < tray_x1[k])
++			return k;
++	return -1;
++}
++
+ static void draw_bar(void)
+ {
+ 	char clk[16];
+@@ -486,63 +598,67 @@ static void draw_bar(void)
+ 	w95_text(bar, gc, W95_DARK, 17 + start_down, 3 + (barh - 5 - th) / 2 + start_down, "Start");
+ 	w95_text(bar, gc, W95_DARK, 18 + start_down, 3 + (barh - 5 - th) / 2 + start_down, "Start");
+ 
+-	/* clock in a sunken field */
++	/* the tray, one sunken field: Wi-Fi, battery, volume as pictures only (pointing at one shows the details), then the clock */
+ 	if (tm)
+ 		sprintf(clk, "%02d:%02d", tm->tm_hour, tm->tm_min);
+ 	else
+ 		strcpy(clk, "--:--");
+-	cw = w95_textw(gc, clk) + 12;
+-	x = si.cols - cw - 3;
+-	w95_box(bar, gc, x, 3, cw, barh - 5, 1, W95_FACEFILL);
+-	w95_text(bar, gc, W95_DARK, x + 6, 3 + (barh - 5 - th) / 2, clk);
+-
+-	/* volume in the tray, left of the clock: a small speaker and the percentage */
+-	if (vol_cur >= 0) {
+-		char vt[8];
+-		int vw;
+-
+-		sprintf(vt, "%d%%", vol_cur);
+-		vw = w95_textw(gc, vt) + 18;
+-		x -= vw + 2;
+-		w95_box(bar, gc, x, 3, vw, barh - 5, 1, W95_FACEFILL);
+-		w95_fill(bar, gc, W95_DARK, x + 4, 3 + (barh - 5) / 2 - 1, 2, 3);	/* speaker body */
+-		w95_fill(bar, gc, W95_DARK, x + 6, 3 + (barh - 5) / 2 - 2, 1, 5);
+-		w95_fill(bar, gc, W95_DARK, x + 7, 3 + (barh - 5) / 2 - 3, 1, 7);	/* the cone */
+-		w95_text(bar, gc, W95_DARK, x + 11, 3 + (barh - 5 - th) / 2, vt);
+-	}
+-
+-	/* battery: a small battery picture (filled to the level, green / yellow / red) and the percentage, left of the volume */
+-	if (bat_level >= 0) {
+-		char bt[8];
+-		int bwid, iy, pct = bat_level * 100 / 15, fw;
+-		GR_COLOR fc = pct >= 40 ? GR_RGB(0, 160, 0) : (pct >= 20 ? GR_RGB(220, 170, 0) : GR_RGB(220, 0, 0));
+-
+-		sprintf(bt, "%d%%", pct);
+-		bwid = w95_textw(gc, bt) + 25;
+-		x -= bwid + 2;
++	cw = w95_textw(gc, clk);
++	x = si.cols - 3 - (cw + 6 + 4 + TRAY_W);
++	w95_box(bar, gc, x, 3, cw + 6 + 4 + TRAY_W, barh - 5, 1, W95_FACEFILL);
++	w95_text(bar, gc, W95_DARK, si.cols - 3 - cw - 6, 3 + (barh - 5 - th) / 2, clk);
++	{
++		int ix = x + 4, iy;
++
++		/* Wi-Fi bars: white = off, grey = on without an address, black = online */
++		GR_COLOR wc = wifi_state == 2 ? W95_DARK : (wifi_state == 1 ? W95_SHADOW : W95_LIGHT);
++
++		tray_x0[TRAY_WIFI] = ix - 2;
++		iy = 3 + (barh - 5 - 8) / 2;
++		w95_fill(bar, gc, wc, ix, iy + 5, 2, 3);
++		w95_fill(bar, gc, wc, ix + 3, iy + 3, 2, 5);
++		w95_fill(bar, gc, wc, ix + 6, iy, 2, 8);
++		ix += 8 + 5;
++		tray_x1[TRAY_WIFI] = ix - 2;
++
++		/* battery: filled to the level, green / yellow / red, a yellow mark on external power */
++		tray_x0[TRAY_BAT] = ix - 2;
+ 		iy = 3 + (barh - 5 - 7) / 2;
+-		w95_box(bar, gc, x, 3, bwid, barh - 5, 1, W95_FACEFILL);
+-		w95_fill(bar, gc, W95_DARK, x + 4, iy, 13, 7);		/* the case */
+-		w95_fill(bar, gc, W95_LIGHT, x + 5, iy + 1, 11, 5);
+-		w95_fill(bar, gc, W95_DARK, x + 17, iy + 2, 1, 3);	/* the tip */
+-		fw = 11 * bat_level / 15;
+-		if (fw > 0)
+-			w95_fill(bar, gc, fc, x + 5, iy + 1, fw, 5);
+-		if (bat_chg)						/* on external power */
+-			w95_fill(bar, gc, GR_RGB(255, 200, 0), x + 19, iy + 1, 1, 5);
+-		w95_text(bar, gc, W95_DARK, x + 21, 3 + (barh - 5 - th) / 2, bt);
+-	}
+-
+-	/* Wi-Fi bars, left of the battery */
+-	if (wifi_state > 0) {
+-		GR_COLOR wc = wifi_state == 2 ? W95_DARK : W95_SHADOW;
+-		int iy = 3 + (barh - 5 - 8) / 2;
+-
+-		x -= 16;
+-		w95_box(bar, gc, x, 3, 14, barh - 5, 1, W95_FACEFILL);
+-		w95_fill(bar, gc, wc, x + 3, iy + 5, 2, 3);
+-		w95_fill(bar, gc, wc, x + 6, iy + 3, 2, 5);
+-		w95_fill(bar, gc, wc, x + 9, iy, 2, 8);
++		w95_fill(bar, gc, bat_level >= 0 ? W95_DARK : W95_SHADOW, ix, iy, 13, 7);	/* the case */
++		w95_fill(bar, gc, W95_LIGHT, ix + 1, iy + 1, 11, 5);
++		w95_fill(bar, gc, bat_level >= 0 ? W95_DARK : W95_SHADOW, ix + 13, iy + 2, 1, 3);	/* the tip */
++		if (bat_level >= 0) {
++			int pct = bat_level * 100 / 15, fw = 11 * bat_level / 15;
++			GR_COLOR fc = pct >= 40 ? GR_RGB(0, 160, 0) : (pct >= 20 ? GR_RGB(220, 170, 0) : GR_RGB(220, 0, 0));
++
++			if (fw > 0)
++				w95_fill(bar, gc, fc, ix + 1, iy + 1, fw, 5);
++			if (bat_chg)
++				w95_fill(bar, gc, GR_RGB(255, 200, 0), ix + 15, iy + 1, 1, 5);
++		}
++		ix += 16 + 5;
++		tray_x1[TRAY_BAT] = ix - 2;
++
++		/* volume: a speaker with 0..3 sound waves, a red cross when muted */
++		tray_x0[TRAY_VOL] = ix - 2;
++		iy = 3 + (barh - 5) / 2;
++		w95_fill(bar, gc, W95_DARK, ix, iy - 1, 2, 3);
++		w95_fill(bar, gc, W95_DARK, ix + 2, iy - 2, 1, 5);
++		w95_fill(bar, gc, W95_DARK, ix + 3, iy - 3, 1, 7);
++		if (vol_cur == 0) {
++			w95_fill(bar, gc, GR_RGB(220, 0, 0), ix + 6, iy - 2, 1, 1);
++			w95_fill(bar, gc, GR_RGB(220, 0, 0), ix + 7, iy - 1, 1, 3);
++			w95_fill(bar, gc, GR_RGB(220, 0, 0), ix + 8, iy - 2, 1, 1);
++			w95_fill(bar, gc, GR_RGB(220, 0, 0), ix + 6, iy + 2, 1, 1);
++			w95_fill(bar, gc, GR_RGB(220, 0, 0), ix + 8, iy + 2, 1, 1);
++		} else {
++			int waves = vol_cur < 0 ? 0 : (vol_cur < 34 ? 1 : (vol_cur < 67 ? 2 : 3)), k;
++
++			for (k = 0; k < 3; k++)
++				w95_fill(bar, gc, k < waves ? W95_DARK : W95_SHADOW, ix + 5 + k * 2, iy - 1 - k, 1, 3 + 2 * k);
++		}
++		ix += 10 + 4;
++		tray_x1[TRAY_VOL] = ix - 2;
+ 	}
+ 
+ 	/* a divider after the Start button */
+@@ -674,7 +790,7 @@ static void draw_icon(GR_WINDOW_ID d, const struct item *it, int x, int y)
+ 		w95_fill(d, gc, W95_DARK, x + 4, y + 1, 1, 7);
+ 		w95_fill(d, gc, W95_DARK, x + 5, y, 1, 9);
+ 		w95_fill(d, gc, is(n, "Voice memos") ? ICO_RED : W95_SHADOW, x + 7, y + 3, 1, 3);
+-	} else if (is(n, "Network") || is_arg(it, "wifi")) {		/* signal bars */
++	} else if (is(n, "Network") || is(n, "Wi-Fi") || is_arg(it, "wifi")) {	/* signal bars */
+ 		w95_fill(d, gc, W95_DARK, x, y + 6, 2, 3);
+ 		w95_fill(d, gc, W95_DARK, x + 3, y + 4, 2, 5);
+ 		w95_fill(d, gc, W95_DARK, x + 6, y + 1, 2, 8);
+@@ -881,7 +997,8 @@ int main(int argc, char **argv)
+ 
+ 	bar = GrNewWindowEx(GR_WM_PROPS_NODECORATE | GR_WM_PROPS_NOFOCUS | GR_WM_PROPS_NOMOVE | GR_WM_PROPS_NORAISE,
+ 			    "taskbar", GR_ROOT_WINDOW_ID, 0, si.rows - barh, si.cols, barh, W95_FACE);
+-	GrSelectEvents(bar, GR_EVENT_MASK_EXPOSURE | GR_EVENT_MASK_BUTTON_DOWN | GR_EVENT_MASK_BUTTON_UP);
++	GrSelectEvents(bar, GR_EVENT_MASK_EXPOSURE | GR_EVENT_MASK_BUTTON_DOWN | GR_EVENT_MASK_BUTTON_UP |
++		       GR_EVENT_MASK_MOUSE_POSITION | GR_EVENT_MASK_MOUSE_EXIT);
+ 	GrMapWindow(bar);
+ 	GrSelectEvents(GR_ROOT_WINDOW_ID, GR_EVENT_MASK_CHLD_UPDATE);
+ 
+@@ -902,6 +1019,8 @@ int main(int argc, char **argv)
+ 				draw_bar();
+ 			else if (volwin && ev.exposure.wid == volwin)
+ 				draw_vol();
++			else if (tipwin && ev.exposure.wid == tipwin)
++				draw_tip();
+ 			else if (menu_open && level_of(ev.exposure.wid) >= 0)
+ 				draw_level(level_of(ev.exposure.wid));
+ 			break;
+@@ -914,6 +1033,22 @@ int main(int argc, char **argv)
+ 					draw_bar();
+ 					open_menu();
+ 				}
++			} else if (ev.button.wid == bar && tray_item_at(ev.button.x) == TRAY_WIFI) {
++				int k;
++
++				/* the Wi-Fi window: bring it up if it is open, else start it */
++				if (menu_open)
++					close_menu();
++				hide_tip();
++				for (k = 0; k < ntw; k++)
++					if (!strcmp(tws[k].title, "Wi-Fi"))
++						break;
++				if (k < ntw)
++					window_button(k);
++				else
++					launch("/boot/dssettings", "wifi");
++			} else if (ev.button.wid == bar && tray_item_at(ev.button.x) >= 0) {
++				show_tip(tray_item_at(ev.button.x));	/* a tap shows the percentage too */
+ 			} else if (ev.button.wid == bar) {
+ 				int k;
+ 
+@@ -927,7 +1062,16 @@ int main(int argc, char **argv)
+ 			}
+ 			break;
+ 		case GR_EVENT_TYPE_MOUSE_POSITION:
+-			if (menu_open) {
++			if (ev.mouse.wid == bar) {
++				int t = tray_item_at(ev.mouse.x);
++
++				if (t != tip_item) {
++					if (t >= 0)
++						show_tip(t);
++					else
++						hide_tip();
++				}
++			} else if (menu_open) {
+ 				int l = level_of(ev.mouse.wid);
+ 
+ 				if (l >= 0)
+@@ -950,7 +1094,9 @@ int main(int argc, char **argv)
+ 			}
+ 			break;
+ 		case GR_EVENT_TYPE_MOUSE_EXIT:
+-			if (menu_open) {
++			if (ev.general.wid == bar) {
++				hide_tip();
++			} else if (menu_open) {
+ 				int l = level_of(ev.general.wid);
+ 
+ 				/* the group's own entry stays lit while its list is open */
+@@ -974,6 +1120,8 @@ int main(int argc, char **argv)
+ 			if ((ticks % 10) == 2)		/* about every 3 s: two cheap ioctls, no server round trip */
+ 				poll_wifi();
+ 			poll_volume();
++			if (tipwin && time(NULL) - tip_since >= TIP_SECONDS)
++				hide_tip();
+ 			if (bar_dirty) {
+ 				bar_dirty = 0;
+ 				changed = 1;
+diff --git a/user/microwin/src/demos/nanox/dsnet.c b/user/microwin/src/demos/nanox/dsnet.c
+new file mode 100644
+index 000000000..8f6b493cb
+--- /dev/null
++++ b/user/microwin/src/demos/nanox/dsnet.c
+@@ -0,0 +1,564 @@
++/*
++ * dsnet - the Wi-Fi window of the DSLinuxDSi desktop (Start > Network > Wi-Fi, or a tap on the Wi-Fi icon in the tray).
++ * Linked into dssettings and started as "dssettings wifi": a program of its own would carry its own 50 KB copy of the Nano-X client library,
++ * and the ROM has no room for that.
++ * Switch Wi-Fi on and off, scan, see the networks (signal, lock = WEP, "saved"), connect (asks for the WEP key the first time and
++ * remembers it), forget a saved network. The DS Wi-Fi chip joins only open and WEP networks.
++ *   Networks:  /proc/dswifi (the kernel lists what the chip heard; reading it scans the channels first)
++ *   Commands:  ifconfig nds up/down, iwconfig nds essid/key, udhcpc -n -q -i nds (address by DHCP)
++ *   Saved:     /home/wifi.known (name TAB key per line); the network last joined also goes to /home/wifi.conf (the boot scripts' file)
++ * Keys: up/down choose, Enter (A) connect, s or Space (B) scan, w Wi-Fi on/off, f forget, q or Esc quit. Taps work on everything.
++ * PC test bed: DSNET_APS=file replaces /proc/dswifi, DSNET_DRYRUN=1 prints the commands instead of running them.
++ */
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <unistd.h>
++#include <sys/ioctl.h>
++#include <sys/socket.h>
++#include <net/if.h>
++#include <netinet/in.h>
++#include <arpa/inet.h>
++#include "nano-X.h"
++#include "w95.h"
++
++#define WW	200
++#define WH	136
++#define LIST_Y	30
++#define ROWH	11
++#define NROWS	7
++#define MAXNET	24
++#ifdef NANOX_TESTBED
++static char KNOWN[200], CONF[200];	/* PC test bed: in $HOME */
++#else
++#define KNOWN	"/home/wifi.known"
++#define CONF	"/home/wifi.conf"
++#endif
++
++struct net {
++	char ssid[33];
++	int channel, wep, signal, saved;
++	char key[40];
++};
++
++static struct net nets[MAXNET];
++static int nnet, sel, first;
++static GR_WINDOW_ID win;
++static GR_GC_ID gc;
++static int th;
++static char status[64];
++static char cur_ssid[33];
++static int dryrun, sim_up, sim_conn;
++
++/* key entry: when a WEP network without a saved key is chosen */
++static int asking;
++static char keybuf[40];
++
++/* ---------------------------------------------------------------- the system */
++static int run(const char *cmd)
++{
++	if (dryrun) {
++		fprintf(stderr, "dsnet would run: %s\n", cmd);
++		if (strstr(cmd, "ifconfig nds up")) sim_up = 1;
++		if (strstr(cmd, "ifconfig nds down")) sim_up = sim_conn = 0;
++		if (strstr(cmd, "udhcpc")) sim_conn = 1;
++		return 0;
++	}
++	return system(cmd);
++}
++
++/* the name with every ' made safe for the shell's single quotes */
++static void quote(char *out, int n, const char *in)
++{
++	int k = 0;
++
++	out[k++] = '\'';
++	for (; *in && k < n - 6; in++) {
++		if (*in == '\'') {
++			strcpy(out + k, "'\\''");
++			k += 4;
++		} else {
++			out[k++] = *in;
++		}
++	}
++	out[k++] = '\'';
++	out[k] = 0;
++}
++
++static int wifi_up(void)
++{
++	struct ifreq ifr;
++	int fd, up = 0;
++
++	if (dryrun)
++		return sim_up;
++	fd = socket(AF_INET, SOCK_DGRAM, 0);
++	if (fd < 0)
++		return 0;
++	memset(&ifr, 0, sizeof(ifr));
++	strcpy(ifr.ifr_name, "nds");
++	if (ioctl(fd, SIOCGIFFLAGS, &ifr) == 0)
++		up = (ifr.ifr_flags & IFF_UP) != 0;
++	close(fd);
++	return up;
++}
++
++/* the IPv4 address of nds as text, or "" */
++static void wifi_ip(char *out)
++{
++	struct ifreq ifr;
++	int fd;
++
++	out[0] = 0;
++	if (dryrun) {
++		if (sim_conn)
++			strcpy(out, "192.168.43.17");
++		return;
++	}
++	fd = socket(AF_INET, SOCK_DGRAM, 0);
++	if (fd < 0)
++		return;
++	memset(&ifr, 0, sizeof(ifr));
++	strcpy(ifr.ifr_name, "nds");
++	ifr.ifr_addr.sa_family = AF_INET;
++	if (ioctl(fd, SIOCGIFADDR, &ifr) == 0) {
++		struct in_addr a = ((struct sockaddr_in *)&ifr.ifr_addr)->sin_addr;
++
++		if (a.s_addr)
++			strcpy(out, inet_ntoa(a));
++	}
++	close(fd);
++}
++
++static void load_known(void)
++{
++	FILE *f = fopen(KNOWN, "r");
++	char line[100];
++	int i;
++
++	for (i = 0; i < nnet; i++)
++		nets[i].saved = 0;
++	if (!f)
++		return;
++	while (fgets(line, sizeof(line), f)) {
++		char *tab = strchr(line, '\t'), *nl = strchr(line, '\n');
++
++		if (nl) *nl = 0;
++		if (!tab)
++			continue;
++		*tab = 0;
++		for (i = 0; i < nnet; i++)
++			if (!strcmp(nets[i].ssid, line)) {
++				nets[i].saved = 1;
++				strncpy(nets[i].key, tab + 1, sizeof(nets[i].key) - 1);
++			}
++	}
++	fclose(f);
++}
++
++/* rewrite the saved list: add or replace ssid (key may be ""), or remove it (forget) */
++static void save_known(const char *ssid, const char *key, int forget)
++{
++	FILE *f = fopen(KNOWN, "r"), *o;
++	char lines[32][100], line[100];
++	int n = 0, i;
++
++	if (f) {
++		while (n < 31 && fgets(line, sizeof(line), f)) {
++			char *tab = strchr(line, '\t');
++
++			if (tab && (int)(tab - line) == (int)strlen(ssid) && !strncmp(line, ssid, tab - line))
++				continue;		/* the old entry of this network */
++			strcpy(lines[n++], line);
++		}
++		fclose(f);
++	}
++	o = fopen(KNOWN, "w");
++	if (!o)
++		return;
++	for (i = 0; i < n; i++)
++		fputs(lines[i], o);
++	if (!forget)
++		fprintf(o, "%s\t%s\n", ssid, key);
++	fclose(o);
++}
++
++/* read the networks from /proc/dswifi: "bssid channel open|wep signal name"; the same name heard twice keeps its best signal */
++static void read_networks(void)
++{
++	const char *src = getenv("DSNET_APS");
++	FILE *f = fopen(src ? src : "/proc/dswifi", "r");
++	char line[128];
++
++	nnet = 0;
++	if (!f)
++		return;
++	while (fgets(line, sizeof(line), f) && nnet < MAXNET) {
++		char bssid[24], sec[8], *name, *nl;
++		int ch, sig, i, pos = 0;
++
++		if (sscanf(line, "%23s %d %7s %d %n", bssid, &ch, sec, &sig, &pos) < 4 || !pos)
++			continue;
++		name = line + pos;
++		if ((nl = strchr(name, '\n')))
++			*nl = 0;
++		for (i = 0; i < nnet; i++)
++			if (!strcmp(nets[i].ssid, name))
++				break;
++		if (i < nnet) {
++			if (sig > nets[i].signal)
++				nets[i].signal = sig;
++			continue;
++		}
++		memset(&nets[nnet], 0, sizeof(nets[0]));
++		strncpy(nets[nnet].ssid, name, 32);
++		nets[nnet].channel = ch;
++		nets[nnet].wep = !strcmp(sec, "wep");
++		nets[nnet].signal = sig;
++		nnet++;
++	}
++	fclose(f);
++	{					/* strongest first */
++		int a, b;
++
++		for (a = 0; a < nnet; a++)
++			for (b = a + 1; b < nnet; b++)
++				if (nets[b].signal > nets[a].signal) {
++					struct net t = nets[a];
++
++					nets[a] = nets[b];
++					nets[b] = t;
++				}
++	}
++	load_known();
++	if (sel >= nnet)
++		sel = nnet ? nnet - 1 : 0;
++	first = 0;
++}
++
++/* ---------------------------------------------------------------- drawing */
++static void bars(int x, int y, int level, GR_COLOR on)	/* level 0..3 */
++{
++	int i;
++
++	for (i = 0; i < 3; i++)
++		w95_fill(win, gc, i < level ? on : W95_SHADOW, x + i * 3, y + 6 - i * 2 - 1, 2, 2 + i * 2 + 1);
++}
++
++static int level_of(int signal)
++{
++	return signal > 40 ? 3 : signal > 20 ? 2 : signal > 0 ? 1 : 0;
++}
++
++static void draw_status(void)
++{
++	char ip[24], t[80];
++
++	w95_fill(win, gc, W95_FACE, 0, 17, WW, 12);
++	if (!wifi_up()) {
++		snprintf(t, sizeof(t), "%s", status[0] ? status : "Wi-Fi is off");
++	} else {
++		wifi_ip(ip);
++		if (status[0])
++			snprintf(t, sizeof(t), "%s", status);
++		else if (ip[0])
++			snprintf(t, sizeof(t), "Online %s %s", cur_ssid[0] ? cur_ssid : "", ip);
++		else
++			snprintf(t, sizeof(t), "On, not connected");
++	}
++	t[(WW - 6) / (w95_textw(gc, "M") ? w95_textw(gc, "M") : 6)] = 0;
++	w95_text(win, gc, W95_DARK, 3, 18, t);
++}
++
++static void draw_buttons(void)
++{
++	w95_fill(win, gc, W95_FACE, 0, 0, WW, 17);
++	w95_button(win, gc, 2, 2, 62, 14, wifi_up() ? "Wi-Fi: On" : "Wi-Fi: Off", 0);
++	w95_button(win, gc, 66, 2, 40, 14, "Scan", 0);
++	w95_fill(win, gc, W95_FACE, 0, LIST_Y + NROWS * ROWH + 4, WW, WH - (LIST_Y + NROWS * ROWH + 4));
++	w95_button(win, gc, 2, WH - 16, 60, 14, "Connect", 0);
++	w95_button(win, gc, 64, WH - 16, 48, 14, "Forget", 0);
++	w95_button(win, gc, WW - 36, WH - 16, 16, 14, "^", 0);
++	w95_button(win, gc, WW - 18, WH - 16, 16, 14, "v", 0);
++}
++
++static void draw_list(void)
++{
++	int r;
++
++	w95_box(win, gc, 2, LIST_Y, WW - 4, NROWS * ROWH + 4, 1, W95_WHITEFILL);
++	if (asking) {
++		char t[64];
++
++		snprintf(t, sizeof(t), "WEP key for %s:", nets[sel].ssid);
++		w95_text(win, gc, W95_DARK, 6, LIST_Y + 4, t);
++		w95_box(win, gc, 6, LIST_Y + 16, WW - 12, 14, 1, W95_WHITEFILL);
++		w95_text(win, gc, W95_DARK, 9, LIST_Y + 18, keybuf);
++		w95_fill(win, gc, W95_DARK, 9 + w95_textw(gc, keybuf), LIST_Y + 18, 1, th);
++		w95_text(win, gc, W95_SHADOW, 6, LIST_Y + 34, "5 or 13 letters, or 10 / 26 hex");
++		w95_text(win, gc, W95_SHADOW, 6, LIST_Y + 46, "Enter: connect   Esc: cancel");
++		return;
++	}
++	if (!nnet) {
++		w95_text(win, gc, W95_SHADOW, 6, LIST_Y + 4, wifi_up() ? "No networks yet: Scan" : "Wi-Fi is off: Scan turns it on");
++		return;
++	}
++	for (r = 0; r < NROWS && first + r < nnet; r++) {
++		struct net *n = &nets[first + r];
++		int y = LIST_Y + 2 + r * ROWH, on = first + r == sel;
++		GR_COLOR fgc = on ? W95_LIGHT : W95_DARK;
++
++		if (on)
++			w95_fill(win, gc, W95_NAVY, 4, y, WW - 8, ROWH);
++		bars(7, y + 2, level_of(n->signal), on ? W95_LIGHT : W95_DARK);
++		if (n->wep) {			/* a padlock */
++			w95_fill(win, gc, fgc, 18, y + 5, 5, 4);
++			w95_fill(win, gc, fgc, 19, y + 2, 3, 1);
++			w95_fill(win, gc, fgc, 19, y + 3, 1, 2);
++			w95_fill(win, gc, fgc, 21, y + 3, 1, 2);
++		}
++		w95_text(win, gc, fgc, 26, y + (ROWH - th) / 2, n->ssid[0] ? n->ssid : "(hidden)");
++		if (!strcmp(n->ssid, cur_ssid) && cur_ssid[0])
++			w95_text(win, gc, on ? W95_LIGHT : GR_RGB(0, 128, 0), WW - 50, y + (ROWH - th) / 2, "online");
++		else if (n->saved)
++			w95_text(win, gc, on ? W95_LIGHT : W95_SHADOW, WW - 44, y + (ROWH - th) / 2, "saved");
++	}
++}
++
++static void draw_all(void)
++{
++	draw_buttons();
++	draw_status();
++	draw_list();
++}
++
++static void say(const char *s)
++{
++	snprintf(status, sizeof(status), "%s", s);
++	draw_status();
++	GrFlush();
++}
++
++/* ---------------------------------------------------------------- actions */
++static void wifi_on(void)
++{
++	if (!wifi_up()) {
++		say("Switching Wi-Fi on...");
++		run("ifconfig nds up");
++		sleep(1);
++	}
++}
++
++static void toggle(void)
++{
++	if (wifi_up()) {
++		run("killall udhcpc 2>/dev/null; ifconfig nds down");
++		nnet = 0;
++		cur_ssid[0] = 0;
++		status[0] = 0;
++	} else {
++		wifi_on();
++		status[0] = 0;
++	}
++	draw_all();
++}
++
++static void scan(void)
++{
++	wifi_on();
++	say("Scanning (a few seconds)...");
++	read_networks();
++	if (!nnet) {		/* the chip fills its list as it hears beacons: one more pass */
++		read_networks();
++	}
++	status[0] = 0;
++	draw_all();
++}
++
++static void connect_to(struct net *n, const char *key)
++{
++	char q[80], cmd[200], ip[24], k[44];
++	FILE *f;
++
++	wifi_on();
++	snprintf(cmd, sizeof(cmd), "Connecting to %s...", n->ssid);
++	say(cmd);
++	quote(q, sizeof(q), n->ssid);
++	run("killall udhcpc 2>/dev/null");
++	snprintf(cmd, sizeof(cmd), "iwconfig nds essid %s > /dev/null 2>&1", q);
++	run(cmd);
++	k[0] = 0;
++	if (key && key[0]) {
++		int len = strlen(key);
++
++		/* 5 or 13 characters are a text key (s:), 10 or 26 hex digits are used as they are */
++		snprintf(k, sizeof(k), "%s%s", (len == 5 || len == 13) && strncmp(key, "s:", 2) ? "s:" : "", key);
++		quote(q, sizeof(q), k);
++		snprintf(cmd, sizeof(cmd), "iwconfig nds key %s > /dev/null 2>&1", q);
++	} else {
++		snprintf(cmd, sizeof(cmd), "iwconfig nds key off > /dev/null 2>&1");
++	}
++	run(cmd);
++	sleep(2);
++	say("Asking for an address (DHCP)...");
++	run("udhcpc -n -q -i nds > /tmp/dsnet-dhcp.log 2>&1");
++	wifi_ip(ip);
++	if (ip[0]) {
++		snprintf(cur_ssid, sizeof(cur_ssid), "%s", n->ssid);
++		save_known(n->ssid, key ? key : "", 0);
++		f = fopen(CONF, "w");	/* the boot scripts' settings (Start > Network > Wi-Fi status, rc) */
++		if (f) {
++			fprintf(f, "essid=\"%s\"\nwepkey=\"%s\"\n", n->ssid, k);
++			fclose(f);
++		}
++		load_known();
++		status[0] = 0;
++	} else {
++		snprintf(status, sizeof(status), "No address from %s%s", n->ssid, n->wep ? " (key?)" : "");
++	}
++	draw_all();
++}
++
++static void choose(int i)
++{
++	if (i < 0 || i >= nnet)
++		return;
++	sel = i;
++	if (sel < first)
++		first = sel;
++	if (sel >= first + NROWS)
++		first = sel - NROWS + 1;
++	draw_list();
++}
++
++static void activate(void)
++{
++	struct net *n;
++
++	if (!nnet)
++		return;
++	n = &nets[sel];
++	if (n->wep && !n->saved) {	/* ask for the key first */
++		asking = 1;
++		keybuf[0] = 0;
++		draw_list();
++		return;
++	}
++	connect_to(n, n->saved ? n->key : NULL);
++}
++
++static void key_entry(int k)
++{
++	int len = strlen(keybuf);
++
++	if (k == MWKEY_ESCAPE) {
++		asking = 0;
++	} else if (k == MWKEY_ENTER || k == '\r') {
++		asking = 0;
++		draw_list();
++		connect_to(&nets[sel], keybuf);
++		return;
++	} else if (k == MWKEY_BACKSPACE || k == 8 || k == 127) {
++		if (len)
++			keybuf[len - 1] = 0;
++	} else if (k >= 32 && k < 127 && len < (int)sizeof(keybuf) - 1) {
++		keybuf[len] = k;
++		keybuf[len + 1] = 0;
++	}
++	draw_list();
++}
++
++int dsnet_main(int argc, char **argv)
++{
++	GR_EVENT ev;
++	GR_FONT_ID font;
++
++	dryrun = getenv("DSNET_DRYRUN") != NULL;
++#ifdef NANOX_TESTBED
++	snprintf(KNOWN, sizeof(KNOWN), "%s/wifi.known", getenv("HOME") ? getenv("HOME") : ".");
++	snprintf(CONF, sizeof(CONF), "%s/wifi.conf", getenv("HOME") ? getenv("HOME") : ".");
++#endif
++	if (GrOpen() < 0) {
++		fprintf(stderr, "dsnet: cannot connect to Nano-X\n");
++		return 1;
++	}
++	gc = GrNewGC();
++	font = GrCreateFont("Tiny", 0, NULL);
++	GrSetGCFont(gc, font);
++	w95_init(font);
++	th = w95_texth(gc);
++	win = GrNewWindowEx(GR_WM_PROPS_APPFRAME | GR_WM_PROPS_CAPTION | GR_WM_PROPS_CLOSEBOX, (GR_CHAR *)"Wi-Fi", GR_ROOT_WINDOW_ID,
++			    20, 6, WW, WH, W95_FACE);
++	GrSelectEvents(win, GR_EVENT_MASK_EXPOSURE | GR_EVENT_MASK_KEY_DOWN | GR_EVENT_MASK_CLOSE_REQ | GR_EVENT_MASK_BUTTON_DOWN);
++	GrMapWindow(win);
++	GrSetFocus(win);
++	if (wifi_up())			/* already on: show what is around at once */
++		read_networks();
++
++	for (;;) {
++		GrGetNextEvent(&ev);
++		switch (ev.type) {
++		case GR_EVENT_TYPE_EXPOSURE:
++			draw_all();
++			break;
++		case GR_EVENT_TYPE_CLOSE_REQ:
++			GrClose();
++			return 0;
++		case GR_EVENT_TYPE_KEY_DOWN: {
++			int k = ev.keystroke.ch;
++
++			if (asking) {
++				key_entry(k);
++				break;
++			}
++			if (k == MWKEY_ESCAPE || k == 'q') {
++				GrClose();
++				return 0;
++			}
++			if (k == MWKEY_UP) choose(sel - 1);
++			else if (k == MWKEY_DOWN) choose(sel + 1);
++			else if (k == MWKEY_ENTER || k == '\r') activate();
++			else if (k == 's' || k == ' ') scan();
++			else if (k == 'w') toggle();
++			else if (k == 'f' && nnet && nets[sel].saved) {
++				save_known(nets[sel].ssid, "", 1);
++				load_known();
++				draw_list();
++			}
++			break;
++		}
++		case GR_EVENT_TYPE_BUTTON_DOWN: {
++			int x = ev.button.x, y = ev.button.y;
++
++			if (asking)
++				break;
++			if (y < 17) {
++				if (x < 64) toggle();
++				else if (x < 106) scan();
++			} else if (y >= LIST_Y && y < LIST_Y + NROWS * ROWH + 2) {
++				int i = first + (y - LIST_Y - 2) / ROWH;
++
++				if (i == sel && i < nnet)
++					activate();
++				else
++					choose(i);
++			} else if (y >= WH - 16) {
++				if (x < 62) activate();
++				else if (x < 112) {
++					if (nnet && nets[sel].saved) {
++						save_known(nets[sel].ssid, "", 1);
++						load_known();
++						draw_list();
++					}
++				} else if (x >= WW - 36 && x < WW - 18) {
++					if (first > 0) { first--; draw_list(); }
++				} else if (x >= WW - 18) {
++					if (first + NROWS < nnet) { first++; draw_list(); }
++				}
++			}
++			break;
++		}
++		}
++	}
++	return 0;
++}
+diff --git a/user/microwin/src/demos/nanox/dssettings.c b/user/microwin/src/demos/nanox/dssettings.c
+index 763ed33af..40c995b02 100644
+--- a/user/microwin/src/demos/nanox/dssettings.c
++++ b/user/microwin/src/demos/nanox/dssettings.c
+@@ -459,6 +459,8 @@ static int apply(void)
+ 	return 0;
+ }
+ 
++int dsnet_main(int argc, char **argv);	/* dsnet.c, the Wi-Fi window: linked in here to share the Nano-X client library */
++
+ int main(int argc, char **argv)
+ {
+ 	GR_EVENT ev;
+@@ -469,6 +471,8 @@ int main(int argc, char **argv)
+ 
+ 	if (argc > 1 && !strcmp(argv[1], "apply"))
+ 		return apply();
++	if (argc > 1 && !strcmp(argv[1], "wifi"))
++		return dsnet_main(argc, argv);
+ 	if (GrOpen() < 0) {
+ 		fprintf(stderr, "dssettings: cannot connect to Nano-X\n");
+ 		return 1;
+diff --git a/vendors/Nintendo/DSI/wifi-scan b/vendors/Nintendo/DSI/wifi-scan
+index 0dd7604b4..df3c0740a 100755
+--- a/vendors/Nintendo/DSI/wifi-scan
++++ b/vendors/Nintendo/DSI/wifi-scan
+@@ -1,8 +1,10 @@
+ #!/bin/sh
+-# Start > Network > Wi-Fi scan: lists the networks the console can see (name and whether they are encrypted; the DS chip joins only open or WEP).
++# Lists the networks the console can hear: /proc/dswifi (the kernel scans the channels when it is read; the DS chip joins only open or WEP).
++# The Wi-Fi window (Start > Network > Wi-Fi, or a tap on the Wi-Fi icon) does the same with a list to pick from.
+ echo "Wi-Fi scan (a few seconds)"
+ ifconfig nds up
+-sleep 2
+-iwlist nds scan 2>&1 | grep -E "ESSID|Encryption"
+-echo "-- end of list. Next: Start > Network > Wi-Fi connect --"
+-exec /bin/sh
++sleep 1
++echo "BSSID             CH SECURITY SIGNAL NAME"
++cat /proc/dswifi
++echo "-- end of list. To connect: Start > Network > Wi-Fi --"
++[ -n "$1" ] || exec /bin/sh
+-- 
+2.56.0
+

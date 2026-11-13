@@ -569,3 +569,25 @@ Up / Page Down (X / Y), whole-screen scrolls drawn with one copy request, the pr
 Bash itself was not added: it needs `fork()`, which a no-MMU system cannot provide; busybox `msh` (vfork) already has history, tab completion
 and prompt escapes. Test bed: history recall, an insertion in the middle of a recalled line, `ls --color`, wrapping, scrolling 60 lines and the
 scrollback all correct. Not yet run on the console.
+
+### Wi-Fi window, tray pictures and /proc/dswifi (w97s)
+
+User report (w97r): Network > Wi-Fi scan showed no networks. The log had `nds` up with 544 packets received but nothing from `iwlist`. Two
+suspects: busybox-era `iwlist` speaks wireless extensions 17 against the driver's 19 (the scan result layout differs), and `nds_get_scan`
+read the AP list the ARM7 had just written without invalidating the ARM9 data cache over it. Fix (patch 0095): `/proc/dswifi` in the
+driver starts a scan, waits for it (3 s at most), asks for the AP list, invalidates the cache, prints `bssid channel open|wep signal name` per
+network; `nds_get_scan` invalidates too. `/boot/wifi-scan` now prints that list.
+
+The user's ideas, done in the same build:
+- Tray: battery and volume are pictures only (battery filled to the level, volume with 0-3 sound waves or a red cross when muted); the Wi-Fi
+  bars are always shown (white = off, grey = on without address, black = online). Pointing at a picture or tapping it shows a tooltip with
+  the percentage, or the network and address. One sunken field holds the three pictures and the clock.
+- `dsnet`, the Wi-Fi window (Start > Network > Wi-Fi, or a tap on the Wi-Fi bars): Wi-Fi On/Off, Scan (switches Wi-Fi on first), the list
+  strongest first with signal bars, padlock for WEP, saved / online; Connect asks for a WEP key the first time, runs `iwconfig` and
+  `udhcpc`, and on success saves the network in `/home/wifi.known` and `/home/wifi.conf`; Forget. The Network menu is now Wi-Fi, Wi-Fi status,
+  SSH server (`wifi-connect` stays in /boot for the terminal).
+- ROM size: the first w97s build was 15 KB over 4 MiB, because `dsnet` as a program of its own (65 KB) carries its own copy of the Nano-X
+  client library. It is now linked into `dssettings` and started as `dssettings wifi` (the way `dsarcade` holds several games): about 12 KB.
+Test bed (fake AP list in `testbed/aps.txt`, commands printed instead of run): tray tooltips, the tap opening the window, scan list with the
+duplicate name merged, WEP key entry, connect commands (`iwconfig nds key 's:abcde'`), saved files, Forget, On/Off all as intended.
+Not yet run on the console.

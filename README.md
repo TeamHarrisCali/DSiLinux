@@ -6,7 +6,7 @@ It starts from TWiLight Menu++ (through Unlaunch). **Nothing is ever written to 
 outside two files in `sd:/linux/` (enforced by the ARM7, see below).
 
 This repository holds the patches, build scripts and notes. The source tree is a separate clone of
-[ipwndev/DSLinux](https://github.com/ipwndev/DSLinux) in `work/dslinux` (git-ignored); the changes are in `patches/` (94 patches, in order).
+[ipwndev/DSLinux](https://github.com/ipwndev/DSLinux) in `work/dslinux` (git-ignored); the changes are in `patches/` (95 patches, in order).
 
 - **Using it:** [docs/USER-GUIDE.md](docs/USER-GUIDE.md): buttons, the desktop, every app, Wi-Fi and SSH, the card scripts, what to do after a freeze.
 - **Developing for it:** [docs/DSI-NOTES.md](docs/DSI-NOTES.md): everything learned about the DSi hardware and this system (registers, limits, pitfalls, numbers).
@@ -20,7 +20,7 @@ This repository holds the patches, build scripts and notes. The source tree is a
 |---|---|---|
 | DSi-mode boot, 16 MB RAM, touchscreen, SD card, ARM9 at 134 MHz | console | Boot self-test prints `RAM`, `SD`, `CLK`, `CONF`, `ROOT` lines |
 | Writable ext2 root `sd:/linux/ROOTFS.IMG`, log file `sd:/linux/DSILOG.TXT` | console | The SD buffer race that corrupted the image (log text in inode tables) is fixed in w97m; check the image with `scripts/rootfs-check.sh` after any freeze |
-| Desktop: taskbar, cascading Start menu, window buttons, tray (battery, volume, clock), hardware pointer, page flipping | console | w97p adds menu icons, a menu drawn off-screen (no half drawn menus) and a Wi-Fi tray indicator: **not yet run** |
+| Desktop: taskbar, cascading Start menu, window buttons, tray (battery, volume, clock), hardware pointer, page flipping | console | w97p adds menu icons, a menu drawn off-screen (no half drawn menus) and a Wi-Fi tray indicator; w97s: tray pictures with tooltips, tap Wi-Fi to open the Wi-Fi window (test bed only) |
 | Hardware 3D (`dsgx.h`), textures, 3D in desktop windows at 60 fps | console | |
 | Sound out, volume popup | console | 100% is still quiet (test tone level) |
 | Microphone, voice memos | console | Works; a whine and small clicks remain (parked) |
@@ -29,7 +29,7 @@ This repository holds the patches, build scripts and notes. The source tree is a
 | Games: 3D Dodge, 3D Breakout, Tron, 3D Maze, 2048, Sokoban, Sudoku, Life, Paint | console | |
 | Game Boy emulator (Peanut-GB) | console: runs, about 22 of 60 frames per second (w97f) | w97g sound and frame clock, w97p tile-row renderer (drawing 4x faster on a PC, identical frames): **not yet run** |
 | DOOM (doomgeneric, shareware WAD) | console: runs, "a little sluggish" | Lives in `ROOTFS.IMG` (`/home/doom`), not in the ROM |
-| Wi-Fi (the DS chip: open or WEP networks, 802.11b) | console: radio up, scan finds networks (w97m) | Start > Network buttons (w97o/p), DHCP, SSH: **not yet run** |
+| Wi-Fi (the DS chip: open or WEP networks, 802.11b) | console: radio up, scan finds networks (w97m); the menu scan showed nothing (w97r) | w97s: Wi-Fi window (scan via `/proc/dswifi`, connect, saved networks), DHCP, SSH: **not yet run** |
 | Power off | console | |
 | The DSi's Atheros Wi-Fi (WPA2), DSP | not attempted | |
 

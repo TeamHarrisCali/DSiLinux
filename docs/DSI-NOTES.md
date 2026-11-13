@@ -122,7 +122,12 @@ Build numbers (w95x, w97m...) point into [STAGE3.md](STAGE3.md), where the story
   (0x04808000) reads **`0xC340`**; unpowered it reads 0. **measured** (w97j probe, `/proc/dsiwifi`)
 - DSLinux's original DS Wi-Fi driver works once the DS-only LED write is gone: radio up, interrupts at a normal rate, scans find networks, MAC from the
   firmware flash (`A4:C0:E1:...`, Nintendo). Interface name `nds`. Open or WEP networks only, 802.11b. `WIFIWAITCNT` (0x04000206) = 0x30. **measured** (w97m)
-- `iwconfig` (wireless extensions 17) warns about the driver's version 19; the scan worked anyway. **measured**
+- `iwconfig` (wireless extensions 17) warns about the driver's version 19. One manual `iwlist nds scan` listed networks (w97m), but from the
+  Network menu (w97r) the scan printed nothing. Two suspects: the WE17/WE19 scan-result format mismatch, and `nds_get_scan` reading the ARM7's AP
+  list without invalidating the ARM9's data cache after the ARM7 filled it. **measured** (the empty scan) / **inferred** (the cause)
+- Hence `/proc/dswifi` (w97s): reading it starts a scan, waits for it, asks the ARM7 for its AP list, invalidates the cache over the list and prints
+  one line per network, `bssid channel open|wep signal name`. The Wi-Fi window (`dsnet.c`, inside `dssettings wifi`) and `/boot/wifi-scan` use it; no wireless-extensions
+  tool is involved. **built, not yet run on the console**
 - The Atheros chip (AR6013G on DWM-W024) sits behind the second SDIO controller at `0x04004A00` (its registers answer). BlocksDS's DSi-mode driver
   (`dswifi`, `arm7/twl/`, MIT, about 130 KB) runs on the ARM7 and does not upload firmware: it relies on the chip already holding it. Not tried. **docs/measured**
 - SSH: the image has Dropbear 0.48 (RSA host keys, `diffie-hellman-group1-sha1`, `aes128-cbc`, `hmac-sha1`). A current OpenSSH client connects with

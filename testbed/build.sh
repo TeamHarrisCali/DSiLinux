@@ -17,9 +17,10 @@ sed -i 's#^\#include <asm/page.h>#\#include <unistd.h>\n\#ifndef PAGE_SIZE\n\#de
 gcc -shared -fPIC -O1 -o $T/bin/fbshim.so testbed/fbshim.c -ldl
 CF="-w -fcommon -std=gnu99 -O1 -I$T/src/include -I$T/src/demos/nanox -DNANOX_TESTBED"
 gcc $CF -o $T/bin/nxctl testbed/nxctl.c -L$T/src/lib -lnano-X
-for p in dsdesk dsnotes dsfiles dssettings dsarcade dsgb nxterm; do
+for p in dsdesk dsnotes dsfiles dsarcade dsgb nxterm; do
 	gcc $CF -o $T/bin/$p $T/src/demos/nanox/$p.c -L$T/src/lib -lnano-X -lm || echo "($p did not build for the PC)"
 done
+gcc $CF -o $T/bin/dssettings $T/src/demos/nanox/dssettings.c $T/src/demos/nanox/dsnet.c -L$T/src/lib -lnano-X -lm || echo "(dssettings did not build for the PC)"
 cp $T/src/bin/nano-X $T/src/bin/nanowm $T/bin/
 # what the desktop starts from /boot on the DS: the PC builds and the boot scripts (dsdesk prefixes /boot paths with DSDESK_ROOT)
 mkdir -p $T/root/boot
