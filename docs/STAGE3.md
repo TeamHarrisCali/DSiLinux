@@ -668,3 +668,15 @@ not type Ctrl+C (its Ctrl key is released at once), and nano-X upstream quits wh
 (L+R also quits the Game Boy emulator): the likeliest story is L+R to stop the ping. The desktop log could not confirm it: busybox `msh`
 appends with open + seek instead of `O_APPEND`, so the programs logging there at once overwrote each other's lines. w97z (patch 0101):
 Ctrl/Alt latch on the touch keyboard (tap Ctrl, then C), no L+R quit in nano-X, `>>` with `O_APPEND` in msh.
+
+### w97z log: hotspot not seen, and a kernel log full of faults (w98a)
+
+User: "I can't connect to my hotspot anymore, doesn't show up". The w97z log: three scans, each listing the same 8 networks on channels 1
+and 11 (all WPA), no Nothing_Phone_2. The Wi-Fi code is the one that connected in w97y and the radio clearly scans, so the hotspot was most
+likely not on the air on 2.4 GHz (Android turns an idle hotspot off, picks a new channel each time and can move it to 5 GHz). Every network
+showed signal 0: the ARM7 keeps the last 8 readings per network and never fills in the `rssi` field. Now the average is shown.
+The whole kernel log (160 lines, the boot messages pushed out) was `do_translation_fault? : arch/arm/mm/fault.c 374`: on this no-MMU kernel
+a prefetch abort (a jump to an address no MPU region allows) went to a stub that printed that line and returned, so the program re-ran the
+bad jump for ever, at full speed, with no name in the message. Which program did it is unknown (Doom, Game Boy, 3D gears, the maze and the
+Wi-Fi window had been started). w98a (patch 0102): a prefetch abort prints the program, pid, pc, lr, sp and code start once and stops the
+program with SIGSEGV. Scan dwell 150 -> 200 ms per channel.

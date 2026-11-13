@@ -55,6 +55,9 @@ The console's own layout (boot chain, NAND, installed titles, firmware chip, BIO
 - The shell is `msh`: plain commands only. `{ ...; } > file` is ignored, `a && b &` runs in the foreground, `cmp -s` takes `-s` as a file name,
   `/usr/bin/cat` must be called by its full path in boot scripts, and there is no `tail`. busybox `grep` has `-E` on the console's build. **measured**
 - The compiler is gcc 4.0.4 (2008). It does not define the endianness macros newer code expects (`PEANUT_GB_IS_LITTLE_ENDIAN` had to be set). **measured**
+- A **prefetch abort** (jump to an address no MPU region allows) used to loop for ever, filling dmesg with `do_translation_fault? :
+  arch/arm/mm/fault.c 374` and naming no program. Since w98a it prints `Prefetch abort: <program> (pid) pc= lr= sp= code at` once and kills
+  the program; `pc - code at` is the offset for `addr2line`. **code**
 - "Killed" from the shell with no other message usually means a fault: look for `Data abort` in `dmesg` and map `pc` with `addr2line` on the
   `.gdb` file (load base + offset). **measured**
 

@@ -1,0 +1,104 @@
+From 86cf74813e5bceca3311fe1d7e3fda8829002bef Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Fri, 13 Nov 2026 09:04:52 -0600
+Subject: [PATCH] Prefetch aborts stop the program; real Wi-Fi signal values;
+ longer scan dwell
+
+- nommu ARM: a prefetch abort went to do_translation_fault, which printed
+  "do_translation_fault?" and returned, so the instruction faulted again
+  for ever. NDS: print program, pid, pc, lr, sp, code start once and send
+  SIGSEGV (oops in kernel mode).
+- /proc/dswifi: signal = average of the ARM7's last 8 readings (rssi was
+  never filled in, always 0).
+- Scan dwell 150 -> 200 ms per channel (about two beacon intervals); the
+  /proc/dswifi scan wait 3 -> 5 s.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ linux-2.6.x/arch/arm/mach-nds/arm7/wifi.h |  2 +-
+ linux-2.6.x/arch/arm/mm/fault.c           | 14 ++++++++++++++
+ linux-2.6.x/drivers/net/wireless/nds.c    | 13 ++++++++++---
+ 3 files changed, 25 insertions(+), 4 deletions(-)
+
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/wifi.h b/linux-2.6.x/arch/arm/mach-nds/arm7/wifi.h
+index 80905f9fe..2efb280f8 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/arm7/wifi.h
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/wifi.h
+@@ -91,7 +91,7 @@ enum WIFI_STATE {
+ #define WFLAG_APDATA_ACTIVE			0x8000
+ 
+ 
+-#define WIFI_CHANNEL_SCAN_DWEL 150 // 150 micro seconds
++#define WIFI_CHANNEL_SCAN_DWEL 200 // ms per channel: about two beacon intervals (102 ms), so one beacon is not missed
+ 
+ typedef struct WIFI_TXHEADER {
+ 	u16 enable_flags;
+diff --git a/linux-2.6.x/arch/arm/mm/fault.c b/linux-2.6.x/arch/arm/mm/fault.c
+index c100e5d34..909cd117d 100644
+--- a/linux-2.6.x/arch/arm/mm/fault.c
++++ b/linux-2.6.x/arch/arm/mm/fault.c
+@@ -530,6 +530,20 @@ do_DataAbort(unsigned long addr, unsigned int fsr, struct pt_regs *regs)
+ asmlinkage void
+ do_PrefetchAbort(unsigned long addr, struct pt_regs *regs)
+ {
++#if defined(CONFIG_ARCH_NDS) && !defined(CONFIG_MMU)
++	/* No MMU: the MPU refused an instruction fetch (a jump to an address outside every region). The generic code printed one line and
++	 * returned, so the same instruction faulted again for ever: the program spun at full speed and the kernel log filled with
++	 * "do_translation_fault?" (w97z). Report it once, with the program, and stop that program; in the kernel itself it is an oops. */
++	printk(KERN_ALERT "Prefetch abort: %s (pid %d) pc=0x%08lx lr=0x%08lx sp=0x%08lx code at 0x%08lx\n", current->comm, current->pid,
++	       regs->ARM_pc, regs->ARM_lr, regs->ARM_sp, current->mm ? current->mm->start_code : 0);
++	if (user_mode(regs)) {
++		force_sig(SIGSEGV, current);
++		return;
++	}
++	die("Prefetch abort", regs, 0);
++	do_exit(SIGKILL);
++#else
+ 	do_translation_fault(addr, 0, regs);
++#endif
+ }
+ 
+diff --git a/linux-2.6.x/drivers/net/wireless/nds.c b/linux-2.6.x/drivers/net/wireless/nds.c
+index a8854aed1..a8acc1b8b 100644
+--- a/linux-2.6.x/drivers/net/wireless/nds.c
++++ b/linux-2.6.x/drivers/net/wireless/nds.c
+@@ -515,7 +515,7 @@ static int nds_set_scan(struct net_device *dev,
+ 
+ 	scan_complete = 0;
+ 	nds_fifo_send(FIFO_WIFI_CMD(FIFO_WIFI_CMD_SCAN, 0));
+-	wait_event_interruptible_timeout(ndswifi_wait, scan_complete != 0, 3 * HZ);
++	wait_event_interruptible_timeout(ndswifi_wait, scan_complete != 0, 5 * HZ);	/* 13 channels of 200 ms */
+ 
+ 	return 0;
+ }
+@@ -1250,7 +1250,7 @@ static int dswifi_read_proc(char *page, char **start, off_t off, int count, int
+ 	dmac_inv_range((unsigned long)&aplist[0], (unsigned long)&aplist[WIFI_MAX_AP]);	/* what the ARM7 wrote, not old cache lines */
+ 	for (i = 0; i < WIFI_MAX_AP && len < PAGE_SIZE - 80; i++) {
+ 		char name[33];
+-		int n = aplist[i].ssid_len, k;
++		int n = aplist[i].ssid_len, k, sig = 0, cnt = 0;
+ 
+ 		if (!aplist[i].channel)
+ 			continue;
+@@ -1262,10 +1262,17 @@ static int dswifi_read_proc(char *page, char **start, off_t off, int count, int
+ 			name[k] = (c >= 32 && c < 127) ? c : '?';
+ 		}
+ 		name[n] = 0;
++		for (k = 0; k < 8; k++)		/* the ARM7 keeps the last 8 readings and never fills in .rssi */
++			if (aplist[i].rssi_past[k]) {
++				sig += aplist[i].rssi_past[k];
++				cnt++;
++			}
++		if (cnt)
++			sig /= cnt;
+ 		len += sprintf(page + len, "%02x:%02x:%02x:%02x:%02x:%02x %d %s %d %s %s\n",
+ 			       aplist[i].bssid[0], aplist[i].bssid[1], aplist[i].bssid[2], aplist[i].bssid[3], aplist[i].bssid[4],
+ 			       aplist[i].bssid[5], aplist[i].channel, (aplist[i].flags & WFLAG_APDATA_WPA) ? "wpa" : (aplist[i].flags & WFLAG_APDATA_WEP) ? "wep" : "open",
+-			       aplist[i].rssi,
++			       sig,
+ 			       /* b: 1-2 Mbit/s basic rates; b11: 5.5/11 basic; g: an 802.11g rate is required, which the DS chip cannot send */
+ 			       (aplist[i].flags & WFLAG_APDATA_COMPATIBLE) ? "b" : (aplist[i].flags & WFLAG_APDATA_EXTCOMPATIBLE) ? "b11" : "g", name);
+ 	}
+-- 
+2.56.0
+
