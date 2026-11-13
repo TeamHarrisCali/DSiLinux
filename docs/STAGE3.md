@@ -791,3 +791,14 @@ writes had used dswifi's 0x1F0/0x1F8-byte chunks from its disabled code; Linux's
 swallow the execute command, which fits. w98j (patch 0111): 240-byte messages, a credit wait before each command (mailbox 0 counter
 0x450; a miss is counted and logged, not fatal), a read-back of each part's first 32 bytes compared with the file, and if execute still gets
 no answer, a fresh run (reset into the boot ROM) and a second try at the part's plain address 0x527000.
+
+### w98j: writes verified, execute silent; the part table read wrongly (w98k)
+
+w98j: every part's read-back matched the file and no command went without a mailbox credit, so the BMI channel works, but `BMI_EXECUTE`
+got no answer at 0x927000 nor, after a reset, at 0x527000. Looking at the bytes: part 5 (56 bytes) is configuration words (0x525000,
+0x51FE00, ...), part 4 begins with `36 61 00` (Xtensa `entry a1, 48`), part 2 is a list of 20-byte entries whose "next" pointers
+(0x53F054, 0x53F068, ...) are right only if it sits at 0x53F040. So each part entry is **offset, size, type, load address**; the decoder had
+taken the address one field too early and executed data. Corrected: type 1 LZ firmware "A" for 0x524C00, type 2 dataset "B" for
+0x53F040, type 4 code "C" for 0x527000, type 5 configuration "D" for 0x524C00 - exactly dswifi's A/B/C/D addresses (its B differs, for
+another firmware version). The AR6002 blob agrees (code part starts with `entry`, dataset at 0x52D944 pointing at 0x52D958, next to
+Linux ar6000's 0x52D6C8). w98k (patch 0112) uploads in dswifi's order: D, C, execute C, A (LZ), D again, B, hi_dset_list_head = B.

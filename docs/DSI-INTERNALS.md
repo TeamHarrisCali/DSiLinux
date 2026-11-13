@@ -113,6 +113,11 @@ Every title folder has `content/title.tmd` (title metadata: version, content has
   to reset hardware", are visible). The System Menu uploads it into the Atheros chip; DSi-mode programs started afterwards find the chip already
   running it. This is the file any future **WPA2** driver for DSLinux would need (load it from the NAND or from an SDNAND copy and upload it
   over SDIO), since the DS chip can only do open/WEP. dump / docs
+- **Wi-Fi firmware layout (decoded 2026-11-13):** after the RSA signature and SHA-1, an entry table at 0xA0 (count at 0xA2) of
+  {offset, length, ID, SHA-1}; here 2 blobs: one for the AR6002 (boot ROM 0x20000188), one for AR6013/AR6014 (boot ROM 0x23000024). A blob:
+  a flags word, four parts {offset, size, type (bit 31 = LZ), load address}, then chip ID/boot ROM pairs from +0x44 and the host interest
+  address at +0x58. Parts: 1 the LZ-compressed firmware, 2 a dataset list, 4 code executed during the upload, 5 configuration written over
+  the firmware's start. dump
 
 ### System files
 
