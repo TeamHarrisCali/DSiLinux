@@ -144,3 +144,10 @@ Build numbers (w95x, w97m...) point into [STAGE3.md](STAGE3.md), where the story
 | DOOM, 320x200 low detail, scaled to 256x192 | runs, "a little sluggish" (not yet measured) |
 | Camera preview | 8.6 fps (sensor) |
 | Direct writes to both framebuffer pages | ~2 ms for 160x144 |
+
+## 13. Testing without the console
+
+- `testbed/` runs the desktop's Nano-X server and programs on the PC against a 256x192 framebuffer file; `nxctl` clicks, types and takes pictures.
+  Good for UI logic and drawing; it has no 3D engine, sound, Wi-Fi or DS buttons. **measured** (it reproduced a menu bug seen on the console)
+- `dsgb_host.c` (Game Boy core), `arc_test.c` (game rules) and the DOOM/Peanut code paths build and run natively for checks of logic and speed.
+- melonDS (Flatpak) is set up with isolated configs for DS mode (`scripts/melon-ds.sh`); its DSi mode would need console dumps, which are not used.

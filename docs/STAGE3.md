@@ -540,3 +540,16 @@ w97n result (card log, user: "nothing happens when clicking wifi"): `dsdesk: sta
 - **Docs:** README rewritten (current status, workflow, scripts), `docs/USER-GUIDE.md` (controls, every program, Wi-Fi/SSH, card scripts, after a
   freeze), `docs/DSI-NOTES.md` (everything learned about the DSi for future development).
 - Not yet run on the console: all of the above (w97p).
+
+### w97p result, the menu bug, and a PC test bed (w97q)
+
+User report (w97p): hovering any entry other than Exit desktop / Shut down made those two move away. Cause: `struct level` kept the entries'
+positions in `int ytop[8]`, while the Start menu had grown to 10 entries (Puzzles, Network): `ytop[8]` and `ytop[9]` overwrote the next level's
+`list` and `n`, so as soon as a group opened, Exit desktop got a pointer as its position and Shut down the number 8 (drawn at the top: an earlier
+photo had caught "Shut down" as the first entry). Fix: `MAXITEMS 16` and a bound in `open_level()` (patch 0093).
+
+The user asked for testing before the DS. melonDS's DSi mode needs the user's console dumps (never read here) and there is no virtual X display on
+this PC, so a test bed was built instead: `testbed/` (see the README). The same Microwindows tree compiled natively (`testbed/config.host`: frame
+buffer driver, 15 bit colour, no mouse or keyboard driver), `fbshim.so` (LD_PRELOAD) answers the framebuffer ioctls for a 98304 byte file,
+`nxctl` injects pointer and key events (`GrInjectPointerEvent`, `GrInjectKeyboardEvent`) and converts the framebuffer file to a picture. It
+reproduced the bug with the old dsdesk (Shut down gone after hovering a few groups) and showed the fixed one correct, before w97q went to the card.

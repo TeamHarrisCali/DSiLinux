@@ -1,0 +1,39 @@
+From 27b2a1575beb7f14a2348c8c1b88c3b51c44ee25 Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Thu, 12 Nov 2026 23:42:34 -0600
+Subject: [PATCH] dsdesk: menu levels hold up to 16 entries (ytop[8] overflowed
+ with the 10-entry Start menu: Exit desktop and Shut down were overwritten by
+ the next level and moved away when a group opened)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ user/microwin/src/demos/nanox/dsdesk.c | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/user/microwin/src/demos/nanox/dsdesk.c b/user/microwin/src/demos/nanox/dsdesk.c
+index 2d30d7803..422429c6d 100644
+--- a/user/microwin/src/demos/nanox/dsdesk.c
++++ b/user/microwin/src/demos/nanox/dsdesk.c
+@@ -103,7 +103,9 @@ struct level {
+ 	GR_WINDOW_ID win;
+ 	int x, y, w, h;
+ 	int hot;		/* highlighted item or -1 */
+-	int ytop[8];		/* top of each item (n <= 8) */
++#define MAXITEMS	16
++	int ytop[MAXITEMS];	/* top of each item; was [8] while the Start menu grew to 10 entries: the last two overwrote the next
++				 * level's fields, so Exit desktop and Shut down were drawn elsewhere as soon as a group opened */
+ };
+ static struct level lv[MAXLVL];
+ static int nlv;
+@@ -751,6 +753,8 @@ static void open_level(const struct item *list, int n, int x, int y, int bottom_
+ 	struct level *m = &lv[nlv];
+ 	int i, maxw = 0, w, yy = 3;
+ 
++	if (n > MAXITEMS)
++		n = MAXITEMS;
+ 	m->list = list;
+ 	m->n = n;
+ 	m->hot = -1;
+-- 
+2.56.0
+

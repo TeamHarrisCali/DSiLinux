@@ -6,7 +6,7 @@ It starts from TWiLight Menu++ (through Unlaunch). **Nothing is ever written to 
 outside two files in `sd:/linux/` (enforced by the ARM7, see below).
 
 This repository holds the patches, build scripts and notes. The source tree is a separate clone of
-[ipwndev/DSLinux](https://github.com/ipwndev/DSLinux) in `work/dslinux` (git-ignored); the changes are in `patches/` (92 patches, in order).
+[ipwndev/DSLinux](https://github.com/ipwndev/DSLinux) in `work/dslinux` (git-ignored); the changes are in `patches/` (93 patches, in order).
 
 - **Using it:** [docs/USER-GUIDE.md](docs/USER-GUIDE.md): buttons, the desktop, every app, Wi-Fi and SSH, the card scripts, what to do after a freeze.
 - **Developing for it:** [docs/DSI-NOTES.md](docs/DSI-NOTES.md): everything learned about the DSi hardware and this system (registers, limits, pitfalls, numbers).
@@ -73,6 +73,12 @@ the card root. The card's mount point is set in `scripts/card.sh` (`CARD=...` ov
 | `doom/build.sh`, `doom/install.sh [doom1.wad]` | build DOOM and put it into `/home/doom` |
 | `scripts/make-testrom.py out.gb` | a small Game Boy test ROM of our own (stripes, d-pad scrolls) |
 | `scripts/in-container.sh 'cmd'` | run anything in the build container (`/work` = the tree, `/out` = `out/`) |
+
+**PC test bed for the desktop** (`testbed/`): `testbed/build.sh` compiles the same Nano-X server (Microwindows from the tree, with our
+patches) and the desktop programs for the PC, drawing into a 256x192 framebuffer file (`fbshim.so` answers the framebuffer ioctls like the DS
+top screen); nothing shows on the PC's screen. `testbed/run.sh` starts server, window manager and desktop; `out/testbed/bin/nxctl` clicks, moves,
+types and saves pictures (`nxctl click 20 184 wait 500 move 40 80 shot menu.ppm`). It reproduced the w97p menu bug exactly and showed the fix
+before the build went to the console. It does not emulate the DS hardware (3D engine, sound, Wi-Fi, buttons): UI logic and drawing only.
 
 On a PC, `dsgb_host.c` (Game Boy core: ms per frame, a frame as PPM, `GB_WAV=x.wav` for the sound, `auto` presses buttons) and `arc_test.c`
 (game rules) in `work/dslinux/user/microwin/src/demos/nanox/` test code without the console. The Game Boy harness writes the ROM's `.sav`
