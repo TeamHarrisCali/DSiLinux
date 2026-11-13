@@ -35,7 +35,7 @@ across its top: Desk, Test (self-test), Log (save the log now), Bench.
 
 | Start menu | Program | How to use it |
 |---|---|---|
-| Terminal | `nxterm` | a shell; the keyboard is the bottom screen |
+| Terminal | `nxterm` | a shell (busybox): up/down = command history, Tab = completion, left/right edit the line; X / Y (Page Up / Down) scroll back through the last 200 lines; colours work (`ls --color`) |
 | Files | `dsfiles` | tap a folder to open it, a file to open it in Notes |
 | Accessories > Notes | `dsnotes` | text editor, buttons New / Save / Load (`/home/notes.txt`) |
 | Accessories > Clock | `nxclock` | |

@@ -553,3 +553,19 @@ this PC, so a test bed was built instead: `testbed/` (see the README). The same 
 buffer driver, 15 bit colour, no mouse or keyboard driver), `fbshim.so` (LD_PRELOAD) answers the framebuffer ioctls for a 98304 byte file,
 `nxctl` injects pointer and key events (`GrInjectPointerEvent`, `GrInjectKeyboardEvent`) and converts the framebuffer file to a picture. It
 reproduced the bug with the old dsdesk (Shut down gone after hovering a few groups) and showed the fixed one correct, before w97q went to the card.
+
+### w97q results and the terminal (w97r)
+
+User report (w97q): the Network entries opened an empty terminal. `nxterm` ignored the program it was given: on Linux it always started
+`/bin/sh` from `term_init()`, whatever came on its command line. Checked in the test bed (which now also builds nxterm, with Unix 98 ptys, and
+maps `/boot/...` under `DSDESK_ROOT` so the desktop's menu entries start the PC builds and the real boot scripts): Wi-Fi status opened a
+terminal that ran the script and showed its output.
+
+The user also asked to update nxterm ("looks outdated, maybe get bash working?"). nxterm was a VT52 terminal (wterm, 1990s) that swallowed
+every ANSI sequence, so busybox's line editing (cursor moves, erase to end of line) and colours displayed wrongly. It was rewritten (patch
+0094): a VT100/ANSI subset (CUU/CUD/CUF/CUB, CUP, ED, EL, ICH, DCH, ECH, IL, DL, SU/SD, DECSTBM scroll regions, SGR 16 colours with bold as bright
+and reverse, DECTCEM, DSR/CPR and DA replies, deferred wrap), the screen as cells (correct redraw on expose), a 200 line scrollback on Page
+Up / Page Down (X / Y), whole-screen scrolls drawn with one copy request, the program's name as the title, `TERM=vt100` and a coloured prompt.
+Bash itself was not added: it needs `fork()`, which a no-MMU system cannot provide; busybox `msh` (vfork) already has history, tab completion
+and prompt escapes. Test bed: history recall, an insertion in the middle of a recalled line, `ls --color`, wrapping, scrolling 60 lines and the
+scrollback all correct. Not yet run on the console.

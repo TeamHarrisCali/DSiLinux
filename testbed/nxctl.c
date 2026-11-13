@@ -3,7 +3,7 @@
  *   nxctl move X Y          pointer to (X, Y)
  *   nxctl click X Y         move there, press and release the left button
  *   nxctl down X Y / up X Y left button only
- *   nxctl key K             one key to the focused window: a character, or up down left right enter esc space
+ *   nxctl key K             one key to the focused window: a character, or up down left right enter esc space pageup pagedown backspace
  *   nxctl shot FILE.ppm     the screen (read from the framebuffer file $FRAMEBUFFER, 256x192 RGB555) as a picture,
  *                           3x enlarged so it is easy to look at; nxctl shot1 FILE.ppm writes it 1:1
  *   nxctl wait MS           sleep
@@ -54,6 +54,9 @@ static int keyval(const char *k)
 	if (!strcmp(k, "enter")) return MWKEY_ENTER;
 	if (!strcmp(k, "esc")) return MWKEY_ESCAPE;
 	if (!strcmp(k, "space")) return ' ';
+	if (!strcmp(k, "pageup")) return MWKEY_PAGEUP;
+	if (!strcmp(k, "pagedown")) return MWKEY_PAGEDOWN;
+	if (!strcmp(k, "backspace")) return MWKEY_BACKSPACE;
 	return (unsigned char)k[0];
 }
 

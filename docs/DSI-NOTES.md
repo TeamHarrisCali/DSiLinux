@@ -42,6 +42,9 @@ Build numbers (w95x, w97m...) point into [STAGE3.md](STAGE3.md), where the story
   `__uClibc_init`. **measured**
 - The kernel has no `#!` support here and uClibc's `execvp()` does not fall back to the shell, so **a script started from C must be run as
   `/bin/sh script`** (nxterm with a script argument opened and closed at once). **measured** (w97n)
+- **No bash:** bash needs `fork()` (a copy of the process), which a system without an MMU cannot do; busybox's `msh` is built for `vfork()`. It already
+  has line editing, history (saved), tab completion and a prompt with `\u \h \w \W \$ \e \[ \]` (cmdedit), which work with the rewritten `nxterm` (w97r);
+  the old VT52 nxterm dropped the ANSI sequences cmdedit sends, so editing looked broken. **code/inferred**
 - The shell is `msh`: plain commands only. `{ ...; } > file` is ignored, `a && b &` runs in the foreground, `cmp -s` takes `-s` as a file name,
   `/usr/bin/cat` must be called by its full path in boot scripts, and there is no `tail`. busybox `grep` has `-E` on the console's build. **measured**
 - The compiler is gcc 4.0.4 (2008). It does not define the endianness macros newer code expects (`PEANUT_GB_IS_LITTLE_ENDIAN` had to be set). **measured**

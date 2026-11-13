@@ -5,7 +5,7 @@ cd "$(dirname "$0")/.."
 B=$PWD/out/testbed/bin
 export FRAMEBUFFER=/dev/shm/dsi-testbed-fb
 if [ "$1" = stop ]; then
-	pkill -f "$B/dsdesk"; pkill -f "$B/nanowm"; pkill -f "$B/nano-X"
+	pkill -f "$B/dsdesk"; pkill -f "$B/nxterm"; pkill -f "$B/nanowm"; pkill -f "$B/nano-X"
 	rm -f /tmp/.nano-X
 	exit 0
 fi
@@ -14,6 +14,6 @@ LD_PRELOAD=$B/fbshim.so $B/nano-X -p > out/testbed/server.log 2>&1 &
 sleep 1
 $B/nanowm > out/testbed/nanowm.log 2>&1 &
 sleep 0.5
-(cd out/testbed && HOME=$PWD $B/dsdesk > dsdesk.log 2>&1 &)
+(cd out/testbed && HOME=$PWD DSDESK_ROOT=$PWD/root $B/dsdesk > dsdesk.log 2>&1 &)
 sleep 1
 echo "test bed running (framebuffer $FRAMEBUFFER)"

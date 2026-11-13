@@ -17,8 +17,12 @@ sed -i 's#^\#include <asm/page.h>#\#include <unistd.h>\n\#ifndef PAGE_SIZE\n\#de
 gcc -shared -fPIC -O1 -o $T/bin/fbshim.so testbed/fbshim.c -ldl
 CF="-w -fcommon -std=gnu99 -O1 -I$T/src/include -I$T/src/demos/nanox -DNANOX_TESTBED"
 gcc $CF -o $T/bin/nxctl testbed/nxctl.c -L$T/src/lib -lnano-X
-for p in dsdesk dsnotes dsfiles dssettings dsarcade dsgb; do
+for p in dsdesk dsnotes dsfiles dssettings dsarcade dsgb nxterm; do
 	gcc $CF -o $T/bin/$p $T/src/demos/nanox/$p.c -L$T/src/lib -lnano-X -lm || echo "($p did not build for the PC)"
 done
 cp $T/src/bin/nano-X $T/src/bin/nanowm $T/bin/
+# what the desktop starts from /boot on the DS: the PC builds and the boot scripts (dsdesk prefixes /boot paths with DSDESK_ROOT)
+mkdir -p $T/root/boot
+for p in nxterm dsnotes dsfiles dssettings dsarcade dsgb; do ln -sf ../../bin/$p $T/root/boot/$p; done
+for f in wifi-scan wifi-connect wifi-status wifi-ssh savelog; do cp work/dslinux/vendors/Nintendo/DSI/$f $T/root/boot/; done
 echo "built: $(ls $T/bin | tr '\n' ' ')"
