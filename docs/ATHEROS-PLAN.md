@@ -1,7 +1,8 @@
 # Plan: the DSi's second Wi-Fi chip (Atheros, 802.11g, WPA2)
 
-Status: **started 2026-11-13.** Steps 0-3 done and **verified on the console** (w98k): AR6013, boot ROM 0x23000024, firmware uploaded from
-the DSi's own HNCA file and running (ready 1, HTC ready message waiting). Next: step 4 (HTC + WMI, scan).
+Status: **started 2026-11-13.** Steps 0-4 **verified on the console**: firmware uploaded from the DSi's own HNCA file and running (w98k);
+HTC services, WMI ready (MAC), scan listing WPA2 networks (w98l; all-channel scan in w98m). Next: step 5 (wlan0, connect to an open
+network, data path, DHCP).
 
 ## Why
 

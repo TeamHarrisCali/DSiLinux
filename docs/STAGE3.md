@@ -821,3 +821,12 @@ as dswifi does (channel, scan parameters, BSS filter "all", start scan, BSS info
 channel, RSSI, SNR, BSSID and the beacon, from which the SSID and the security (open, WEP from the privacy bit, WPA from the vendor element,
 WPA2 from the RSN element) are read. The ARM7 moves mailbox packets byte by byte (CMD52), slow but simple; block transfers can come with
 the data path.
+
+### Step 4 verified: the DSi's own chip scans (w98l), all channels (w98m)
+
+w98l on the console: HTC ready (10 credits of 1544 bytes), all five services connected (status 0, endpoints 1-5), **WMI ready with the MAC
+a4:c0:e1:..** (Nintendo's prefix), regulatory domain 0x80000348 (840 = USA), and a scan that found **6 networks including WPA2 ones**
+(WorkNet WPA2, GuestNet open, two hidden WPA2) with RSSI -58 to -72 dBm and SNR 23-37. The first scan of the DSi's own Wi-Fi chip under
+DSLinux. Flaw: every network on channel 1, and "set channel params" was refused twice (WMI command error 1): the per-channel scan with phy
+mode 11ag (dswifi's value; the AR6013 is 2.4 GHz only) never left channel 1. w98m (patch 0114): one scan over all channels, phy mode
+11g, empty channel list.
