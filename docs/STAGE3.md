@@ -609,3 +609,15 @@ for good; DHCP then has nobody to talk to. Fix (patch 0096):
   up to 12 s for "associated" showing the tries, says "No answer from X" / "X refused..." when it fails, and only then runs DHCP.
 - WPA networks (the ARM7 already noticed them) are marked "WPA" in the list and refused with a message instead of a hopeless attempt.
 Still open: WEP always uses shared-key authentication (many WEP routers want open authentication).
+
+### w97t results: no answer to the login (w97u diagnostics)
+
+w97t on the console, phone hotspot "Nothing_Phone_2" (open): `/proc/dswifistat` showed `state 0x0001 up`, `auth 48 assoc 0 status -1 -1`,
+channel 6 = wanted 6, 460 frames received. The retries work (48 authentication frames over about 45 s), but no authentication answer
+ever came back. Either the phone does not receive what the DS chip sends (the chip transmits only 802.11b, 1-2 Mbit/s; many phone hotspots
+require 802.11g rates), or the frames never leave the chip, or answers are dropped. Reading the code: queued frames are started only from the
+beacon-time (TBTT) interrupt, which writes the transmit request register (0xAE).
+w97u adds counters to tell these apart (patch 0097): transmit-end and transmit-error interrupts, beacon-time interrupts, the transmit status
+register, frames from the chosen access point, frames addressed to this console, authentication frames seen. And `/proc/dswifi` gives each
+network's rate class from its beacon: `b` (1-2 Mbit/s basic rates), `b11` (5.5/11 basic), `g` (an 802.11g rate is required: the DS chip can
+never join). The Wi-Fi window tags `g` networks "11g".

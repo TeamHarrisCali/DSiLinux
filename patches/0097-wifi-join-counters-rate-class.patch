@@ -1,0 +1,212 @@
+From 453b9338c85064bd3c9dcdc0693f4a79c58d2c2d Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Fri, 13 Nov 2026 00:38:11 -0600
+Subject: [PATCH] Wi-Fi: air-level join counters, rate class per network
+
+- ARM7: count transmit-end / transmit-error / beacon-time interrupts, the
+  transmit status register, frames from the chosen access point, frames
+  addressed to us and authentication frames; /proc/dswifistat prints them.
+- /proc/dswifi adds the rate class from the beacon: b, b11, or g (needs an
+  802.11g rate, which the DS chip cannot send).
+- Wi-Fi window tags "11g" networks and mentions it when one does not answer.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ linux-2.6.x/arch/arm/mach-nds/arm7/wifi.c   | 17 +++++++++++++++++
+ linux-2.6.x/drivers/net/wireless/nds.c      | 13 +++++++++----
+ linux-2.6.x/include/asm-arm/arch-nds/wifi.h |  7 +++++++
+ user/microwin/src/demos/nanox/dsnet.c       | 17 ++++++++++-------
+ 4 files changed, 43 insertions(+), 11 deletions(-)
+
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/wifi.c b/linux-2.6.x/arch/arm/mach-nds/arm7/wifi.c
+index d069a4342..d5968c3e6 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/arm7/wifi.c
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/wifi.c
+@@ -464,6 +464,8 @@ void Wifi_SetSSID(int off, char b1, char b2)
+ 		/* once we see the null terminator, we are done */
+ 		if (wifi_data.stats) {
+ 			wifi_data.stats[WIFI_STATS_AUTH_TRIES] = wifi_data.stats[WIFI_STATS_ASSOC_TRIES] = 0;
++			wifi_data.stats[WIFI_STATS_TX_DONE] = wifi_data.stats[WIFI_STATS_TX_ERR] = wifi_data.stats[WIFI_STATS_TBTT] = 0;
++			wifi_data.stats[WIFI_STATS_RX_FROM_AP] = wifi_data.stats[WIFI_STATS_RX_TO_US] = wifi_data.stats[WIFI_STATS_RX_AUTH] = 0;
+ 			wifi_data.stats[WIFI_STATS_JOIN_STATUS] = 0xffffffff;
+ 		}
+ 		if (wifi_data.state & WIFI_STATE_UP) {
+@@ -1344,6 +1346,16 @@ static int Wifi_ProcessReceivedFrame(int macbase, int framelen)
+ 
+ 	control_802 = Wifi_MACReadRx(macbase, 12);
+ 
++	/* join diagnosis: is the access point heard, does anything come back to us */
++	if (Wifi_MACReadRx(macbase, 22) == ((u16 *) wifi_data.bssid)[0] && Wifi_MACReadRx(macbase, 24) == ((u16 *) wifi_data.bssid)[1] &&
++	    Wifi_MACReadRx(macbase, 26) == ((u16 *) wifi_data.bssid)[2])
++		wifi_data.stats[WIFI_STATS_RX_FROM_AP]++;
++	if (Wifi_MACReadRx(macbase, 16) == ((u16 *) wifi_data.MacAddr)[0] && Wifi_MACReadRx(macbase, 18) == ((u16 *) wifi_data.MacAddr)[1] &&
++	    Wifi_MACReadRx(macbase, 20) == ((u16 *) wifi_data.MacAddr)[2])
++		wifi_data.stats[WIFI_STATS_RX_TO_US]++;
++	if (((control_802 >> 2) & 0x3F) == 0x2C)
++		wifi_data.stats[WIFI_STATS_RX_AUTH]++;
++
+ 	switch ((control_802 >> 2) & 0x3F) {
+ 		// Management Frames
+ 	case 0x20:		// 1000 00 Beacon
+@@ -1510,6 +1522,8 @@ static void Wifi_Intr_StartTx(void)
+ 
+ static void Wifi_Intr_TxEnd(void)
+ {
++	wifi_data.stats[WIFI_STATS_TX_DONE]++;
++	wifi_data.stats[WIFI_STATS_TXSTAT] = WIFI_REG(0xB8);
+ 	/* signal that current packet has been transmitted */
+ 	if ((wifi_data.state & WIFI_STATE_TXPENDING)
+ 	    && !(WIFI_REG(0xA0) & 0x8000)) {
+@@ -1522,6 +1536,8 @@ static void Wifi_Intr_TBTT(void)
+ {
+ 	u16 active_reg = 0;
+ 
++	wifi_data.stats[WIFI_STATS_TBTT]++;
++
+ 	if (WIFI_REG(0xA0) & 0x8000) {
+ 		active_reg |= 1;
+ 	}
+@@ -1543,6 +1559,7 @@ static void Wifi_Intr_DoNothing(void)
+ 
+ static void Wifi_Intr_TxErr(void)
+ {
++	wifi_data.stats[WIFI_STATS_TX_ERR]++;
+ 	wifi_data.state |= WIFI_STATE_SAW_TX_ERR;
+ }
+ 
+diff --git a/linux-2.6.x/drivers/net/wireless/nds.c b/linux-2.6.x/drivers/net/wireless/nds.c
+index b64a9f989..5b03eca1b 100644
+--- a/linux-2.6.x/drivers/net/wireless/nds.c
++++ b/linux-2.6.x/drivers/net/wireless/nds.c
+@@ -1262,10 +1262,12 @@ static int dswifi_read_proc(char *page, char **start, off_t off, int count, int
+ 			name[k] = (c >= 32 && c < 127) ? c : '?';
+ 		}
+ 		name[n] = 0;
+-		len += sprintf(page + len, "%02x:%02x:%02x:%02x:%02x:%02x %d %s %d %s\n",
++		len += sprintf(page + len, "%02x:%02x:%02x:%02x:%02x:%02x %d %s %d %s %s\n",
+ 			       aplist[i].bssid[0], aplist[i].bssid[1], aplist[i].bssid[2], aplist[i].bssid[3], aplist[i].bssid[4],
+ 			       aplist[i].bssid[5], aplist[i].channel, (aplist[i].flags & WFLAG_APDATA_WPA) ? "wpa" : (aplist[i].flags & WFLAG_APDATA_WEP) ? "wep" : "open",
+-			       aplist[i].rssi, name);
++			       aplist[i].rssi,
++			       /* b: 1-2 Mbit/s basic rates; b11: 5.5/11 basic; g: an 802.11g rate is required, which the DS chip cannot send */
++			       (aplist[i].flags & WFLAG_APDATA_COMPATIBLE) ? "b" : (aplist[i].flags & WFLAG_APDATA_EXTCOMPATIBLE) ? "b11" : "g", name);
+ 	}
+ 	ap_query_complete = 0;
+ 	nds_fifo_send(FIFO_WIFI_CMD(FIFO_WIFI_CMD_AP_QUERY, 0));	/* updates on again */
+@@ -1301,11 +1303,14 @@ static int dswifistat_read_proc(char *page, char **start, off_t off, int count,
+ 		if (st & (1 << i))
+ 			len += sprintf(page + len, " %s", names[i]);
+ 	js = arm7_stats[WIFI_STATS_JOIN_STATUS];
+-	len += sprintf(page + len, "\nauth %u assoc %u status %d %d\nchannel %u wanted %u rate %u rx %u tx-bytes %u\n",
++	len += sprintf(page + len, "\nauth %u assoc %u status %d %d\nchannel %u wanted %u rate %u rx %u tx-bytes %u\n"
++		       "tx-done %u tx-err %u tbtt %u txstat %04x\nrx from-ap %u to-us %u auth-frames %u\n",
+ 		       arm7_stats[WIFI_STATS_AUTH_TRIES], arm7_stats[WIFI_STATS_ASSOC_TRIES],
+ 		       (js & 0xffff) == 0xffff ? -1 : (int)(js & 0xffff), (js >> 16) == 0xffff ? -1 : (int)(js >> 16),
+ 		       arm7_stats[WIFI_STATS_CHANNELS] & 0xff, (arm7_stats[WIFI_STATS_CHANNELS] >> 8) & 0xff,
+-		       arm7_stats[WIFI_STATS_CHANNELS] >> 16, arm7_stats[WIFI_STATS_RXRAWPACKETS], arm7_stats[WIFI_STATS_TXBYTES]);
++		       arm7_stats[WIFI_STATS_CHANNELS] >> 16, arm7_stats[WIFI_STATS_RXRAWPACKETS], arm7_stats[WIFI_STATS_TXBYTES],
++		       arm7_stats[WIFI_STATS_TX_DONE], arm7_stats[WIFI_STATS_TX_ERR], arm7_stats[WIFI_STATS_TBTT], arm7_stats[WIFI_STATS_TXSTAT] & 0xffff,
++		       arm7_stats[WIFI_STATS_RX_FROM_AP], arm7_stats[WIFI_STATS_RX_TO_US], arm7_stats[WIFI_STATS_RX_AUTH]);
+ 	*eof = 1;
+ 	return len;
+ }
+diff --git a/linux-2.6.x/include/asm-arm/arch-nds/wifi.h b/linux-2.6.x/include/asm-arm/arch-nds/wifi.h
+index cd1547540..079e60dfc 100644
+--- a/linux-2.6.x/include/asm-arm/arch-nds/wifi.h
++++ b/linux-2.6.x/include/asm-arm/arch-nds/wifi.h
+@@ -56,6 +56,13 @@ enum WIFI_STATS {
+ 	WIFI_STATS_ASSOC_TRIES,
+ 	WIFI_STATS_JOIN_STATUS,	/* low 16 bits: last authentication status, high 16: last association status; 0xffff = no answer yet */
+ 	WIFI_STATS_CHANNELS,	/* current channel | requested channel << 8 | max rate << 16 */
++	WIFI_STATS_TX_DONE,	/* "transmit end" interrupts */
++	WIFI_STATS_TX_ERR,	/* "transmit error" interrupts */
++	WIFI_STATS_TBTT,	/* beacon-time interrupts (queued frames are started there) */
++	WIFI_STATS_RX_FROM_AP,	/* frames from the chosen access point */
++	WIFI_STATS_RX_TO_US,	/* frames addressed to this console */
++	WIFI_STATS_RX_AUTH,	/* authentication frames, whoever they are for */
++	WIFI_STATS_TXSTAT,	/* the transmit status register (0xB8) at the last transmit end */
+ 
+ 	WIFI_STATS_MAX
+ };
+diff --git a/user/microwin/src/demos/nanox/dsnet.c b/user/microwin/src/demos/nanox/dsnet.c
+index 076674fa2..9bea1865f 100644
+--- a/user/microwin/src/demos/nanox/dsnet.c
++++ b/user/microwin/src/demos/nanox/dsnet.c
+@@ -37,7 +37,7 @@ static char KNOWN[200], CONF[200];	/* PC test bed: in $HOME */
+ 
+ struct net {
+ 	char ssid[33];
+-	int channel, wep, wpa, signal, saved;
++	int channel, wep, wpa, gonly, signal, saved;
+ 	char key[40];
+ };
+ 
+@@ -183,7 +183,7 @@ static void save_known(const char *ssid, const char *key, int forget)
+ 	fclose(o);
+ }
+ 
+-/* read the networks from /proc/dswifi: "bssid channel open|wep|wpa signal name"; the same name heard twice keeps its best signal */
++/* read the networks from /proc/dswifi: "bssid channel open|wep|wpa signal b|b11|g name" (g: needs an 802.11g rate, beyond the DS chip); the same name heard twice keeps its best signal */
+ static void read_networks(void)
+ {
+ 	const char *src = getenv("DSNET_APS");
+@@ -194,10 +194,10 @@ static void read_networks(void)
+ 	if (!f)
+ 		return;
+ 	while (fgets(line, sizeof(line), f) && nnet < MAXNET) {
+-		char bssid[24], sec[8], *name, *nl;
++		char bssid[24], sec[8], rates[4], *name, *nl;
+ 		int ch, sig, i, pos = 0;
+ 
+-		if (sscanf(line, "%23s %d %7s %d %n", bssid, &ch, sec, &sig, &pos) < 4 || !pos)
++		if (sscanf(line, "%23s %d %7s %d %3s %n", bssid, &ch, sec, &sig, rates, &pos) < 5 || !pos)
+ 			continue;
+ 		name = line + pos;
+ 		if ((nl = strchr(name, '\n')))
+@@ -215,6 +215,7 @@ static void read_networks(void)
+ 		nets[nnet].channel = ch;
+ 		nets[nnet].wep = !strcmp(sec, "wep");
+ 		nets[nnet].wpa = !strcmp(sec, "wpa");
++		nets[nnet].gonly = !strcmp(rates, "g");
+ 		nets[nnet].signal = sig;
+ 		nnet++;
+ 	}
+@@ -325,6 +326,8 @@ static void draw_list(void)
+ 			w95_text(win, gc, on ? W95_LIGHT : W95_SHADOW, WW - 44, y + (ROWH - th) / 2, "saved");
+ 		else if (n->wpa)
+ 			w95_text(win, gc, on ? W95_LIGHT : W95_SHADOW, WW - 32, y + (ROWH - th) / 2, "WPA");
++		else if (n->gonly)
++			w95_text(win, gc, on ? W95_LIGHT : W95_SHADOW, WW - 32, y + (ROWH - th) / 2, "11g");
+ 	}
+ }
+ 
+@@ -393,7 +396,7 @@ static void dlog(const char *s)
+  * Wait until the console has joined the network (the ARM7 retries the authentication / association every second), at most 12 s.
+  * /proc/dswifistat: "state 0x.. names", "auth N assoc N status A B". Returns 1 when joined.
+  */
+-static int join_wait(const char *ssid)
++static int join_wait(const char *ssid, int gonly)
+ {
+ 	char line[96], t[64];
+ 	unsigned st = 0, auth = 0, assoc = 0;
+@@ -424,7 +427,7 @@ static int join_wait(const char *ssid)
+ 	else if (sb > 0)
+ 		snprintf(status, sizeof(status), "%s refused to join (%d)", ssid, sb);
+ 	else
+-		snprintf(status, sizeof(status), "No answer from %s", ssid);
++		snprintf(status, sizeof(status), "No answer from %s%s", ssid, gonly ? " (11g only)" : "");
+ 	return 0;
+ }
+ 
+@@ -453,7 +456,7 @@ static void connect_to(struct net *n, const char *key)
+ 	quote(q, sizeof(q), n->ssid);
+ 	snprintf(cmd, sizeof(cmd), "iwconfig nds essid %s > /dev/null 2>&1", q);
+ 	run(cmd);
+-	if (!join_wait(n->ssid)) {
++	if (!join_wait(n->ssid, n->gonly)) {
+ 		draw_all();
+ 		return;
+ 	}
+-- 
+2.56.0
+
