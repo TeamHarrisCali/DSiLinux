@@ -900,3 +900,12 @@ and then ignoring case; a name not in the scan is joined with channel 0 and no B
 ath6kl connects), WPA2 with AES if a password was given, with a directed probe for the name (also finds hidden networks). The scan now
 asks for the firmware's channel list (as dswifi) and logs it. gcc 4.0.4 crashed on do_connect() until the new code moved into noinline
 helpers.
+
+### w98t on the console: open network again, all pings answered; WPA2 still not exercised
+
+w98t's /home/wlan0-test.log: wpatest all passed again; the firmware's channel list is **11 channels, 2412-2462 MHz** (US domain
+0x348), yet the scan still reports every network on channel 1 and no scan-complete event. The test was run against the open network
+GuestNet (found in the scan, so the new any-channel path was not used): connected after about 50 s (third connect command again), DHCP
+192.168.1.2 on the first discover, **ping 8.8.8.8 3 of 3** (1290 ms, 260 ms, 20 ms: the first replies wait for ARP and the byte-wise
+receive) and **ping google.com 3 of 3, 20-40 ms**; 145 packets in, 11 out, firmware failure state 0. WPA2 still needs a run against a
+WPA2 network.
