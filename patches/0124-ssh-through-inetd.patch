@@ -1,0 +1,94 @@
+From 646132c4c5130bccafd4e6c47fa5fc34d5e6f48d Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Tue, 17 Nov 2026 01:14:10 -0600
+Subject: [PATCH] SSH server: through inetd (this Dropbear cannot run on its
+ own)
+
+Dropbear is built with INETD_MODE only: "dropbear -r key" exits at once
+("Compiled without normal mode, can't run without -i"), so Network >
+SSH server never listened and ssh got "connection refused". The script
+now writes /etc/inetd.conf (ssh -> /usr/bin/dropbear -i [-s] -r key),
+starts inetd, checks that port 22 is listening in /proc/net/tcp,
+prints the address of wlan0 or nds, and logs to /tmp/wifi-ssh.log
+(added to the card log).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ vendors/Nintendo/DSI/logbody  |  1 +
+ vendors/Nintendo/DSI/wifi-ssh | 44 ++++++++++++++++++++++++++++-------
+ 2 files changed, 37 insertions(+), 8 deletions(-)
+
+diff --git a/vendors/Nintendo/DSI/logbody b/vendors/Nintendo/DSI/logbody
+index 148bfcd50..6d57d0dcc 100644
+--- a/vendors/Nintendo/DSI/logbody
++++ b/vendors/Nintendo/DSI/logbody
+@@ -23,6 +23,7 @@ echo "--- /proc/dswifistat (joining) ---"
+ echo "--- Wi-Fi window (dsnet.log, DHCP) ---"
+ [ -f /tmp/dsnet.log ] && /usr/bin/cat /tmp/dsnet.log
+ [ -f /tmp/wifi-auto.log ] && /usr/bin/cat /tmp/wifi-auto.log
++[ -f /tmp/wifi-ssh.log ] && /usr/bin/cat /tmp/wifi-ssh.log
+ [ -f /tmp/dsnet-dhcp.log ] && /usr/bin/cat /tmp/dsnet-dhcp.log
+ echo "--- /proc/net/route ---"
+ /usr/bin/cat /proc/net/route 2>&1
+diff --git a/vendors/Nintendo/DSI/wifi-ssh b/vendors/Nintendo/DSI/wifi-ssh
+index 5b28dc065..82ce20901 100755
+--- a/vendors/Nintendo/DSI/wifi-ssh
++++ b/vendors/Nintendo/DSI/wifi-ssh
+@@ -1,18 +1,46 @@
+ #!/bin/sh
+-# Start > Network > SSH server: starts Dropbear (makes the host key the first time, about a minute). With /home/.ssh/authorized_keys present
+-# passwords are switched off (-s); without it a password login is possible, so use that only on a network you trust.
++# Start > Network > SSH server: inetd listens on port 22 and starts Dropbear for each connection. This Dropbear is built for inetd only
++# (NON_INETD_MODE off in user/dropbear/options.h): started on its own it exits at once ("Compiled without normal mode, can't run without
++# -i"), which is why up to w98w the server never answered (connection refused). Makes the host key the first time (about a minute).
++# With /home/.ssh/authorized_keys present passwords are switched off (-s); without it the root password logs in, so use that only on a
++# network you trust. Runs until the DSi is switched off; "kill `cat /var/run/inetd.pid`" stops it. Output also in /tmp/wifi-ssh.log.
++L=/tmp/wifi-ssh.log
++echo "SSH server" > $L
+ if [ ! -f /etc/dropbear_rsa_host_key ]
+ then
+ 	echo "Making the host key (about a minute)..."
+-	dropbearkey -t rsa -f /etc/dropbear_rsa_host_key
++	dropbearkey -t rsa -f /etc/dropbear_rsa_host_key >> $L 2>&1
+ fi
+ if [ -f /home/.ssh/authorized_keys ]
+ then
+-	dropbear -s -r /etc/dropbear_rsa_host_key
+-	echo "SSH server started, key login only."
++	echo "ssh stream tcp nowait root /usr/bin/dropbear -i -s -r /etc/dropbear_rsa_host_key" > /etc/inetd.conf
++	MODE="key login only (/home/.ssh/authorized_keys)"
+ else
+-	dropbear -r /etc/dropbear_rsa_host_key
+-	echo "SSH server started, PASSWORD login (no authorized_keys installed)."
++	echo "ssh stream tcp nowait root /usr/bin/dropbear -i -r /etc/dropbear_rsa_host_key" > /etc/inetd.conf
++	MODE="PASSWORD login (no /home/.ssh/authorized_keys)"
+ fi
+-ifconfig nds
++if [ -f /var/run/inetd.pid ]
++then
++	kill `cat /var/run/inetd.pid` 2>/dev/null
++	rm -f /var/run/inetd.pid
++	sleep 1
++fi
++/usr/bin/inetd /etc/inetd.conf >> $L 2>&1 &
++sleep 2
++# listening on port 22 (0016) is state 0A in /proc/net/tcp
++if grep -q ":0016 00000000:0000 0A" /proc/net/tcp
++then
++	R="SSH server running: $MODE"
++else
++	R="SSH server NOT listening (see $L)"
++fi
++echo "$R"
++echo "$R" >> $L
++for i in wlan0 nds
++do
++	A=`ifconfig $i 2>/dev/null | grep "inet addr" | sed "s/^ */$i: /"`
++	[ -n "$A" ] && echo "$A"
++	[ -n "$A" ] && echo "$A" >> $L
++done
++echo "From the PC: ssh -o HostName=ADDRESS dsi"
+ exec /bin/sh
+-- 
+2.56.1
+

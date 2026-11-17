@@ -95,7 +95,9 @@ Your PC must be on the same network for SSH.
 2. In the terminal: `/boot/wifi-scan` prints the same list (`cat /proc/dswifi` is the raw list), `/boot/wifi-connect` asks for name and key.
    Tested: scan, connect, address by DHCP and `ping google.com` over a phone hotspot (open, 2.4 GHz) work (w97y).
 3. **Network > Wi-Fi status:** address, Wi-Fi state, routes. The tray shows the same at a glance.
-4. **Network > SSH server:** makes the host key once (about a minute) and starts Dropbear. Password logins are switched off as soon as
+4. **Network > SSH server:** makes the host key once (about a minute) and starts the SSH server (inetd, which starts Dropbear for each
+   connection; from w98x, before that it never listened); it says "SSH server running" and the address, and runs until the DSi is
+   switched off. Without a key, log in as root with the root password (DSLinux's default unless you changed it with `passwd`). Password logins are switched off as soon as
    `/home/.ssh/authorized_keys` exists (an RSA public key). The server is old; from a current PC:
 
 ```

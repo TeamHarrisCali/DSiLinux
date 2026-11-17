@@ -966,3 +966,14 @@ the DSi in the PC's known hosts.
   into the PC's ~/.ssh/known_hosts as "dsi,192.168.1.2", with a ~/.ssh/config entry "dsi" (root, HostKeyAlias dsi, the old algorithms).
   The private key was read only to derive the public half and was not kept.
 Not yet run on the console.
+
+### w98w on the console; SSH fixed (w98x)
+
+w98w's card log: the desktop started at boot by itself ("desktop: start", then "running"), the Wi-Fi window joined GuestNet (DHCP
+192.168.1.45) and Auto was set on it (/home/wifi.auto "dsi GuestNet"); the auto-connect itself shows at the next boot. The user's
+`ssh -o HostName=192.168.1.45 dsi` got "connection refused": nothing listened on port 22. Cause: user/dropbear/options.h has only
+INETD_MODE, so `dropbear -r key` as Network > SSH server ran it exits at once ("Compiled without normal mode, can't run without -i");
+the script printed "SSH server started" regardless. The SSH server had never been checked on the console. w98x (patch 0124): the
+script writes /etc/inetd.conf (`ssh stream tcp nowait root /usr/bin/dropbear -i [-s] -r /etc/dropbear_rsa_host_key`, as DSLinux's
+inetd.conf.example), starts /usr/bin/inetd, checks port 22 is in LISTEN state in /proc/net/tcp, prints the address and logs to
+/tmp/wifi-ssh.log. The root password in the image is still DSLinux's default.
