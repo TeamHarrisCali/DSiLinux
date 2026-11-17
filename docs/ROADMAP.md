@@ -72,6 +72,7 @@ lists them, where each one stopped, and **every question still waiting for an an
   and that shows up as SIGSEGV. **129 of the 185 programs in `/usr/bin` have 4 KB**, including tar, gzip, bzip2, unzip, nano, less,
   links, mc, perl, sqlite3, irssi, scp and dropbear (the list is in `out/flt/stacks.txt` on the PC).
   - **Confirm:** `dmesg | tail` on the DSi after the crash names the program that faulted (the fault handler prints it).
+  - **Approved by the user (2026-11-17): do this the next time the card is in the PC.**
   - **Fix:** an install step (like `install-apps.sh`) rewrites each program's stack size in the image with `flthdr -s`, without
     rebuilding: 16 KB for the small tools, 64 KB for tar, gzip, bzip2, unzip, perl, sqlite3, links, mc, irssi and nano. RAM cost: only
     while a program runs (a few tens of KB each), within the memory TODO's budget.
