@@ -66,6 +66,19 @@ lists them, where each one stopped, and **every question still waiting for an an
   - Overlaps: the BusyBox plan (hush runs many tools inside itself, without a new process) and the files plan (removing unused
     programs saves card space, not RAM, unless they were running).
 
+- **`gzip -dc make-4.3.tar.gz | tar xf -` ends in SIGSEGV** (user, 2026-11-17, the 2.3 MB make source). Likely cause: **tiny
+  stacks.** On this system each program's stack size is fixed in its file when it is built (`elf2flt -s`). `tar` and `gzip` have
+  **4 KB**, and GNU tar needs far more while extracting deep paths. Without an MMU an overflow is not caught: it overwrites memory,
+  and that shows up as SIGSEGV. **129 of the 185 programs in `/usr/bin` have 4 KB**, including tar, gzip, bzip2, unzip, nano, less,
+  links, mc, perl, sqlite3, irssi, scp and dropbear (the list is in `out/flt/stacks.txt` on the PC).
+  - **Confirm:** `dmesg | tail` on the DSi after the crash names the program that faulted (the fault handler prints it).
+  - **Fix:** an install step (like `install-apps.sh`) rewrites each program's stack size in the image with `flthdr -s`, without
+    rebuilding: 16 KB for the small tools, 64 KB for tar, gzip, bzip2, unzip, perl, sqlite3, links, mc, irssi and nano. RAM cost: only
+    while a program runs (a few tens of KB each), within the memory TODO's budget.
+  - Also: tar's file holds about 860 KB of data that is copied into RAM on every run (the BusyBox plan's tar is much smaller).
+- **Downloads run at about 17 KB/s** over the DSi's Wi-Fi chip (`wget` of 2.3 MB took 2 min 15 s, 2026-11-17): the cost of moving
+  data over the chip's bus one byte at a time. CMD53 block transfers (Wi-Fi list above) should make this many times faster.
+
 ## The plans (none started)
 
 | Plan | File | Next step | Waiting on |
