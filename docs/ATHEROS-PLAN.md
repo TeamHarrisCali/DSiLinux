@@ -5,7 +5,8 @@ scan listing WPA2 networks (w98l), and `wlan0` joined an open network, got an ad
 Step 6 (WPA2-PSK) **built, not yet tried on the console** (w98t). The crypto passes its test vectors on the PC and, built by the DSi's compiler, on the console (w98s).
 Step 7 (the Wi-Fi window uses the DSi chip) **verified on the console for an open network** (w98u: GuestNet joined from the window, DHCP 192.168.1.2); WPA2 from the window not yet tried. A WPA2 hotspot on another channel was not
 found (w98t: the scan, and the firmware's own search, stay on channel 1).
-Next: try w98u on GuestNet, WPA2 on a channel-1 network, the channel-1 scan, faster transfers (CMD53 blocks), a quicker connect.
+w98v scans one channel at a time (built, not yet tried on the console).
+Next: check w98v's scan reaches channels 6 and 11, WPA2 (a hotspot or a channel-1 network), faster transfers (CMD53 blocks), a quicker connect.
 
 ## Why
 

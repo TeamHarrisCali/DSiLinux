@@ -932,3 +932,13 @@ The card log's Wi-Fi window section (/tmp/dsnet.log, which lives in the image an
 wlan0 up", the scan (WorkNet, GuestNet, hidden networks, all channel 1), "Connecting to GuestNet...", "joined", **192.168.1.2** (DHCP lease
 on wlan0, route on wlan0); an earlier block is a scan with the DS chip (key c) elsewhere. The image checked clean. Not yet tried from
 the window: WPA2, and the tray picture/tooltip for wlan0.
+
+### The channel-1 scan (w98v, not yet tried on the console)
+
+Why every DSi-chip scan showed channel 1: w98l's channel-by-channel scan had two refusals (most likely channels 12 and 13, not in
+the firmware's USA list of 11), and gave each channel 0.4 s; w98m-w98u ran one scan over all channels and waited 6 s. In w98s's
+packet ring the scan-complete event (1/100a) did arrive, but at the very end: behind a flood of channel-1 beacon reports (BSS filter
+"all") that are read byte by byte. w98v (patch 0122): channel by channel from the firmware's own list, as dswifi: channel params
+(11g, one channel), scan params, reports on, start, wait at most 1.2 s (a time limit; pump() only stops after a quiet gap), reports
+off before the next channel. One log line per scan gives the reports per channel ("*": no scan complete), which settles the question
+either way. A network's channel now comes from its beacon (DS parameter set element). The Wi-Fi window waits up to 30 s for a rescan.
