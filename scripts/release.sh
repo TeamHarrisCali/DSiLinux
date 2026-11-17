@@ -76,4 +76,5 @@ echo "on the card, checksum ok: $(basename $ROM)"
 # the programs that run from the card (/usr/bin in ROOTFS.IMG) must match this ROM
 scripts/install-apps.sh -i "$CARD/linux/ROOTFS.IMG" || { echo "PROGRAMS NOT INSTALLED in ROOTFS.IMG (scripts/install-apps.sh)"; exit 1; }
 scripts/install-session.sh -i "$CARD/linux/ROOTFS.IMG" || { echo "BOOT SESSION HOOK NOT INSTALLED (scripts/install-session.sh)"; exit 1; }
+scripts/build-dsfetch.sh -i "$CARD/linux/ROOTFS.IMG" | tail -1
 ls "$CARD"/*.nds | xargs -n1 basename

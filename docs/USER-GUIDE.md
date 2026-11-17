@@ -64,6 +64,7 @@ across its top: Desk, Test (self-test), Log (save the log now), Bench.
 | Network > DSi Wi-Fi test | `/boot/wifi-dsi-test` | the DSi's own Wi-Fi chip (development, docs/ATHEROS-PLAN.md): needs the firmware file in the image (`scripts/add-dsi-wifi-fw.sh` on the PC); asks for a network name and password (empty password: an open network; WPA2: 8-63 characters, never written to the log), brings `wlan0` up, joins, DHCP, ping; result in the card log. `wlan0` stays up (`ifconfig wlan0 down` gives the antenna back to the DS Wi-Fi) |
 | System > Settings | `dssettings` | brightness, pointer speed, desktop colour / pattern / wallpaper (`/home/wallpapers`, photos), clock, info |
 | System > Bench, Save log | `dsbench`, `/boot/savelog` | |
+| (Terminal or SSH) | `dsfetch` | neofetch for the DSi: the system at a glance (`dsfetch -n`: no colours) |
 
 Every program closes with q or Esc, or with the window's close box.
 
