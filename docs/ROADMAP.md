@@ -26,6 +26,17 @@ lists them, where each one stopped, and **every question still waiting for an an
   - connecting takes about 50 s;
   - data moves one byte at a time (CMD53 block transfers would speed it up).
 
+## Small fixes to do (TODO)
+
+- **nano over SSH: "Error opening terminal: xterm-256color"** (seen 2026-11-17). The PC sends its terminal type, and the DSi has no
+  terminal-description files at all. nano only knows the two types built into it, `xterm` and `linux`.
+  - **For now:** run `export TERM=xterm` in the SSH session, then `nano`.
+  - **Fix:** `/etc/profile` maps unknown types (`xterm-256color`, `xterm-kitty`, ...) to `xterm`.
+  - **To check:** nano in the desktop's Terminal too. nxterm sets `TERM=vt100`, which is not among nano's built-in types either, so it
+    probably fails there as well. Either nxterm says `xterm` (then check that its escape-sequence support is enough for nano and `mc`),
+    or a small terminfo set (`vt100`, `xterm`, `linux`) goes into `/usr/share/terminfo` on the card.
+  - The BusyBox plan's `less`/`top` and the files plan's `mc` depend on this too.
+
 ## The plans (none started)
 
 | Plan | File | Next step | Waiting on |
