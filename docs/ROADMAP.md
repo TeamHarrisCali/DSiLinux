@@ -37,6 +37,15 @@ lists them, where each one stopped, and **every question still waiting for an an
     or a small terminfo set (`vt100`, `xterm`, `linux`) goes into `/usr/share/terminfo` on the card.
   - The BusyBox plan's `less`/`top` and the files plan's `mc` depend on this too.
 
+- **tar with compression fails** (`-z`, `-j`: "Cannot fork", seen 2026-11-17). GNU tar 1.16 (`/usr/bin/tar`) starts gzip or bzip2 by
+  forking a child that runs it, plus a second child that keeps copying data. The C library's `fork()` only returns "Function not
+  implemented" on this CPU (no MMU). Plain `tar cf` / `xf` / `tf` work (no fork); so do the shell's pipes.
+  - **For now:** unpack with `gzip -dc file.tar.gz | tar xf -` (or `bzip2 -dc file.tar.bz2 | tar xf -`), pack with
+    `tar cf - folder | gzip > folder.tar.gz`.
+  - **Fix, preferred:** BusyBox's tar (BusyBox plan) unpacks gz, bz2 and xz inside itself, with no second process at all.
+  - **Fix, sooner if wanted:** patch GNU tar's `sys_child_open_for_compress` / `_uncompress` in `src/system.c`: start gzip with
+    `vfork()` + `exec` directly on a pipe and drop the copying child.
+
 ## The plans (none started)
 
 | Plan | File | Next step | Waiting on |
