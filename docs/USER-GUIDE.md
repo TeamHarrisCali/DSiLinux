@@ -37,11 +37,16 @@ across its top: Desk, Test (self-test), Log (save the log now), Bench.
   charging), volume (0-3 sound waves, a red cross when muted), then the clock. Point at a picture (or tap it) to see the details: battery and
   volume percentage, the network and address. A tap on the Wi-Fi bars opens the Wi-Fi window. Volume changes also pop up a bar at the top.
 
+**Windows:** the three boxes at the right of a title bar are minimize (the taskbar button brings it back), maximize (the whole screen
+above the taskbar; the box then shows two frames: restore, back to the old size and place) and close. Drag the title bar to move a
+window. **Resize:** hold **L** (the right mouse button) on the title bar and drag: the bottom right corner follows. The Terminal fits
+itself to the new size; most other programs keep their layout.
+
 ## Programs
 
 | Start menu | Program | How to use it |
 |---|---|---|
-| Terminal | `nxterm` | a shell (busybox): up/down = command history, Tab = completion, left/right edit the line; X / Y (Page Up / Down) scroll back through the last 200 lines; colours work (`ls --color`) |
+| Terminal | `nxterm` | a shell (busybox): up/down = command history, Tab = completion, left/right edit the line; X / Y (Page Up / Down) or the scroll bar at the right (arrows: 3 lines, above or below the thumb: a page) scroll back through the last 200 lines; colours work (`ls --color`) |
 | Files | `dsfiles` | tap a folder to open it, a file to open it in Notes |
 | Accessories > Notes | `dsnotes` | text editor, buttons New / Save / Load (`/home/notes.txt`) |
 | Accessories > Clock | `nxclock` | |

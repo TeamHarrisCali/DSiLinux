@@ -1,0 +1,536 @@
+From 492f61e2e283b2b224dfdebaf6fc28f3fcd0fc3f Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Tue, 17 Nov 2026 01:37:38 -0600
+Subject: [PATCH] Windows: maximise / restore, resize with L + drag; terminal
+ scroll bar
+
+- Title bar: a third box (maximise, then restore) left of minimise and
+  close; long titles stop short of the boxes.
+- nanowm: maximise fills the screen above the taskbar (found as the
+  root child titled "taskbar"), restore puts the window back where and
+  as big as it was; a maximised window does not move. Resize: hold the
+  right button (the DSi's L) on the title bar, or the bottom right
+  corner, and drag: the corner follows the pointer by as much as it
+  moved, as an outline, at least 60x40, within the screen above the
+  taskbar.
+- nxterm: a scroll bar at the right (arrows: 3 lines, above/below the
+  thumb: a page) over the 200-line scrollback; follows a resize (new
+  columns and rows, TIOCSWINSZ so programs get SIGWINCH, the cursor's
+  line kept on screen); 40 columns by default to make room for the bar.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ user/microwin/src/demos/nanowm/actions.c | 166 ++++++++++++++++-------
+ user/microwin/src/demos/nanowm/nanowm.h  |   3 +
+ user/microwin/src/demos/nanowm/wlist.c   |   1 +
+ user/microwin/src/demos/nanox/nxterm.c   | 117 +++++++++++++++-
+ user/microwin/src/nanox/nxdraw.c         |  33 ++++-
+ 5 files changed, 262 insertions(+), 58 deletions(-)
+
+diff --git a/user/microwin/src/demos/nanowm/actions.c b/user/microwin/src/demos/nanowm/actions.c
+index 222eb62a2..53d091e33 100644
+--- a/user/microwin/src/demos/nanowm/actions.c
++++ b/user/microwin/src/demos/nanowm/actions.c
+@@ -6,6 +6,7 @@
+  */
+ #include <stdio.h>
+ #include <stdlib.h>
++#include <string.h>
+ #define MWINCLUDECOLORS
+ #include "nano-X.h"
+ #include "nxdraw.h"
+@@ -28,6 +29,75 @@ static GR_GC_ID get_outline_gc(void)
+ }
+ 
+ #define OUTLINE_MOVE	/* drag a rectangle, move the window once at the end: no flicker, no repaints */
++#define MIN_W	60	/* the smallest window a resize leaves */
++#define MIN_H	40
++
++/* the top of the taskbar (dsdesk's window titled "taskbar"), or the screen's height */
++static GR_COORD usable_height(void)
++{
++	GR_SCREEN_INFO si;
++	GR_WINDOW_ID parent, *children = NULL;
++	GR_COUNT n = 0, i;
++	GR_COORD h;
++
++	GrGetScreenInfo(&si);
++	h = si.rows;
++	GrQueryTree(GR_ROOT_WINDOW_ID, &parent, &children, &n);
++	for (i = 0; i < n; i++) {
++		GR_WM_PROPERTIES p;
++		GR_WINDOW_INFO wi;
++
++		GrGetWMProperties(children[i], &p);
++		if (p.title && !strcmp((char *)p.title, "taskbar")) {
++			GrGetWindowInfo(children[i], &wi);
++			if (wi.mapped && wi.y > 0 && wi.y < h)
++				h = wi.y;
++		}
++		if (p.title)
++			free(p.title);
++	}
++	if (children)
++		free(children);
++	return h;
++}
++
++/* container and client to w x h (the container's size; the frame keeps its thickness) */
++static void resize_frame(win *window, GR_SIZE w, GR_SIZE h)
++{
++	GR_WINDOW_INFO ci, cl;
++
++	GrGetWindowInfo(window->wid, &ci);
++	GrGetWindowInfo(window->clientid, &cl);
++	if (w < MIN_W) w = MIN_W;
++	if (h < MIN_H) h = MIN_H;
++	GrResizeWindow(window->wid, w, h);
++	GrResizeWindow(window->clientid, w - (ci.width - cl.width), h - (ci.height - cl.height));
++}
++
++/* the maximise box: the whole screen above the taskbar, or back to where and how big it was */
++static void toggle_maximise(win *window)
++{
++	GR_WINDOW_INFO info;
++	GR_SCREEN_INFO si;
++
++	GrGetWindowInfo(window->wid, &info);
++	if (!window->maxed) {
++		window->rx = info.x;
++		window->ry = info.y;
++		window->rw = info.width;
++		window->rh = info.height;
++		GrGetScreenInfo(&si);
++		GrMoveWindow(window->wid, 0, 0);
++		resize_frame(window, si.cols, usable_height());
++		window->maxed = 1;
++	} else {
++		window->maxed = 0;
++		resize_frame(window, window->rw, window->rh);
++		GrMoveWindow(window->wid, window->rx, window->ry);
++	}
++	GrRaiseWindow(window->wid);
++	redraw_ncarea(window);
++}
+ 
+ void redraw_ncarea(win *window)
+ {
+@@ -51,7 +121,7 @@ void redraw_ncarea(win *window)
+ 
+ 	active = (window->clientid == GrGetFocus());
+ 	nxPaintNCArea(window->wid, info.width, info.height, props.title,
+-		active, props.props);
++		active, props.props | (window->maxed ? GR_WM_PROPS_MAXIMIZE : 0));
+ 
+ 	/* free title returned from GrGetWMProperties*/
+ 	if (props.title)
+@@ -125,6 +195,12 @@ void container_buttondown(win *window, GR_EVENT_BUTTON *event)
+ 			GrUnmapWindow(window->wid);
+ 			return;
+ 		}
++		/* maximise / restore box, left of the minimise box */
++		r.x = info.width - 3 * CXCLOSEBOX - cxborder - 6;
++		if (PtInRect(&r, event->x, event->y)) {
++			toggle_maximise(window);
++			return;
++		}
+ 	}
+ 
+ 	/* Set focus on button down*/
+@@ -135,40 +211,36 @@ void container_buttondown(win *window, GR_EVENT_BUTTON *event)
+  * may get resized and it is often impossible to recover
+  */
+ 
+-	/* check for corner resize */
++	/*
++	 * Resize: the bottom right corner, or the right mouse button (the DSi's L) on the title bar, then drag: the bottom right corner
++	 * follows the pointer by as much as it moved (an outline while dragging, the window is resized when the button is let go).
++	 */
+ 	r.x = info.width - 5;
+ 	r.y = info.height - 5;
+ 	r.width = 5;
+ 	r.height = 5;
+ 
+-	if(PtInRect(&r,event->x, event->y)) {
+-
++	if (PtInRect(&r, event->x, event->y) ||
++	    (((event->buttons | event->changebuttons) & GR_BUTTON_R) && (info.props & GR_WM_PROPS_CAPTION) && event->y < cyborder + CYCAPTION)) {
+ 	  struct pos_size * pos;
+ 
++	  if (window->maxed)		/* a maximised window first goes back to its own size */
++		  toggle_maximise(window);
++	  GrGetWindowInfo(window->wid, &info);
+ 	  if(!window->data)
+ 	    if(!(window->data = malloc(sizeof(struct pos_size)))) return;
+ 
+ 	  window->sizing = GR_TRUE;
+ 	  pos = (struct pos_size*)window->data;
+-	  
+-	  /* save off the width/height offset from the window manager */
+-	  GrGetWindowInfo(window->clientid,&info);
+-	  pos->xoff = -info.width;
+-	  pos->yoff = -info.height;
+-
+-	  GrGetWindowInfo(window->wid,&info);
+-	  pos->xoff += info.width;
+-	  pos->yoff += info.height;
+-
+-	  gc = GrNewGC();
+-	  GrSetGCMode(gc, GR_MODE_XOR|GR_MODE_EXCLUDECHILDREN);
+-	  GrRect(GR_ROOT_WINDOW_ID,gc,info.x, info.y, info.width, info.height);
+-	  GrDestroyGC(gc);
+-
+-	  /* save this rectangle's width/height so we can erase it later */
+-	  pos->width = info.width;
++	  pos->xoff = event->rootx;	/* where the drag started */
++	  pos->yoff = event->rooty;
++	  pos->xorig = info.width;	/* the size it started from */
++	  pos->yorig = info.height;
++	  pos->width = info.width;	/* the outline drawn now */
+ 	  pos->height = info.height;
+ 
++	  gc = get_outline_gc();
++	  GrRect(GR_ROOT_WINDOW_ID,gc,info.x, info.y, info.width, info.height);
+ 	  return;
+ 	}
+ 
+@@ -190,8 +262,8 @@ void container_buttondown(win *window, GR_EVENT_BUTTON *event)
+ 	if (!(info.props & GR_WM_PROPS_NORAISE))
+ 		GrRaiseWindow(window->wid);
+ 
+-	/* Don't allow window move if NOMOVE property set*/
+-	if (info.props & GR_WM_PROPS_NOMOVE)
++	/* Don't allow window move if NOMOVE property set (or while maximised)*/
++	if ((info.props & GR_WM_PROPS_NOMOVE) || window->maxed)
+ 		return;
+ 
+ 	if(!window->data)
+@@ -237,21 +309,11 @@ void container_buttonup(win *window, GR_EVENT_BUTTON *event)
+ 	
+ 	if(window->sizing) {
+ 	  GR_WINDOW_INFO info;
+-	  GR_GC_ID gc;
+-
+ 	  struct pos_size * pos = (struct pos_size *)window->data;
+ 
+-	  gc = GrNewGC();
+-	  GrSetGCMode(gc, GR_MODE_XOR|GR_MODE_EXCLUDECHILDREN);
+-
+ 	  GrGetWindowInfo(window->wid, &info);
+-
+-	  GrRect(GR_ROOT_WINDOW_ID,gc,info.x, info.y, pos->width, pos->height);
+-
+-	  GrResizeWindow(window->wid,event->rootx - info.x, event->rooty - info.y);
+-	  GrResizeWindow(window->clientid,event->rootx - info.x - pos->xoff, 
+-			 event->rooty - info.y - pos->yoff);
+-	  GrDestroyGC(gc);
++	  GrRect(GR_ROOT_WINDOW_ID, get_outline_gc(), info.x, info.y, pos->width, pos->height);
++	  resize_frame(window, pos->width, pos->height);
+ 	  free(window->data);
+ 	  window->sizing = GR_FALSE;
+ 	  window->data = 0;
+@@ -267,25 +329,25 @@ void container_mousemoved(win *window, GR_EVENT_MOUSE *event)
+ 	Dprintf("container_mousemoved window %d\n", window->wid);
+ 
+ 	if(window->sizing) {
+-
+ 	  struct pos_size * pos = (struct pos_size*)window->data;
+-	  GrGetWindowInfo(window->wid, &info);
+-
+-	  gc = GrNewGC();
+-	  GrSetGCMode(gc, GR_MODE_XOR|GR_MODE_EXCLUDECHILDREN);
+-
+-	  /* erase old rectangle */
+-	  GrRect(GR_ROOT_WINDOW_ID,gc,info.x, info.y, pos->width, pos->height);
+-	  /* draw new one */
+-	  GrRect(GR_ROOT_WINDOW_ID,gc,info.x, info.y, 
+-		 event->rootx - info.x, event->rooty - info.y);
+-	  GrDestroyGC(gc);
+-
+-	  /* save this new rectangle's width, height */
+-	  /* I know, this shouldn't be stored in x/y, but... */
+-	  pos->width = event->rootx - info.x;
+-	  pos->height = event->rooty - info.y;
++	  GR_SCREEN_INFO si;
++	  GR_SIZE w, h;
+ 
++	  GrGetWindowInfo(window->wid, &info);
++	  GrGetScreenInfo(&si);
++	  w = pos->xorig + event->rootx - pos->xoff;
++	  h = pos->yorig + event->rooty - pos->yoff;
++	  if (w < MIN_W) w = MIN_W;
++	  if (h < MIN_H) h = MIN_H;
++	  if (info.x + w > si.cols) w = si.cols - info.x;
++	  if (info.y + h > usable_height()) h = usable_height() - info.y;
++	  if (w == pos->width && h == pos->height)
++		  return;
++	  gc = get_outline_gc();
++	  GrRect(GR_ROOT_WINDOW_ID,gc,info.x, info.y, pos->width, pos->height);	/* erase the old outline */
++	  GrRect(GR_ROOT_WINDOW_ID,gc,info.x, info.y, w, h);
++	  pos->width = w;
++	  pos->height = h;
+ 	  return;
+ 	}
+ 
+diff --git a/user/microwin/src/demos/nanowm/nanowm.h b/user/microwin/src/demos/nanowm/nanowm.h
+index d6c22b5d9..a3b0dc44f 100644
+--- a/user/microwin/src/demos/nanowm/nanowm.h
++++ b/user/microwin/src/demos/nanowm/nanowm.h
+@@ -56,6 +56,9 @@ struct windowlist {
+ 	int type;		/* What kind of window this is */
+   int sizing;                   /* True if in the middle of a sizing request */
+   int active;		/* Whether this window is active or not */
++	int maxed;		/* container: maximised (the screen above the taskbar); rx..rh: where it was before */
++	GR_COORD rx, ry;
++	GR_SIZE rw, rh;
+ 	void *data;		/* Data associated with this window */
+ 	struct windowlist *next; /* The next window in the list */
+ };
+diff --git a/user/microwin/src/demos/nanowm/wlist.c b/user/microwin/src/demos/nanowm/wlist.c
+index ae67d5da3..f33b7ec41 100644
+--- a/user/microwin/src/demos/nanowm/wlist.c
++++ b/user/microwin/src/demos/nanowm/wlist.c
+@@ -54,6 +54,7 @@ int add_window(win *window)
+ 	w->pid = window->pid;
+ 	w->type = window->type;
+ 	w->sizing = GR_FALSE;	/* window->sizing*/
++	w->maxed = 0;
+ 	w->active = window->active;
+ 	w->clientid = window->clientid;
+ 	w->data = window->data;
+diff --git a/user/microwin/src/demos/nanox/nxterm.c b/user/microwin/src/demos/nanox/nxterm.c
+index 7159c1416..4c8346637 100644
+--- a/user/microwin/src/demos/nanox/nxterm.c
++++ b/user/microwin/src/demos/nanox/nxterm.c
+@@ -10,8 +10,10 @@
+  * A small VT100/ANSI terminal: cursor movement and positioning, erasing, inserting and deleting characters and lines, scrolling regions,
+  * 16 colours (bold = bright), reverse video, cursor on/off, autowrap with the usual deferred wrap at the last column, and answers to
+  * cursor position / device status requests. The screen is kept as cells, so the window redraws correctly when it is uncovered, and the last
+- * SBLINES lines that scrolled off the top can be looked at again with Page Up / Page Down (the X and Y buttons on the DSi); any other key
+- * returns to the live screen. TERM=vt100.
++ * SBLINES lines that scrolled off the top can be looked at again with Page Up / Page Down (the X and Y buttons on the DSi) or the scroll
++ * bar on the right (tap the arrows: 3 lines, above or below the thumb: a page); any other key returns to the live screen. TERM=vt100.
++ * The window follows a resize (the window manager's maximise box, or L + drag on the title bar): new columns and rows, the size passed
++ * to the pseudo terminal (TIOCSWINSZ, so programs get SIGWINCH), the cursor's line kept on the screen.
+  * Drawing: only rows that changed, as runs of equal colours (one request per run), and a whole-screen scroll is one copy request, because
+  * every request costs about a millisecond on the DS.
+  */
+@@ -40,7 +42,9 @@ static struct cell scr[MAXR][MAXC];
+ static struct cell sb[SBLINES][MAXC];	/* scrollback, a ring */
+ static int sb_head, sb_count, view;	/* view = lines scrolled back (0 = live) */
+ static unsigned char dirty[MAXR];
+-static int cols = 41, rows = 14, fw = 6, fh = 10;
++static int cols = 40, rows = 14, fw = 6, fh = 10;
++#define SBW		7		/* the scroll bar's width (pixels) at the right of the text */
++static int bar_count = -1, bar_view = -1, bar_rows = -1;	/* what the scroll bar shows (redrawn when it changes) */
+ static int cx, cy, savx, savy, wrapnext, curon = 1, focus;
+ static int fg = 7, bg = 0, bold, rev;
+ static int top, bot;			/* scrolling region */
+@@ -130,6 +134,39 @@ static void draw_row(int y)
+ 	dirty[y] = 0;
+ }
+ 
++/* the scroll bar: an arrow box at each end, the thumb shows which part of scrollback + screen is in view */
++static void bar_geometry(int *ty, int *th)
++{
++	int track = rows * fh - 2 * fh, total = sb_count + rows;
++
++	*th = track * rows / total;
++	if (*th < 4)
++		*th = 4;
++	*ty = fh + (track - *th) * (sb_count - view) / (sb_count ? sb_count : 1);
++}
++
++static void draw_bar(void)
++{
++	int x = cols * fw, h = rows * fh, ty, th, i;
++
++	bar_count = sb_count;
++	bar_view = view;
++	bar_rows = rows;
++	GrSetGCForeground(gc, pal[8]);
++	GrFillRect(win, gc, x, 0, SBW, h);
++	GrSetGCForeground(gc, pal[7]);
++	GrFillRect(win, gc, x, 0, SBW, fh - 1);
++	GrFillRect(win, gc, x, h - fh + 1, SBW, fh - 1);
++	bar_geometry(&ty, &th);
++	GrFillRect(win, gc, x + 1, ty, SBW - 2, th);
++	GrSetGCForeground(gc, pal[0]);
++	for (i = 0; i < 3; i++) {				/* the arrows: small triangles */
++		GrLine(win, gc, x + 3 - i, 3 + i, x + 3 + i, 3 + i);
++		GrLine(win, gc, x + 3 - i, h - 4 - i, x + 3 + i, h - 4 - i);
++	}
++	cur_fgc = 0xffffffff;			/* the text's colours must be set again */
++}
++
+ static void flush_screen(void)
+ {
+ 	int y;
+@@ -147,6 +184,8 @@ static void flush_screen(void)
+ 	for (y = 0; y < rows; y++)
+ 		if (dirty[y])
+ 			draw_row(y);
++	if (bar_count != sb_count || bar_view != view || bar_rows != rows)
++		draw_bar();
+ 	GrFlush();
+ }
+ 
+@@ -154,6 +193,7 @@ static void touch_all(void)
+ {
+ 	memset(dirty, 1, sizeof(dirty));
+ 	scrolled = 0;
++	bar_count = -1;
+ }
+ 
+ /* ---------------------------------------------------------------- screen model */
+@@ -539,6 +579,67 @@ static void scroll_view(int d)
+ 	flush_screen();
+ }
+ 
++/* a tap on the scroll bar */
++static void bar_tap(int y)
++{
++	int ty, th;
++
++	bar_geometry(&ty, &th);
++	if (y < fh)
++		scroll_view(3);
++	else if (y >= rows * fh - fh)
++		scroll_view(-3);
++	else if (y < ty)
++		scroll_view(rows - 1);
++	else if (y >= ty + th)
++		scroll_view(-(rows - 1));
++}
++
++/* the window got w x h pixels: as many columns and rows as fit, the cursor's line kept on the screen */
++static void resize_term(int w, int h)
++{
++	struct winsize ws;
++	int nc = (w - SBW) / fw, nr = h / fh, y;
++
++	if (nc < 10) nc = 10;
++	if (nc > MAXC) nc = MAXC;
++	if (nr < 3) nr = 3;
++	if (nr > MAXR) nr = MAXR;
++	if (nc == cols && nr == rows) {
++		touch_all();
++		flush_screen();
++		return;
++	}
++	top = 0;
++	bot = rows - 1;
++	while (cy >= nr) {			/* fewer rows: the top lines go to the scrollback */
++		scroll_up();
++		cy--;
++	}
++	for (y = 0; y < MAXR; y++)		/* new cells are blank */
++		if (y >= rows)
++			clear_cells(y, 0, MAXC);
++		else if (nc > cols)
++			clear_cells(y, cols, nc);
++	cols = nc;
++	rows = nr;
++	top = 0;
++	bot = rows - 1;
++	if (cx >= cols)
++		cx = cols - 1;
++	wrapnext = 0;
++	view = 0;
++	if (ptyfd >= 0) {
++		memset(&ws, 0, sizeof(ws));
++		ws.ws_col = cols;
++		ws.ws_row = rows;
++		ioctl(ptyfd, TIOCSWINSZ, &ws);	/* the programs in it get SIGWINCH */
++	}
++	GrClearWindow(win, GR_FALSE);
++	touch_all();
++	flush_screen();
++}
++
+ static void key(GR_EVENT_KEYSTROKE *k)
+ {
+ 	const char *seq = NULL;
+@@ -632,9 +733,9 @@ int main(int argc, char **argv)
+ 	cy = 0;
+ 
+ 	win = GrNewWindowEx(GR_WM_PROPS_APPFRAME | GR_WM_PROPS_CAPTION | GR_WM_PROPS_CLOSEBOX, (GR_CHAR *)title, GR_ROOT_WINDOW_ID,
+-			    2, 2, cols * fw, rows * fh, pal[0]);
++			    2, 2, cols * fw + SBW, rows * fh, pal[0]);
+ 	GrSelectEvents(win, GR_EVENT_MASK_EXPOSURE | GR_EVENT_MASK_KEY_DOWN | GR_EVENT_MASK_FOCUS_IN | GR_EVENT_MASK_FOCUS_OUT |
+-		       GR_EVENT_MASK_CLOSE_REQ | GR_EVENT_MASK_BUTTON_DOWN);
++		       GR_EVENT_MASK_CLOSE_REQ | GR_EVENT_MASK_BUTTON_DOWN | GR_EVENT_MASK_UPDATE);
+ 	GrMapWindow(win);
+ 	GrSetFocus(win);
+ 	focus = 1;
+@@ -667,6 +768,12 @@ int main(int argc, char **argv)
+ 			break;
+ 		case GR_EVENT_TYPE_BUTTON_DOWN:
+ 			GrSetFocus(win);
++			if (ev.button.x >= cols * fw)
++				bar_tap(ev.button.y);
++			break;
++		case GR_EVENT_TYPE_UPDATE:
++			if (ev.update.utype == GR_UPDATE_SIZE && ev.update.wid == win)
++				resize_term(ev.update.width, ev.update.height);
+ 			break;
+ 		case GR_EVENT_TYPE_KEY_DOWN:
+ 			key(&ev.keystroke);
+diff --git a/user/microwin/src/nanox/nxdraw.c b/user/microwin/src/nanox/nxdraw.c
+index 19eb28ea1..7628bf3bf 100644
+--- a/user/microwin/src/nanox/nxdraw.c
++++ b/user/microwin/src/nanox/nxdraw.c
+@@ -1,3 +1,4 @@
++#include <string.h>
+ /*
+  * Copyright (c) 2000 Greg Haerr <greg@censoft.com>
+  *
+@@ -82,7 +83,16 @@ nxPaintNCArea(GR_DRAW_ID id, int w, int h, GR_CHAR *title, GR_BOOL active,
+ 		if (!fontid)
+ 			fontid = GrCreateFont(GR_FONT_GUI_VAR, 0, NULL);
+ 		GrSetGCFont(gc, fontid);***/
+-		GrText(id, gc, x+4, y-1, title, -1, GR_TFASCII|GR_TFTOP);
++		{	/* cut short so it stays clear of the three boxes on the right */
++			GR_SIZE tw, th, tb;
++			int len = strlen((char *)title), avail = w - 8 - ((props & GR_WM_PROPS_CLOSEBOX) ? 3 * CXCLOSEBOX + 8 : 0);
++
++			GrGetGCTextSize(gc, title, len, GR_TFASCII, &tw, &th, &tb);
++			if (tw > avail && tw > 0)
++				len = len * avail / tw;
++			if (len > 0)
++				GrText(id, gc, x+4, y-1, title, len, GR_TFASCII|GR_TFTOP);
++		}
+ 	}
+ 	y += CYCAPTION;
+ 
+@@ -125,6 +135,27 @@ nxPaintNCArea(GR_DRAW_ID id, int w, int h, GR_CHAR *title, GR_BOOL active,
+ 		nxInflateRect(&r, -1, -1);
+ 		GrSetGCForeground(gc, nx_syscolor(GR_COLOR_BTNTEXT));
+ 		GrFillRect(id, gc, r.x, r.y + r.height - 2, r.width - 1, 2);
++
++		/* maximise / restore box to the left of that (the window manager: the screen above the taskbar, or back) */
++		r.x = x + w - 3 * CXCLOSEBOX - 6;
++		r.y = y - CYCAPTION + 2;
++		r.width = CXCLOSEBOX;
++		r.height = CYCLOSEBOX;
++		nxDraw3dBox(id, r.x, r.y, r.width, r.height,
++			nx_syscolor(GR_COLOR_BTNHIGHLIGHT),
++			nx_syscolor(GR_COLOR_WINDOWFRAME));
++		nxInflateRect(&r, -1, -1);
++		GrSetGCForeground(gc, nx_syscolor(GR_COLOR_APPWINDOW));
++		GrFillRect(id, gc, r.x, r.y, r.width, r.height);
++		nxInflateRect(&r, -1, -1);
++		GrSetGCForeground(gc, nx_syscolor(GR_COLOR_BTNTEXT));
++		if (props & GR_WM_PROPS_MAXIMIZE) {	/* restore: two small frames */
++			GrRect(id, gc, r.x + 2, r.y, r.width - 2, r.height - 2);
++			GrRect(id, gc, r.x, r.y + 2, r.width - 2, r.height - 2);
++		} else {				/* maximise: one frame with a thick top */
++			GrRect(id, gc, r.x, r.y, r.width, r.height);
++			GrLine(id, gc, r.x, r.y + 1, r.x + r.width - 1, r.y + 1);
++		}
+ 	}
+ 
+ #if 0
+-- 
+2.56.1
+

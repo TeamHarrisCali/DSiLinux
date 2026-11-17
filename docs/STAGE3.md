@@ -992,3 +992,14 @@ Key login and a stable address (w98y, patch 0127): the PC got an RSA key just fo
 in the "dsi" entry of ~/.ssh/config; Dropbear 0.48 knows only ssh-rsa); scripts/add-ssh-key.sh writes the public key into the
 image's /home/.ssh/authorized_keys with the permissions Dropbear checks (tested on a scratch ext2 image). The Wi-Fi window and the
 boot auto-connect now ask DHCP for the network's last address (udhcpc -r, /home/wifi.lastip), so "ssh dsi" keeps working.
+
+### Window buttons, resizing, terminal scroll bar (w98z); virtual desktops planned
+
+Asked for: full screen / resize with the taskbar kept, minimize, close and restore buttons; scrolling up in the terminal; a plan for
+virtual desktops. w98z (patch 0128): a maximise/restore box in every title bar (nxPaintNCArea draws it, GR_WM_PROPS_MAXIMIZE picks
+the restore picture); nanowm maximises to the screen above dsdesk's "taskbar" window and restores the old geometry; resizing by
+holding the right button (DSi L) on the title bar and dragging (the original 5x5 corner handle lay under the client window and could
+not be hit); nxterm got a scroll bar and follows resizes (TIOCSWINSZ). Checked in the PC test bed (pictures): scroll bar arrows, 
+maximise, restore, an L-drag shrinking the terminal to 33x11 with the prompt kept; nxctl gained rdown/rmove for the right button.
+The virtual desktop plan is docs/VIRTUAL-DESKTOPS-PLAN.md (dsdesk does it by mapping and unmapping; nanowm and the server unchanged).
+w98z is on the card (checksum checked) with /usr/bin/dsfetch and the PC's SSH key in /home/.ssh/authorized_keys. Not yet run.

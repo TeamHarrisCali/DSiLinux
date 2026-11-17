@@ -3,6 +3,7 @@
  *   nxctl move X Y          pointer to (X, Y)
  *   nxctl click X Y         move there, press and release the left button
  *   nxctl down X Y / up X Y left button only
+ *   nxctl rdown X Y / rmove X Y   right button held there (end with up X Y)
  *   nxctl key K             one key to the focused window: a character, or up down left right enter esc space pageup pagedown backspace
  *   nxctl shot FILE.ppm     the screen (read from the framebuffer file $FRAMEBUFFER, 256x192 RGB555) as a picture,
  *                           3x enlarged so it is easy to look at; nxctl shot1 FILE.ppm writes it 1:1
@@ -84,6 +85,9 @@ int main(int argc, char **argv)
 			GrFlush();
 			usleep(50000);
 			GrInjectPointerEvent(x, y, 0, 1);
+			i += 2;
+		} else if ((!strcmp(c, "rdown") || !strcmp(c, "rmove")) && i + 1 < argc) {	/* right button (the DSi's L) held */
+			GrInjectPointerEvent(atoi(argv[i]), atoi(argv[i + 1]), GR_BUTTON_R, 1);
 			i += 2;
 		} else if ((!strcmp(c, "down") || !strcmp(c, "up")) && i + 1 < argc) {
 			GrInjectPointerEvent(atoi(argv[i]), atoi(argv[i + 1]), c[0] == 'd' ? GR_BUTTON_L : 0, 1);
