@@ -909,3 +909,19 @@ GuestNet (found in the scan, so the new any-channel path was not used): connecte
 192.168.1.2 on the first discover, **ping 8.8.8.8 3 of 3** (1290 ms, 260 ms, 20 ms: the first replies wait for ARP and the byte-wise
 receive) and **ping google.com 3 of 3, 20-40 ms**; 145 packets in, 11 out, firmware failure state 0. WPA2 still needs a run against a
 WPA2 network.
+
+### w98t, second run: a WPA2 hotspot not found; step 7 built (w98u)
+
+The test was run with a WPA2 phone hotspot by name: not in the scan (3 networks, all channel 1 again), so w98t's new path joined it
+by name on "any channel" three times: the key was computed (PBKDF2 on the console, a few seconds), the connect commands sent, but no
+connect event: the firmware's own search found nothing either. Either the hotspot was on another channel and the chip only ever
+listens on channel 1, or it was on 5 GHz. The image had a wrong block count on /home/wlan0-test.log (power-off right after the
+test wrote it): repaired with rootfs-check -y.
+
+Since open networks work, step 7 went ahead (w98u, patch 0121): the Wi-Fi window uses the DSi chip when its firmware file is installed
+(button DSi chip / DS chip, key c, the other chip goes down first). The kernel gained /proc/dsiwifi2nets (state line plus the scan
+in /proc/dswifi's format) and a "scan" command. The window loads the firmware once, brings wlan0 up, asks WPA2 networks for a
+password (8-63 characters, written straight to /proc/dsiwifi2, never through a shell or a log), waits up to 100 s for the connection
+and keys, runs DHCP on wlan0 and saves the network in /home/wifi.known. The tray watches both nds and wlan0. Checked in the PC test bed
+(dry run): chip switch, the password prompt holding back a 5-character password, connect and save, WEP refused on the DSi chip with
+a hint, WPA2 refused on the DS chip with a hint.

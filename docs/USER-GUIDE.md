@@ -69,15 +69,23 @@ sends four and ends by itself. (Up to w97y, pressing L and R together closed the
 
 ## Wi-Fi and SSH
 
-The DSi's DS-compatible Wi-Fi chip is used: it joins **open or WEP networks on 2.4 GHz** (802.11b), not WPA/WPA2. A phone hotspot works if its
-security can be set to "None" (iPhones cannot); a laptop hotspot works if it is open and allows 802.11b rates. Your PC must be on the same network.
+The DSi has two Wi-Fi chips sharing one antenna; the Wi-Fi window uses one at a time (button **DSi chip** / **DS chip**, key c):
+
+- **DSi chip** (the default when its firmware file is installed, `scripts/add-dsi-wifi-fw.sh`): **open and WPA2 networks** on 2.4 GHz.
+  Switching it on uploads its firmware and scans: up to a minute. Joining takes up to about a minute too. New (w98u), in development:
+  its scan only sees networks on channel 1 so far, and WPA2 has not yet joined a network on the console (open networks work).
+- **DS chip**: **open or WEP networks** on 2.4 GHz (802.11b). A phone hotspot works if its security can be set to "None" (iPhones
+  cannot); a laptop hotspot works if it is open and allows 802.11b rates.
+
+Your PC must be on the same network for SSH.
 
 1. **Network > Wi-Fi** (or tap the Wi-Fi bars in the tray) opens the Wi-Fi window:
    - **Wi-Fi: On / Off** switches the radio. **Scan** lists the networks (switching Wi-Fi on first if it is off), strongest first, with signal
      bars, a padlock for WEP, and "saved" / "online".
-   - Choose one (d-pad, or tap) and **Connect** (A / Enter, or tap it again). A WEP network asks for its key the first time (5 or 13 letters,
-     or 10 / 26 hex digits); after a working connection it is saved in `/home/wifi.known` and `/home/wifi.conf`. **Forget** removes a saved key.
-   - Keys: s or B = scan, w = Wi-Fi on/off, f = forget, q / Esc = close.
+   - Choose one (d-pad, or tap) and **Connect** (A / Enter, or tap it again). A WEP network (DS chip) asks for its key the first time (5 or
+     13 letters, or 10 / 26 hex digits), a WPA2 network (DSi chip) for its password (8 to 63 characters); after a working connection it is
+     saved in `/home/wifi.known` (and a DS-chip network in `/home/wifi.conf`). **Forget** removes a saved key or password.
+   - Keys: s or B = scan, w = Wi-Fi on/off, c = the other chip, f = forget, q / Esc = close.
 2. In the terminal: `/boot/wifi-scan` prints the same list (`cat /proc/dswifi` is the raw list), `/boot/wifi-connect` asks for name and key.
    Tested: scan, connect, address by DHCP and `ping google.com` over a phone hotspot (open, 2.4 GHz) work (w97y).
 3. **Network > Wi-Fi status:** address, Wi-Fi state, routes. The tray shows the same at a glance.

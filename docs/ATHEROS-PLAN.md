@@ -3,7 +3,9 @@
 Status: **started 2026-11-13.** Steps 0-5 **verified on the console**: firmware uploaded from the DSi's own HNCA file (w98k), HTC/WMI and a
 scan listing WPA2 networks (w98l), and `wlan0` joined an open network, got an address by DHCP and pinged 8.8.8.8 and google.com (w98q).
 Step 6 (WPA2-PSK) **built, not yet tried on the console** (w98t). The crypto passes its test vectors on the PC and, built by the DSi's compiler, on the console (w98s).
-Next: try step 6 on the console, faster transfers (CMD53 blocks), a quicker connect, then the Wi-Fi window (step 7).
+Step 7 (the Wi-Fi window uses the DSi chip) **built in w98u, not yet tried on the console**. A WPA2 hotspot on another channel was not
+found (w98t: the scan, and the firmware's own search, stay on channel 1).
+Next: try w98u on GuestNet, WPA2 on a channel-1 network, the channel-1 scan, faster transfers (CMD53 blocks), a quicker connect.
 
 ## Why
 
