@@ -46,6 +46,26 @@ lists them, where each one stopped, and **every question still waiting for an an
   - **Fix, sooner if wanted:** patch GNU tar's `sys_child_open_for_compress` / `_uncompress` in `src/system.c`: start gzip with
     `vfork()` + `exec` directly on a pipe and drop the copying child.
 
+- **Memory is getting low** (user, 2026-11-17; dsfetch showed 6.1 of 12.6 MiB used with the desktop and Wi-Fi up). Of the 16 MB, the
+  4 MiB ROM image (kernel + `/boot`) sits in RAM, so 12.6 MiB is all the programs get.
+  - **Step 1, measure:** a small `memreport` (how much each process holds: on this no-MMU system that is its whole program copy,
+    data and stack; plus the kernel's buffers, `/tmp` and the page cache), run with the desktop, Wi-Fi and SSH up. Cut from the top
+    of that list, not by guessing.
+  - **Known suspects to check:**
+    - the Wi-Fi firmware buffer: 128 KB kept in the kernel after the upload (`/proc/dsiwifi2fw`), which could be freed and the file
+      read again when needed;
+    - programs started from the card are copied whole into RAM each time (`/usr/bin`: the games, dsfiles, dsnotes, nxclock...),
+      while ROM programs share their code; the busiest ones could move into the ROM (772 KB free there) or be rebuilt smaller (`-Os`);
+    - every Nano-X program carries its own copy of the Nano-X library (no shared libraries here);
+    - `/tmp` is RAM: the logs written there (`desktop.log`, `dsnet.log`, `wifi-*.log`, the DHCP log) only grow; cap them or keep
+      them on the card;
+    - stack sizes given to programs at link time (`elf2flt -s`), possibly larger than needed;
+    - each Terminal keeps 200 lines of scrollback (about 38 KB);
+    - kernel parts for DS-only hardware (the GBA-slot CF drivers and so on) that the DSi never uses;
+    - the `autolog` loop that saves the log every 10 s.
+  - Overlaps: the BusyBox plan (hush runs many tools inside itself, without a new process) and the files plan (removing unused
+    programs saves card space, not RAM, unless they were running).
+
 ## The plans (none started)
 
 | Plan | File | Next step | Waiting on |
