@@ -1,7 +1,7 @@
 # DSLinuxDSi
 
-
 **Next steps, plans and open questions:** [docs/ROADMAP.md](docs/ROADMAP.md).
+
 DSLinux (uClinux 2.6.14 for the Nintendo DS) made to run on a **Nintendo DSi XL in DSi mode**: 16 MB of RAM, the internal SD slot,
 the DSi touchscreen, hardware 3D, sound, microphone, cameras and Wi-Fi, with a Windows 95 style desktop and a set of apps and games.
 It starts from TWiLight Menu++ (through Unlaunch). **Nothing is ever written to the DSi NAND**, and the system cannot touch the SD card
