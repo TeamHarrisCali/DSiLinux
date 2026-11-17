@@ -979,3 +979,11 @@ inetd.conf.example), starts /usr/bin/inetd, checks port 22 is in LISTEN state in
 /tmp/wifi-ssh.log. The root password in the image is still DSLinux's default.
 
 w98x on the console: `ssh -o HostName=192.168.1.45 dsi` from the PC reaches the DSi: the host key is accepted (known_hosts alias "dsi") and Dropbear asks for the root password. **The SSH server works.**
+
+### dsfetch on the console; uptime fix (w98y)
+
+dsfetch ran over SSH (user): logo, kernel 2.6.14-hsc0ds, 189 programs in /usr/bin, "ARM946E rev 0 (v5l)", memory 6.1 / 12.6 MiB,
+Wi-Fi GuestNet 192.168.1.45 (DSi chip), battery 100%. Wrong: "Uptime: 411751 h" and "Disk (/): 1 / 1 MiB". Uptime: rtc.c set xtime
+from the RTC directly, without moving wall_to_monotonic, so /proc/uptime was the date (1482302333 s, December 2016 on the DSi's
+clock; the card log's header showed it too); now do_settimeofday(). Disk: "/" is the ROM; dsfetch now measures /media/linux (the
+image). w98y (patch 0126), built, not yet on the card.

@@ -1,0 +1,88 @@
+From b967ffd287a33d705efbc7d2f646431b225ac78b Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Tue, 17 Nov 2026 01:28:29 -0600
+Subject: [PATCH] Uptime is the time since boot again; dsfetch disk and uptime
+
+- rtc.c: the clock from the RTC is set with do_settimeofday(), which
+  moves wall_to_monotonic along. Setting xtime directly made
+  /proc/uptime the date (1482302333 s, the DSi's clock in 2016):
+  dsfetch said "Uptime: 411751 h".
+- dsfetch: uptime from /proc/stat's CPU time when /proc/uptime is a
+  date (older ROMs); disk of the card's image (/media/linux), not of
+  "/" (the ROM: "1 / 1 MiB").
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ linux-2.6.x/arch/arm/mach-nds/rtc.c |  8 +++++++-
+ vendors/Nintendo/DSI/dsfetch.c      | 18 +++++++++++++++---
+ 2 files changed, 22 insertions(+), 4 deletions(-)
+
+diff --git a/linux-2.6.x/arch/arm/mach-nds/rtc.c b/linux-2.6.x/arch/arm/mach-nds/rtc.c
+index b8694d4ff..b2e629351 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/rtc.c
++++ b/linux-2.6.x/arch/arm/mach-nds/rtc.c
+@@ -50,8 +50,14 @@ static void ndsupdate_time(u32 seconds)
+         } 
+ }
+ 
++/* through do_settimeofday(): it moves wall_to_monotonic along, so /proc/uptime stays the time since boot (setting xtime directly
++ * made uptime the date: 1482302333 s = December 2016, the DSi's clock) */
+ extern void setTimeFromRTC (void) {
+-    xtime.tv_sec = getTimeFromArm7();
++    struct timespec ts;
++
++    ts.tv_sec = getTimeFromArm7();
++    ts.tv_nsec = 0;
++    do_settimeofday(&ts);
+ }
+ 
+ static struct fifo_cb ndstime_fifocb = {
+diff --git a/vendors/Nintendo/DSI/dsfetch.c b/vendors/Nintendo/DSI/dsfetch.c
+index d9fb3998d..77b8bdf74 100644
+--- a/vendors/Nintendo/DSI/dsfetch.c
++++ b/vendors/Nintendo/DSI/dsfetch.c
+@@ -2,7 +2,8 @@
+  * dsfetch - neofetch for the DSi: a DSi XL in ASCII and the system's facts beside it, in colour.
+  * neofetch needs bash (DSLinux has msh) and fastfetch a current compiler; this is plain C for gcc 4.0.4 and uClibc.
+  * Built and put on the card by scripts/build-dsfetch.sh; run "dsfetch" in the Terminal or over SSH ("dsfetch -n": no colours).
+- * Sources: uname, /proc/uptime, /proc/meminfo, /proc/cpuinfo, statfs("/"), /proc/dsisettings (battery 0-15), the interfaces
++ * Sources: uname, /proc/uptime (or the CPU time in /proc/stat: before w98y the kernel's uptime was the date), /proc/meminfo,
++ * /proc/cpuinfo, statfs of the card's image (/media/linux; "/" is the ROM), /proc/dsisettings (battery 0-15), the interfaces
+  * wlan0 (the DSi's own Wi-Fi chip) and nds (the DS chip), /tmp/wifi.current (the network the Wi-Fi window joined), /proc (Nano-X).
+  * The logo goes beside the facts in a wide terminal (SSH) and above them in a narrow one (the desktop's Terminal, 42 columns).
+  */
+@@ -177,6 +178,17 @@ int main(int argc, char **argv)
+ 		if (fscanf(f, "%lf", &up) == 1) {
+ 			long s = (long)up;
+ 
++			if (s > 10L * 365 * 86400) {		/* the date, not an uptime: the CPU's jiffies (100 per second) */
++				FILE *g = fopen("/proc/stat", "r");
++				unsigned long a[7] = { 0, 0, 0, 0, 0, 0, 0 };
++
++				if (g) {
++					if (fscanf(g, "cpu %lu %lu %lu %lu %lu %lu %lu", &a[0], &a[1], &a[2], &a[3], &a[4], &a[5], &a[6]) >= 4)
++						s = (long)((a[0] + a[1] + a[2] + a[3] + a[4] + a[5] + a[6]) / 100);
++					fclose(g);
++				}
++			}
++
+ 			if (s >= 3600)
+ 				snprintf(t, sizeof(t), "%ld h %ld min", s / 3600, s / 60 % 60);
+ 			else
+@@ -202,11 +214,11 @@ int main(int argc, char **argv)
+ 			 total % 1024 * 10 / 1024, used * 100 / total);
+ 		add("Memory", t);
+ 	}
+-	if (statfs("/", &fs) == 0 && fs.f_blocks) {
++	if ((statfs("/media/linux", &fs) == 0 || statfs("/home", &fs) == 0) && fs.f_blocks > 2048) {
+ 		total = (long)(fs.f_blocks * (fs.f_bsize / 1024));
+ 		avail = (long)(fs.f_bfree * (fs.f_bsize / 1024));
+ 		snprintf(t, sizeof(t), "%ld / %ld MiB", (total - avail) / 1024, total / 1024);
+-		add("Disk (/)", t);
++		add("Disk (card)", t);
+ 	}
+ 	if_addr("wlan0", ip);
+ 	if (ip[0]) {
+-- 
+2.56.1
+
