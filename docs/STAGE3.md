@@ -942,3 +942,27 @@ packet ring the scan-complete event (1/100a) did arrive, but at the very end: be
 (11g, one channel), scan params, reports on, start, wait at most 1.2 s (a time limit; pump() only stops after a quiet gap), reports
 off before the next channel. One log line per scan gives the reports per channel ("*": no scan complete), which settles the question
 either way. A network's channel now comes from its beacon (DS parameter set element). The Wi-Fi window waits up to 30 s for a rescan.
+
+### w98v verified; desktop and Wi-Fi at boot (w98w)
+
+w98v on the console (user): the DSi chip joins, and `wget google.com` saved index.html.
+
+w98w (patch 0123), asked for: boot to the desktop unless a kernel panic, join a chosen known network at boot, and the SSH key made on
+the DSi in the PC's known hosts.
+- Desktop at boot: tty1's autologin shell is a login shell (argv0 "-sh"), so msh reads /etc/profile; scripts/install-session.sh adds
+  `[ -f /boot/session ] && . /boot/session` there (an older ROM without /boot/session just skips it). /boot/rc leaves
+  /tmp/.boot-session, so only the first login shell after boot (tty1, not SSH, not terminals) runs the session: /boot/desktop in the
+  foreground, as a tap on Desk does; Exit desktop returns to that shell. Crash guard: /home/.desktop-starting is written before the
+  desktop starts and removed after a minute (desktop-apps) or by Shut down; found at boot, it means the last start crashed, and that
+  boot stays at the text console (once). /home/.no-desktop turns the desktop at boot off.
+- Panics: a panic notifier in ndsfb shows page 0, sets the console back to text mode as KDSETMODE KD_TEXT does (vc_mode, then
+  do_unblank_screen(1)), sets the console log level to 15 and prints the panic message again. Messages printed before it while the
+  desktop had quieted the console (printk level 1) are not repeated; they are in the card log only if it was saved before the panic.
+- Wi-Fi at boot: the Wi-Fi window's Auto button writes /home/wifi.auto ("dsi NAME" or "ds NAME"); /boot/rc runs `dssettings wifi auto`
+  in the background: the window's connect code without a window, the key or password from /home/wifi.known. Output in
+  /tmp/wifi-auto.log, which the card log includes. Checked in the PC test bed (dry run): Auto marks the network ("auto" in the list),
+  the auto mode joins it and never prints the password.
+- SSH: the host key /etc/dropbear_rsa_host_key (made on the DSi by Network > SSH server) is a 1040-bit RSA key; its public half went
+  into the PC's ~/.ssh/known_hosts as "dsi,192.168.1.2", with a ~/.ssh/config entry "dsi" (root, HostKeyAlias dsi, the old algorithms).
+  The private key was read only to derive the public half and was not kept.
+Not yet run on the console.

@@ -1,0 +1,414 @@
+From 1c5d51e9c6171b5a2e55090535b5fc2723b6396c Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Tue, 17 Nov 2026 01:02:20 -0600
+Subject: [PATCH] Desktop at boot, Wi-Fi network at boot, panics shown over the
+ desktop
+
+- /boot/session, sourced by the first login shell after boot (through
+  /etc/profile in the image, which /boot/rc's /tmp/.boot-session
+  limits to tty1's login): starts the desktop; Exit desktop leaves the
+  text console as before. Not with /home/.no-desktop, and not after a
+  desktop start that did not run a minute (/home/.desktop-starting,
+  removed by desktop-apps after a minute and by Shut down): the text
+  console that once, so a crash at start cannot loop.
+- ndsfb: a panic notifier shows page 0, puts the console back into
+  text mode (as KDSETMODE KD_TEXT), turns every message on and repeats
+  the panic message, so a panic is seen even while the desktop runs.
+- Wi-Fi window: button Auto (key a) marks a saved network to be joined
+  at boot (/home/wifi.auto: chip and name); /boot/rc runs
+  "dssettings wifi auto" in the background (no window, output in
+  /tmp/wifi-auto.log, added to the card log).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ linux-2.6.x/drivers/video/ndsfb.c     |  30 ++++++
+ user/microwin/src/demos/nanox/dsnet.c | 131 +++++++++++++++++++++++++-
+ vendors/Nintendo/DSI/Makefile         |   1 +
+ vendors/Nintendo/DSI/desktop-apps     |   4 +
+ vendors/Nintendo/DSI/logbody          |   1 +
+ vendors/Nintendo/DSI/rc               |   7 ++
+ vendors/Nintendo/DSI/session          |  23 +++++
+ vendors/Nintendo/DSI/shutdown         |   1 +
+ 8 files changed, 194 insertions(+), 4 deletions(-)
+ create mode 100644 vendors/Nintendo/DSI/session
+
+diff --git a/linux-2.6.x/drivers/video/ndsfb.c b/linux-2.6.x/drivers/video/ndsfb.c
+index c686df119..7c2725f5d 100644
+--- a/linux-2.6.x/drivers/video/ndsfb.c
++++ b/linux-2.6.x/drivers/video/ndsfb.c
+@@ -25,6 +25,9 @@
+ #include <asm/uaccess.h>
+ #include <linux/fb.h>
+ #include <linux/init.h>
++#include <linux/notifier.h>
++#include <linux/vt_kern.h>
++#include <linux/kd.h>
+ 
+ #include <asm/arch/power.h>
+ #include <asm/io.h>
+@@ -1311,6 +1314,32 @@ static struct platform_device ndsfb_device1 = {
+ 		}
+ };
+ 
++/*
++ * A kernel panic while the desktop owns the screen would not be seen: the console is in graphics mode, page 1 may be the one shown,
++ * and /boot/desktop has quieted kernel messages. At a panic: page 0 shown, the console back in text mode (what KDSETMODE KD_TEXT
++ * does), every message on, and the panic message again, so it stays on the screen.
++ */
++static int ndsfb_panic(struct notifier_block *nb, unsigned long event, void *msg)
++{
++	struct vc_data *vc = vc_cons_allocated(fg_console) ? vc_cons[fg_console].d : NULL;
++
++	ndsfb_flip_pending = 0;
++	BG2_CY = 0;
++	BG3_CY = -256 << 8;
++	console_loglevel = 15;
++	if (vc && vc->vc_mode != KD_TEXT) {
++		vc->vc_mode = KD_TEXT;
++		do_unblank_screen(1);
++	}
++	printk(KERN_EMERG "\nKernel panic - not syncing: %s\n(the desktop stopped to show this; the card log has what came before)\n",
++	       msg ? (char *)msg : "");
++	return NOTIFY_DONE;
++}
++
++static struct notifier_block ndsfb_panic_nb = {
++	.notifier_call = ndsfb_panic,
++};
++
+ int __init ndsfb_init(void)
+ {
+ 	int ret = 0;
+@@ -1342,6 +1371,7 @@ int __init ndsfb_init(void)
+ 		fb_set_var(info, &info->var);
+ 		fb_prepare_logo(info);
+ 		fb_show_logo(info);
++		notifier_chain_register(&panic_notifier_list, &ndsfb_panic_nb);
+ 	}
+ 
+ 	return ret;
+diff --git a/user/microwin/src/demos/nanox/dsnet.c b/user/microwin/src/demos/nanox/dsnet.c
+index 92dc3ee72..dca1e944f 100644
+--- a/user/microwin/src/demos/nanox/dsnet.c
++++ b/user/microwin/src/demos/nanox/dsnet.c
+@@ -11,7 +11,10 @@
+  *              networks and state in /proc/dsiwifi2nets; "scan", "psk PASSWORD", "connect NAME" written to /proc/dsiwifi2; udhcpc
+  *   Saved:     /home/wifi.known (name TAB key or password per line); a DS-chip network also goes to /home/wifi.conf (the boot
+  *              scripts' file); the network joined last is in /tmp/wifi.current (the tray's tooltip)
+- * Keys: up/down choose, Enter (A) connect, s or Space (B) scan, w Wi-Fi on/off, c chip, f forget, q or Esc quit. Taps work on everything.
++ *   At boot:   /home/wifi.auto ("dsi NAME" or "ds NAME", button Auto on a saved network): /boot/rc runs "dssettings wifi auto", which
++ *              joins it with the saved key or password, without a window (output in /tmp/wifi-auto.log)
++ * Keys: up/down choose, Enter (A) connect, s or Space (B) scan, w Wi-Fi on/off, c chip, a auto (at boot), f forget, q or Esc quit.
++ * Taps work on everything.
+  * PC test bed: DSNET_APS=file replaces the network list, DSNET_DRYRUN=1 prints the commands instead of running them, DSNET_DSI=1
+  * offers the DSi chip.
+  */
+@@ -40,6 +43,11 @@ static char KNOWN[200], CONF[200];	/* PC test bed: in $HOME */
+ #define CONF	"/home/wifi.conf"
+ #endif
+ #define DSI_FW	"/usr/lib/firmware/dsi-wifi.bin"
++#ifdef NANOX_TESTBED
++static char AUTO[200];
++#else
++#define AUTO	"/home/wifi.auto"
++#endif
+ 
+ struct net {
+ 	char ssid[33];
+@@ -58,6 +66,8 @@ static int dryrun, sim_up, sim_conn, sim_joined;
+ static int dsi_ok, use_dsi;	/* the DSi's own chip (wlan0) is there; the window uses it */
+ 
+ #define IFN	(use_dsi ? "wlan0" : "nds")
++static char auto_name[33];	/* the network joined at boot (/home/wifi.auto), and on which chip */
++static int auto_dsi;
+ 
+ /* key entry: when a WEP network without a saved key is chosen */
+ static int asking;
+@@ -252,6 +262,45 @@ static void save_known(const char *ssid, const char *key, int forget)
+ 	fclose(o);
+ }
+ 
++/* the saved key or password of ssid, "" if none */
++static void known_key(const char *ssid, char *key, int n)
++{
++	FILE *f = fopen(KNOWN, "r");
++	char line[112];
++
++	key[0] = 0;
++	if (!f)
++		return;
++	while (fgets(line, sizeof(line), f)) {
++		char *tab = strchr(line, '\t'), *nl = strchr(line, '\n');
++
++		if (nl) *nl = 0;
++		if (tab && (int)(tab - line) == (int)strlen(ssid) && !strncmp(line, ssid, tab - line)) {
++			snprintf(key, n, "%s", tab + 1);
++			break;
++		}
++	}
++	memset(line, 0, sizeof(line));
++	fclose(f);
++}
++
++static void load_auto(void)
++{
++	FILE *f = fopen(AUTO, "r");
++	char line[48], *nl;
++
++	auto_name[0] = 0;
++	if (!f)
++		return;
++	if (fgets(line, sizeof(line), f) && (!strncmp(line, "dsi ", 4) || !strncmp(line, "ds ", 3))) {
++		auto_dsi = line[2] == 'i';
++		if ((nl = strchr(line, '\n')))
++			*nl = 0;
++		snprintf(auto_name, sizeof(auto_name), "%s", line + (auto_dsi ? 4 : 3));
++	}
++	fclose(f);
++}
++
+ /* what the window did, for the log (Save log puts /tmp/dsnet.log on the card) */
+ static void dlog(const char *s)
+ {
+@@ -372,6 +421,7 @@ static void draw_buttons(void)
+ 	w95_fill(win, gc, W95_FACE, 0, LIST_Y + NROWS * ROWH + 4, WW, WH - (LIST_Y + NROWS * ROWH + 4));
+ 	w95_button(win, gc, 2, WH - 16, 60, 14, "Connect", 0);
+ 	w95_button(win, gc, 64, WH - 16, 48, 14, "Forget", 0);
++	w95_button(win, gc, 114, WH - 16, 40, 14, "Auto", 0);
+ 	w95_button(win, gc, WW - 36, WH - 16, 16, 14, "^", 0);
+ 	w95_button(win, gc, WW - 18, WH - 16, 16, 14, "v", 0);
+ }
+@@ -414,6 +464,8 @@ static void draw_list(void)
+ 		w95_text(win, gc, fgc, 26, y + (ROWH - th) / 2, n->ssid[0] ? n->ssid : "(hidden)");
+ 		if (!strcmp(n->ssid, cur_ssid) && cur_ssid[0])
+ 			w95_text(win, gc, on ? W95_LIGHT : GR_RGB(0, 128, 0), WW - 50, y + (ROWH - th) / 2, "online");
++		else if (n->saved && !strcmp(n->ssid, auto_name) && auto_dsi == use_dsi)
++			w95_text(win, gc, on ? W95_LIGHT : W95_SHADOW, WW - 38, y + (ROWH - th) / 2, "auto");
+ 		else if (n->saved)
+ 			w95_text(win, gc, on ? W95_LIGHT : W95_SHADOW, WW - 44, y + (ROWH - th) / 2, "saved");
+ 		else if (n->wpa2)
+@@ -427,6 +479,8 @@ static void draw_list(void)
+ 
+ static void draw_all(void)
+ {
++	if (!win)			/* "dssettings wifi auto": no window */
++		return;
+ 	draw_buttons();
+ 	draw_status();
+ 	draw_list();
+@@ -435,6 +489,10 @@ static void draw_all(void)
+ static void say(const char *s)
+ {
+ 	snprintf(status, sizeof(status), "%s", s);
++	if (!win) {
++		fprintf(stderr, "wifi auto: %s\n", s);
++		return;
++	}
+ 	draw_status();
+ 	GrFlush();
+ }
+@@ -686,6 +744,64 @@ static void connect_dsi(struct net *n, const char *pass)
+ 	draw_all();
+ }
+ 
++/* the chosen saved network is joined at boot (again: not any more) */
++static void toggle_auto(void)
++{
++	FILE *f;
++	char t[64];
++
++	if (!nnet || !nets[sel].saved) {
++		say("Auto: connect to it once first");
++		return;
++	}
++	if (!strcmp(nets[sel].ssid, auto_name) && auto_dsi == use_dsi) {
++		unlink(AUTO);
++		say("No network joined at boot");
++	} else if ((f = fopen(AUTO, "w"))) {
++		fprintf(f, "%s %s\n", use_dsi ? "dsi" : "ds", nets[sel].ssid);
++		fclose(f);
++		snprintf(t, sizeof(t), "At boot: %s", nets[sel].ssid);
++		say(t);
++	}
++	dlog(status);
++	load_auto();
++	draw_list();
++}
++
++/* "dssettings wifi auto" (from /boot/rc, in the background): the network of /home/wifi.auto, no window */
++static int auto_connect(void)
++{
++	struct net n;
++	char key[64];
++
++	load_auto();
++	if (!auto_name[0]) {
++		fprintf(stderr, "wifi auto: no network chosen (Wi-Fi window: Auto)\n");
++		return 0;
++	}
++	if (auto_dsi && !dsi_ok) {
++		fprintf(stderr, "wifi auto: %s needs the DSi chip (firmware file or DSi mode missing)\n", auto_name);
++		return 1;
++	}
++	use_dsi = auto_dsi;
++	memset(&n, 0, sizeof(n));
++	snprintf(n.ssid, sizeof(n.ssid), "%s", auto_name);
++	known_key(n.ssid, key, sizeof(key));
++	n.saved = 1;
++	if (use_dsi)
++		n.wpa2 = key[0] != 0;
++	else
++		n.wep = key[0] != 0;
++	dlog("at boot:");
++	if (use_dsi)
++		connect_dsi(&n, key[0] ? key : NULL);
++	else
++		connect_to(&n, key[0] ? key : NULL);
++	memset(key, 0, sizeof(key));
++	fprintf(stderr, "wifi auto: %s\n", status[0] ? status : "connected");
++	return status[0] ? 1 : 0;
++}
++
+ /* the other chip (both share the antenna: the one in use goes down first) */
+ static void switch_chip(void)
+ {
+@@ -784,7 +900,14 @@ int dsnet_main(int argc, char **argv)
+ #ifdef NANOX_TESTBED
+ 	snprintf(KNOWN, sizeof(KNOWN), "%s/wifi.known", getenv("HOME") ? getenv("HOME") : ".");
+ 	snprintf(CONF, sizeof(CONF), "%s/wifi.conf", getenv("HOME") ? getenv("HOME") : ".");
++	snprintf(AUTO, sizeof(AUTO), "%s/wifi.auto", getenv("HOME") ? getenv("HOME") : ".");
+ #endif
++	/* the DSi chip when its firmware is installed, unless the DS chip is already on */
++	dsi_ok = getenv("DSNET_DSI") != NULL || (access("/proc/dsiwifi2", F_OK) == 0 && access(DSI_FW, R_OK) == 0);
++	use_dsi = dsi_ok && !(!dryrun && iface_up("nds") && !iface_up("wlan0"));
++	if (argc > 2 && !strcmp(argv[2], "auto"))
++		return auto_connect();
++	load_auto();
+ 	if (GrOpen() < 0) {
+ 		fprintf(stderr, "dsnet: cannot connect to Nano-X\n");
+ 		return 1;
+@@ -799,9 +922,6 @@ int dsnet_main(int argc, char **argv)
+ 	GrSelectEvents(win, GR_EVENT_MASK_EXPOSURE | GR_EVENT_MASK_KEY_DOWN | GR_EVENT_MASK_CLOSE_REQ | GR_EVENT_MASK_BUTTON_DOWN);
+ 	GrMapWindow(win);
+ 	GrSetFocus(win);
+-	/* the DSi chip when its firmware is installed, unless the DS chip is already on */
+-	dsi_ok = getenv("DSNET_DSI") != NULL || (access("/proc/dsiwifi2", F_OK) == 0 && access(DSI_FW, R_OK) == 0);
+-	use_dsi = dsi_ok && !(!dryrun && iface_up("nds") && !iface_up("wlan0"));
+ 	if (wifi_up())			/* already on: show what is around at once */
+ 		read_networks();
+ 
+@@ -831,6 +951,7 @@ int dsnet_main(int argc, char **argv)
+ 			else if (k == 's' || k == ' ') scan();
+ 			else if (k == 'w') toggle();
+ 			else if (k == 'c') switch_chip();
++			else if (k == 'a') toggle_auto();
+ 			else if (k == 'f' && nnet && nets[sel].saved) {
+ 				save_known(nets[sel].ssid, "", 1);
+ 				load_known();
+@@ -862,6 +983,8 @@ int dsnet_main(int argc, char **argv)
+ 						load_known();
+ 						draw_list();
+ 					}
++				} else if (x >= 114 && x < 154) {
++					toggle_auto();
+ 				} else if (x >= WW - 36 && x < WW - 18) {
+ 					if (first > 0) { first--; draw_list(); }
+ 				} else if (x >= WW - 18) {
+diff --git a/vendors/Nintendo/DSI/Makefile b/vendors/Nintendo/DSI/Makefile
+index 948f5765d..387d4adbf 100644
+--- a/vendors/Nintendo/DSI/Makefile
++++ b/vendors/Nintendo/DSI/Makefile
+@@ -116,6 +116,7 @@ romfs:
+ 	$(ROMFSINST) -p +x /boot/wifi-dsi-test
+ 	$(ROMFSINST) -p +x /boot/desktop
+ 	$(ROMFSINST) -p +x /boot/desktop-apps
++	$(ROMFSINST) -p +x /boot/session
+ 	$(ROMFSINST) -p +x /boot/shutdown
+ 	$(ROMFSINST) -p +x /boot/gl
+ 	$(ROMFSINST) /$(FATFS)/linux/etc/issue
+diff --git a/vendors/Nintendo/DSI/desktop-apps b/vendors/Nintendo/DSI/desktop-apps
+index ab4d24034..27517c359 100644
+--- a/vendors/Nintendo/DSI/desktop-apps
++++ b/vendors/Nintendo/DSI/desktop-apps
+@@ -15,3 +15,7 @@ sleep 1
+ sleep 3
+ echo "desktop: running: `pidof nano-X nanowm dsdesk nxterm`" >> $LOG
+ ls -l /dev/ttyp0 /var/run/ttyp0 /dev/ptyp0 /bin/sh /dev/input/mice /dev/tty >> $LOG 2>&1
++# a minute up: this start did not crash (/boot/session boots to the text console after a desktop that did not get this far)
++sleep 50
++rm -f /home/.desktop-starting
++sync
+diff --git a/vendors/Nintendo/DSI/logbody b/vendors/Nintendo/DSI/logbody
+index 2ba839987..148bfcd50 100644
+--- a/vendors/Nintendo/DSI/logbody
++++ b/vendors/Nintendo/DSI/logbody
+@@ -22,6 +22,7 @@ echo "--- /proc/dswifistat (joining) ---"
+ /usr/bin/cat /proc/dswifistat 2>&1
+ echo "--- Wi-Fi window (dsnet.log, DHCP) ---"
+ [ -f /tmp/dsnet.log ] && /usr/bin/cat /tmp/dsnet.log
++[ -f /tmp/wifi-auto.log ] && /usr/bin/cat /tmp/wifi-auto.log
+ [ -f /tmp/dsnet-dhcp.log ] && /usr/bin/cat /tmp/dsnet-dhcp.log
+ echo "--- /proc/net/route ---"
+ /usr/bin/cat /proc/net/route 2>&1
+diff --git a/vendors/Nintendo/DSI/rc b/vendors/Nintendo/DSI/rc
+index 1da30fc5a..772abe910 100644
+--- a/vendors/Nintendo/DSI/rc
++++ b/vendors/Nintendo/DSI/rc
+@@ -53,6 +53,13 @@ mknod /var/run/ttypf c 3 15
+ /usr/bin/cat /tmp/rc.common.log
+ # save the boot log into the one writable file on the card (sd:/linux/DSILOG.TXT), if it exists
+ [ -x /boot/savelog ] && /boot/savelog
++# Wi-Fi at boot: the network chosen with Auto in the Wi-Fi window (/home/wifi.auto), in the background (up to a minute or two)
++if [ -f /home/wifi.auto ]
++then
++	/boot/dssettings wifi auto > /tmp/wifi-auto.log 2>&1 &
++fi
++# the first login shell (tty1) starts the desktop (/boot/session, through /etc/profile)
++echo boot > /tmp/.boot-session
+ # while testing: keep saving the log every 10 s (see /boot/autolog)
+ # (msh runs "a && b &" in the foreground, so start it with a plain command in an if)
+ if [ -x /boot/autolog ]
+diff --git a/vendors/Nintendo/DSI/session b/vendors/Nintendo/DSI/session
+new file mode 100644
+index 000000000..d6af6da1c
+--- /dev/null
++++ b/vendors/Nintendo/DSI/session
+@@ -0,0 +1,23 @@
++#!/bin/sh
++# The desktop at boot. Sourced by the first login shell after boot (/etc/profile in ROOTFS.IMG: "[ -f /boot/session ] && . /boot/session";
++# /boot/rc leaves /tmp/.boot-session for it, so SSH logins and later shells never start a desktop). When the desktop ends (Start >
++# Exit desktop) this shell carries on as the text console.
++# No desktop: with /home/.no-desktop, or when the desktop started at the last boot did not run a minute (/home/.desktop-starting is
++# still there: a kernel panic or a freeze while it started). Then the text console this once, so a crash cannot repeat at every boot.
++if [ -f /tmp/.boot-session ]
++then
++	rm -f /tmp/.boot-session
++	if [ -f /home/.no-desktop ]
++	then
++		echo "Desktop at boot: off (/home/.no-desktop). /boot/desktop starts it."
++	elif [ -f /home/.desktop-starting ]
++	then
++		rm -f /home/.desktop-starting
++		sync
++		echo "The desktop did not run a minute at the last boot (crash?): text console this time. /boot/desktop starts it."
++	else
++		echo started > /home/.desktop-starting
++		sync
++		/boot/desktop
++	fi
++fi
+diff --git a/vendors/Nintendo/DSI/shutdown b/vendors/Nintendo/DSI/shutdown
+index fb233f462..d86eb7012 100644
+--- a/vendors/Nintendo/DSI/shutdown
++++ b/vendors/Nintendo/DSI/shutdown
+@@ -1,6 +1,7 @@
+ #!/bin/sh
+ # Power the DS off (the Start menu's Shut down): write everything to the card, stop all programs, power off.
+ # /boot/desktop stop only ends the desktop.
++rm -f /home/.desktop-starting		# a shut down is not a crash (see /boot/session)
+ [ -x /boot/savelog ] && /boot/savelog quiet
+ sync
+ poweroff
+-- 
+2.56.1
+
