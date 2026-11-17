@@ -1,0 +1,88 @@
+From 30ee96c64fb2291da40139f7b55e1a8c1998cc1f Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Tue, 17 Nov 2026 01:30:35 -0600
+Subject: [PATCH] Wi-Fi: ask DHCP for the last address of the network again
+
+/home/wifi.lastip keeps "name TAB address" per network; the Wi-Fi window
+and the boot auto-connect run "udhcpc -r LAST", so most routers hand
+out the same address and "ssh dsi" on the PC keeps finding the DSi.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ user/microwin/src/demos/nanox/dsnet.c | 46 +++++++++++++++++++++++++--
+ 1 file changed, 44 insertions(+), 2 deletions(-)
+
+diff --git a/user/microwin/src/demos/nanox/dsnet.c b/user/microwin/src/demos/nanox/dsnet.c
+index dca1e944f..ee1c5f351 100644
+--- a/user/microwin/src/demos/nanox/dsnet.c
++++ b/user/microwin/src/demos/nanox/dsnet.c
+@@ -301,6 +301,48 @@ static void load_auto(void)
+ 	fclose(f);
+ }
+ 
++/*
++ * DHCP on ifn, asking for the address this network gave last time (/home/wifi.lastip: "name TAB address" per network): most routers
++ * give it again, so "ssh dsi" (the PC's ~/.ssh/config) keeps finding the DSi. A new address is saved for next time.
++ */
++#ifdef NANOX_TESTBED
++#define LASTIP	"wifi.lastip"
++#else
++#define LASTIP	"/home/wifi.lastip"
++#endif
++static void dhcp(const char *ifn, const char *ssid)
++{
++	char cmd[160], last[24] = "", ip[24];
++	char lines[16][64], line[64];
++	FILE *f;
++	int n = 0, i;
++
++	if ((f = fopen(LASTIP, "r"))) {
++		while (n < 15 && fgets(line, sizeof(line), f)) {
++			char *tab = strchr(line, '\t');
++
++			if (tab && (int)(tab - line) == (int)strlen(ssid) && !strncmp(line, ssid, tab - line)) {
++				sscanf(tab + 1, "%23s", last);
++				continue;
++			}
++			strcpy(lines[n++], line);
++		}
++		fclose(f);
++	}
++	if (last[0])
++		snprintf(cmd, sizeof(cmd), "udhcpc -n -q -i %s -r %s >> /tmp/dsnet-dhcp.log 2>&1", ifn, last);
++	else
++		snprintf(cmd, sizeof(cmd), "udhcpc -n -q -i %s >> /tmp/dsnet-dhcp.log 2>&1", ifn);
++	run(cmd);
++	wifi_ip(ip);
++	if (ip[0] && strcmp(ip, last) && (f = fopen(LASTIP, "w"))) {
++		for (i = 0; i < n; i++)
++			fputs(lines[i], f);
++		fprintf(f, "%s\t%s\n", ssid, ip);
++		fclose(f);
++	}
++}
++
+ /* what the window did, for the log (Save log puts /tmp/dsnet.log on the card) */
+ static void dlog(const char *s)
+ {
+@@ -641,7 +683,7 @@ static void connect_to(struct net *n, const char *key)
+ 
+ 		for (tries = 0; tries < 2; tries++) {
+ 			say(tries ? "No answer: joining again, DHCP..." : "Asking for an address (DHCP)...");
+-			run("udhcpc -n -q -i nds >> /tmp/dsnet-dhcp.log 2>&1");
++			dhcp("nds", n->ssid);
+ 			wifi_ip(ip);
+ 			if (ip[0])
+ 				break;
+@@ -723,7 +765,7 @@ static void connect_dsi(struct net *n, const char *pass)
+ 	dlog("joined");
+ 	for (tries = 0; tries < 2; tries++) {
+ 		say(tries ? "No answer: DHCP again..." : "Asking for an address (DHCP)...");
+-		run("udhcpc -n -q -i wlan0 >> /tmp/dsnet-dhcp.log 2>&1");
++		dhcp("wlan0", n->ssid);
+ 		wifi_ip(ip);
+ 		if (ip[0])
+ 			break;
+-- 
+2.56.1
+

@@ -105,8 +105,10 @@ Your PC must be on the same network for SSH.
 ssh -o KexAlgorithms=+diffie-hellman-group1-sha1 -o HostKeyAlgorithms=+ssh-rsa -o PubkeyAcceptedAlgorithms=+ssh-rsa -o Ciphers=+aes128-cbc root@DSI-ADDRESS
 ```
 
-On the PC used for this project, `ssh dsi` already knows the DSi's host key and these options (`~/.ssh/config`, address 192.168.1.2 on
-GuestNet; elsewhere `ssh -o HostName=ADDRESS dsi`). The key is checked, so a "host key changed" warning means a different device or a
+On the PC used for this project, `ssh dsi` already knows the DSi's host key, these options and the PC's key `~/.ssh/id_rsa_dsi`
+(`~/.ssh/config`; elsewhere `ssh -o HostName=ADDRESS dsi`). From w98y the DSi asks DHCP for the address it had last time on that
+network (`/home/wifi.lastip`), so the address usually stays the same. **Key login:** `scripts/add-ssh-key.sh` (card in the PC) puts
+the PC's public key into `/home/.ssh/authorized_keys`; then Network > SSH server allows key logins only, no password. The key is checked, so a "host key changed" warning means a different device or a
 new key (Network > SSH server makes one only if `/etc/dropbear_rsa_host_key` is missing).
 
 Settings can also be written from the PC: `scripts/set-wifi.sh "NAME" [wepkey]`.
@@ -120,6 +122,7 @@ The DSi only ever writes inside `sd:/linux/ROOTFS.IMG` (the whole system) and `s
 | `scripts/rootfs-check.sh` | checks the image (read-only); `-y` repairs it |
 | `scripts/add-roms.sh game.gb ...` | your own Game Boy games into `/home/roms` |
 | `scripts/set-wifi.sh NAME [wepkey]` | Wi-Fi settings and the SSH server |
+| `scripts/add-ssh-key.sh [key.pub]` | key login over SSH (`~/.ssh/id_rsa_dsi.pub` by default; RSA only) |
 | `scripts/install-session.sh` | the boot hook in `/etc/profile` that starts the desktop (release.sh does it) |
 | `scripts/install-apps.sh` | the games, accessories and multimedia programs into `/usr/bin` (release.sh does it; they are no longer in the ROM) |
 | `doom/install.sh [doom1.wad]` | DOOM into `/home/doom` |

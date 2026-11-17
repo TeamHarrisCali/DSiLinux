@@ -987,3 +987,8 @@ Wi-Fi GuestNet 192.168.1.45 (DSi chip), battery 100%. Wrong: "Uptime: 411751 h" 
 from the RTC directly, without moving wall_to_monotonic, so /proc/uptime was the date (1482302333 s, December 2016 on the DSi's
 clock; the card log's header showed it too); now do_settimeofday(). Disk: "/" is the ROM; dsfetch now measures /media/linux (the
 image). w98y (patch 0126), built, not yet on the card.
+
+Key login and a stable address (w98y, patch 0127): the PC got an RSA key just for the DSi (~/.ssh/id_rsa_dsi, 2048 bit, no passphrase,
+in the "dsi" entry of ~/.ssh/config; Dropbear 0.48 knows only ssh-rsa); scripts/add-ssh-key.sh writes the public key into the
+image's /home/.ssh/authorized_keys with the permissions Dropbear checks (tested on a scratch ext2 image). The Wi-Fi window and the
+boot auto-connect now ask DHCP for the network's last address (udhcpc -r, /home/wifi.lastip), so "ssh dsi" keeps working.
