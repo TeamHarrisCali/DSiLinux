@@ -977,3 +977,5 @@ the script printed "SSH server started" regardless. The SSH server had never bee
 script writes /etc/inetd.conf (`ssh stream tcp nowait root /usr/bin/dropbear -i [-s] -r /etc/dropbear_rsa_host_key`, as DSLinux's
 inetd.conf.example), starts /usr/bin/inetd, checks port 22 is in LISTEN state in /proc/net/tcp, prints the address and logs to
 /tmp/wifi-ssh.log. The root password in the image is still DSLinux's default.
+
+w98x on the console: `ssh -o HostName=192.168.1.45 dsi` from the PC reaches the DSi: the host key is accepted (known_hosts alias "dsi") and Dropbear asks for the root password. **The SSH server works.**
