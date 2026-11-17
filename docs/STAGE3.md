@@ -925,3 +925,10 @@ password (8-63 characters, written straight to /proc/dsiwifi2, never through a s
 and keys, runs DHCP on wlan0 and saves the network in /home/wifi.known. The tray watches both nds and wlan0. Checked in the PC test bed
 (dry run): chip switch, the password prompt holding back a 5-character password, connect and save, WEP refused on the DSi chip with
 a hint, WPA2 refused on the DS chip with a hint.
+
+### Step 7 verified for open networks (w98u)
+
+The card log's Wi-Fi window section (/tmp/dsnet.log, which lives in the image and so keeps earlier boots too): "DSi chip: ifconfig
+wlan0 up", the scan (WorkNet, GuestNet, hidden networks, all channel 1), "Connecting to GuestNet...", "joined", **192.168.1.2** (DHCP lease
+on wlan0, route on wlan0); an earlier block is a scan with the DS chip (key c) elsewhere. The image checked clean. Not yet tried from
+the window: WPA2, and the tray picture/tooltip for wlan0.

@@ -72,7 +72,7 @@ sends four and ends by itself. (Up to w97y, pressing L and R together closed the
 The DSi has two Wi-Fi chips sharing one antenna; the Wi-Fi window uses one at a time (button **DSi chip** / **DS chip**, key c):
 
 - **DSi chip** (the default when its firmware file is installed, `scripts/add-dsi-wifi-fw.sh`): **open and WPA2 networks** on 2.4 GHz.
-  Switching it on uploads its firmware and scans: up to a minute. Joining takes up to about a minute too. New (w98u), in development:
+  Switching it on uploads its firmware and scans: up to a minute. Joining takes up to about a minute too. New (w98u), in development; joining an open network from the window works:
   its scan only sees networks on channel 1 so far, and WPA2 has not yet joined a network on the console (open networks work).
 - **DS chip**: **open or WEP networks** on 2.4 GHz (802.11b). A phone hotspot works if its security can be set to "None" (iPhones
   cannot); a laptop hotspot works if it is open and allows 802.11b rates.
