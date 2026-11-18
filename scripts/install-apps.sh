@@ -7,7 +7,7 @@
 . "$(dirname "$0")/card.sh"
 if [ "$1" = "-i" ]; then IMG="$2"; shift 2; fi
 cd "$(dirname "$0")/.."
-APPS="dsarcade dsgb dsmemo dsgl3d dscam dsgame ntetris landmine dsbench dsgx dsplay dsnotes dsfiles nxclock"
+APPS="dsarcade dsgb dsmemo dsgl3d dscam dsgame ntetris landmine dsbench dsgx dsplay dsnotes dsfiles nxclock dslock"
 # DSLinux programs patched by this project, written as built (no RAM flag: code and data stay two smaller blocks, easier to find in
 # fragmented memory); scripts/fix-stacks.sh then sets their stacks
 SYSAPPS="tar nano"

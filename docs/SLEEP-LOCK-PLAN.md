@@ -7,8 +7,12 @@ backlights the same way, power-chip register 0 bits 0x04 / 0x08).
 **w99g** (not yet on the console): Settings has a **"Screen off"** row (never, 30 s, 1, 2, 5, 10, 30 min; saved, applied at every
 desktop start; 2 minutes by default), and **step 5**: at a critical battery (the power micro's level 1 or 0) without a charger, on two
 checks 10 s apart, `dsautolog` runs `/boot/shutdown`.
-Not yet: switching the LCDs off too (more saving), a warning before the battery shut down, the lock screen (step 4, waiting on
-questions 2-3), deep sleep (step 6).
+**w99h** (not yet on the console): **step 4, the lock screen**, as the user chose (a PIN; the desktop still logs in by itself at
+boot): Settings > **Lock PIN** sets it (4-8 digits, twice; empty removes it); with a PIN set, **closing the lid locks** (the taskbar
+watches `/proc/dslid`), and **Start > Lock** locks now. The lock covers the whole top screen; digits from the touch keyboard or the
+on-screen keypad; wrong PINs wait 1, 2, 4 ... 30 s. Stored hashed in `/home/.lockpin`; a forgotten PIN: delete that file (SSH, or
+`debugfs -w -R "rm /home/.lockpin" ROOTFS.IMG` on the PC). It keeps out someone holding the DSi; SSH still works with the key.
+Not yet: switching the LCDs off too (more saving), a warning before the battery shut down, the text console lock, deep sleep (step 6).
 
 ## Today (checked in the source)
 

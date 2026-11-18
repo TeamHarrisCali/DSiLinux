@@ -20,6 +20,7 @@ gcc $CF -o $T/bin/nxctl testbed/nxctl.c -L$T/src/lib -lnano-X
 for p in dsdesk dsnotes dsfiles dsarcade dsgb nxterm; do
 	gcc $CF -o $T/bin/$p $T/src/demos/nanox/$p.c -L$T/src/lib -lnano-X -lm || echo "($p did not build for the PC)"
 done
+gcc $CF -o $T/bin/dslock $T/src/demos/nanox/dslock.c -L$T/src/lib -lnano-X -lcrypt || echo "(dslock did not build for the PC)"
 gcc $CF -o $T/bin/dssettings $T/src/demos/nanox/dssettings.c $T/src/demos/nanox/dsnet.c -L$T/src/lib -lnano-X -lm || echo "(dssettings did not build for the PC)"
 cp $T/src/bin/nano-X $T/src/bin/nanowm $T/bin/
 # what the desktop starts from /boot on the DS: the PC builds and the boot scripts (dsdesk prefixes /boot paths with DSDESK_ROOT)

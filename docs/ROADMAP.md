@@ -5,9 +5,12 @@ lists them, where each one stopped, and **every question still waiting for an an
 
 ## Where things stand
 
-- **On the card now: w99g** (2026-11-18). **Screen sleep works on the DSi** (w99f): `screen off`/`on`, the 2-minute idle timer
-  and the lid. w99g adds the "Screen off" choice in Settings (2 min default) and a clean shutdown on a critical battery, not yet
-  run on the DSi. Everything in the
+- **On the card now: w99h** (2026-11-18). **Screen sleep works on the DSi** (w99f): `screen off`/`on`, the 2-minute idle timer
+  and the lid. w99g: the "Screen off" choice in Settings, a clean shutdown on a critical battery. **w99h: the lock screen with a
+  PIN** (locks when the lid closes and from Start > Lock; no lock at boot). w99g/w99h not yet run on the DSi.
+- **Open bug: Settings > Sound test froze the DSi** (2026-11-18, w99g). It was pressed while the automatic Wi-Fi connection was
+  still joining (the DSi Wi-Fi chip's driver busy on the ARM7); Sound test last worked before that chip was used (w96n). To narrow
+  it down: Sound test again once the tray's Wi-Fi bars are black (connected), and once with Wi-Fi off. Everything in the
   TODO list below is **verified on the DSi** as of w99d: tar `-z`, the memory reserve and memreport, the clock and time zone (and
   the DSi's clock chip keeps the time across a restart), about 1.5 MB less memory in use, **nano over SSH**.
 - **w98z** (2026-11-17) brought:
@@ -116,7 +119,7 @@ memreport: programs 2.9 MB, 7.4 MB free, largest free block 4 MB.
 | A current BusyBox with the hush shell | [BUSYBOX-HUSH-PLAN.md](BUSYBOX-HUSH-PLAN.md) | Step 0: download BusyBox 1.36.1 | **Your OK for the download**, questions B |
 | File management, tidy layout, leaner system | [FILES-CLEANUP-PLAN.md](FILES-CLEANUP-PLAN.md) | Step 1: the Files program with Delete / Recycle Bin | Questions C |
 | Touch screen revamp (input page + dashboard) | [TOUCHSCREEN-PLAN.md](TOUCHSCREEN-PLAN.md) | Step 0: your feedback, then mock-ups | Questions D |
-| Screen sleep, locking, lid sleep | [SLEEP-LOCK-PLAN.md](SLEEP-LOCK-PLAN.md) | **Steps 2-3 verified** (screen off when idle and when the lid closes); Settings choice and step 5 (critical battery) in w99g; next the lock (step 4) | Questions E2 (PIN/password, when to lock), E3, E4 |
+| Screen sleep, locking, lid sleep | [SLEEP-LOCK-PLAN.md](SLEEP-LOCK-PLAN.md) | **Steps 2-3 verified**; Settings choice and step 5 (critical battery) in w99g; **step 4 (PIN lock) in w99h**; left: LCDs off too, a battery warning, deep sleep | E3 (Wi-Fi with the lid closed), E4 (deep sleep) |
 | The DSi's Wi-Fi chip: faster, quicker to connect, WPA2 | (this page, below) | Speed: the 4-bit bus and block transfers | Questions F |
 | Later, bigger: a package manager (`dspkg`) | (no file yet) | After BusyBox: `wget` with HTTPS makes it possible | Your choice |
 | Later, much bigger: new kernel and modern compiler | (no file yet) | Needed for anything that a 2005 compiler cannot build | Months of work; your choice |
@@ -169,7 +172,7 @@ Which plan goes first is your choice. A suggestion:
 
 **E. Sleep and lock**
 1. "Screen off after": 2 minutes by default?
-2. Lock with a PIN, a password, or both? Lock after every screen sleep, or only when the lid closes?
+2. ~~Lock with a PIN or a password?~~ **A PIN, and log in automatically at boot** (user, 2026-11-18): it locks when the lid closes.
 3. Lid closed: Wi-Fi stays on (SSH keeps working) or goes off (more battery)?
 4. Deep sleep worth the risk, or is light sleep enough?
 

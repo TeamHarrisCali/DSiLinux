@@ -1,0 +1,582 @@
+From ec55c605bcc7dede8f2f3d0b2fb09133d43a4e70 Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 10:43:10 -0600
+Subject: [PATCH] Lock screen with a PIN: dslock, locks when the lid closes,
+ Start > Lock
+
+docs/SLEEP-LOCK-PLAN.md step 4, as the user chose: a PIN, and the
+desktop still logs in by itself at boot (no lock at start).
+- dslock (Nano-X, on the card): a full-screen window above everything
+  (taskbar included), clock and date, the PIN as dots, a 3x4 keypad;
+  digits from the touch keyboard or the keypad; wrong PINs wait 1, 2,
+  4 ... 30 s; stays on top and keeps the keyboard. "dslock set" sets,
+  changes (old PIN first) or removes (empty new PIN) the PIN. Stored as
+  an MD5 crypt() hash with a random salt in /home/.lockpin (0600).
+- screensleep.c: /proc/dslid "lid=open|closed closes=N" (no ARM7
+  request); dsdesk polls it about every second and starts dslock on a
+  new close when a PIN is set. Start menu: Lock (above Exit desktop).
+- Settings: "Lock PIN" button (dslock set).
+Checked in the PC test bed: set a PIN (too short refused, twice), lock,
+wrong PIN keeps it locked, the right PIN unlocks, keypad clicks work.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ linux-2.6.x/arch/arm/mach-nds/screensleep.c |  20 +-
+ user/microwin/Makefile                      |   1 +
+ user/microwin/src/demos/nanox/Makefile      |   7 +-
+ user/microwin/src/demos/nanox/dsdesk.c      |  25 +-
+ user/microwin/src/demos/nanox/dslock.c      | 331 ++++++++++++++++++++
+ user/microwin/src/demos/nanox/dssettings.c  |  13 +-
+ vendors/Nintendo/DSI/Makefile               |   2 +-
+ 7 files changed, 392 insertions(+), 7 deletions(-)
+ create mode 100644 user/microwin/src/demos/nanox/dslock.c
+
+diff --git a/linux-2.6.x/arch/arm/mach-nds/screensleep.c b/linux-2.6.x/arch/arm/mach-nds/screensleep.c
+index b62c0b0b9..d1e9ae5b7 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/screensleep.c
++++ b/linux-2.6.x/arch/arm/mach-nds/screensleep.c
+@@ -11,11 +11,13 @@
+ #include <linux/init.h>
+ #include <linux/timer.h>
+ #include <linux/jiffies.h>
++#include <linux/proc_fs.h>
+ #include <asm/arch/fifo.h>
+ 
+ int nds_sleep_secs = 120;	/* 0 = never; the Settings app sets the saved choice at every desktop start */
+ int nds_screen_is_off;
+ int nds_lid_closed;
++static unsigned int lid_closes;	/* how often the lid was closed since boot: /proc/dslid, for the lock screen (dsdesk polls it) */
+ static unsigned long last_input;
+ static struct timer_list ss_timer;
+ 
+@@ -58,12 +60,25 @@ void nds_lid(int closed)
+ 	if (closed == nds_lid_closed)
+ 		return;
+ 	nds_lid_closed = closed;
+-	if (closed)
++	if (closed) {
++		lid_closes++;
+ 		nds_screen_off();
+-	else
++	} else
+ 		nds_screen_on();
+ }
+ 
++/* /proc/dslid: "lid=open|closed closes=N", cheap to read (no ARM7 request): the taskbar starts the lock screen when N goes up */
++static int dslid_read_proc(char *page, char **start, off_t off, int count, int *eof, void *data)
++{
++	int len = sprintf(page, "lid=%s closes=%u\n", nds_lid_closed ? "closed" : "open", lid_closes);
++
++	*eof = 1;
++	if (off >= len)
++		return 0;
++	*start = page + off;
++	return len - off;
++}
++
+ static void ss_tick(unsigned long data)
+ {
+ 	if (nds_sleep_secs > 0 && !nds_screen_is_off && time_after(jiffies, last_input + (unsigned long)nds_sleep_secs * HZ))
+@@ -78,6 +93,7 @@ static int __init nds_screensleep_init(void)
+ 	ss_timer.function = ss_tick;
+ 	ss_timer.expires = jiffies + HZ;
+ 	add_timer(&ss_timer);
++	create_proc_read_entry("dslid", 0444, NULL, dslid_read_proc, NULL);
+ 	return 0;
+ }
+ 
+diff --git a/user/microwin/Makefile b/user/microwin/Makefile
+index 79555373d..d033fd106 100644
+--- a/user/microwin/Makefile
++++ b/user/microwin/Makefile
+@@ -24,6 +24,7 @@ real_romfs:
+ 	$(ROMFSINST) /bin/dsgb
+ 	$(ROMFSINST) /bin/dscam
+ 	$(ROMFSINST) /bin/dsgallery
++	$(ROMFSINST) /bin/dslock
+ 	$(ROMFSINST) -e CONFIG_USER_MICROWIN_BIN_LANDMINE    /bin/landmine
+ 	$(ROMFSINST) -e CONFIG_USER_MICROWIN_BIN_LAUNCHER    /bin/launcher
+ 	$(ROMFSINST) -e CONFIG_USER_MICROWIN_BIN_MOVE        /bin/move
+diff --git a/user/microwin/src/demos/nanox/Makefile b/user/microwin/src/demos/nanox/Makefile
+index 31709aa3a..f469e00f9 100644
+--- a/user/microwin/src/demos/nanox/Makefile
++++ b/user/microwin/src/demos/nanox/Makefile
+@@ -92,10 +92,11 @@ OBJS =	demo.o \
+ 	dsgame.o \
+ 	dsarcade.o \
+ 	dsgb.o \
++	dslock.o \
+ 	dsnet.o
+ 
+ TARGETS = \
+-	$(TOP)/bin/dsdesk $(TOP)/bin/dsnotes $(TOP)/bin/dsfiles $(TOP)/bin/dsbench $(TOP)/bin/dsgl3d $(TOP)/bin/dsgx $(TOP)/bin/dsplay $(TOP)/bin/dsmemo $(TOP)/bin/dscam $(TOP)/bin/dsgallery $(TOP)/bin/dssettings $(TOP)/bin/dsgame $(TOP)/bin/dsarcade $(TOP)/bin/dsgb \
++	$(TOP)/bin/dsdesk $(TOP)/bin/dsnotes $(TOP)/bin/dsfiles $(TOP)/bin/dsbench $(TOP)/bin/dsgl3d $(TOP)/bin/dsgx $(TOP)/bin/dsplay $(TOP)/bin/dsmemo $(TOP)/bin/dscam $(TOP)/bin/dsgallery $(TOP)/bin/dssettings $(TOP)/bin/dsgame $(TOP)/bin/dsarcade $(TOP)/bin/dsgb $(TOP)/bin/dslock \
+ 	$(TOP)/bin/demo $(TOP)/bin/move $(TOP)/bin/landmine \
+ 	$(TOP)/bin/world $(TOP)/bin/nxclock \
+ 	$(TOP)/bin/nxlsclients $(TOP)/bin/nxev \
+@@ -194,6 +195,10 @@ $(TOP)/bin/dsfiles: dsfiles.o $(NANOXCLIENTLIBS) $(TOP)/config
+ 	@echo "Linking $@ ..."
+ 	$(CC) $(CFLAGS) $(LDFLAGS) $< -o $@ $(LD_NANOXCLIENTLIBS)
+ 
++$(TOP)/bin/dslock: dslock.o $(NANOXCLIENTLIBS) $(TOP)/config
++	@echo "Linking $@ ..."
++	$(CC) $(CFLAGS) $(LDFLAGS) $< -o $@ $(LD_NANOXCLIENTLIBS) -lcrypt
++
+ $(TOP)/bin/dscam: dscam.o dsgx.h dsgx_win.h dsbmp.h $(NANOXCLIENTLIBS) $(TOP)/config
+ 	@echo "Linking $@ ..."
+ 	$(CC) $(CFLAGS) $(LDFLAGS) $< -o $@ $(LD_NANOXCLIENTLIBS) $(LIBM)
+diff --git a/user/microwin/src/demos/nanox/dsdesk.c b/user/microwin/src/demos/nanox/dsdesk.c
+index d168f2301..7888b0c00 100644
+--- a/user/microwin/src/demos/nanox/dsdesk.c
++++ b/user/microwin/src/demos/nanox/dsdesk.c
+@@ -83,7 +83,8 @@ static const struct item root_items[] = {
+ 	{ "Puzzles", NULL, NULL, puzzles, COUNT(puzzles) },
+ 	{ "Network", NULL, NULL, network_items, COUNT(network_items) },
+ 	{ "System", NULL, NULL, system_items, COUNT(system_items) },
+-	{ "Exit desktop", "/boot/desktop", "stop", NULL, 0, 1 },
++	{ "Lock", "/usr/bin/dslock", NULL, NULL, 0, 1 },
++	{ "Exit desktop", "/boot/desktop", "stop" },
+ 	{ "Shut down", "/boot/shutdown" },
+ };
+ 
+@@ -389,6 +390,26 @@ static void poll_wifi(void)
+ 	}
+ }
+ 
++/* the lock screen when the lid closes: /proc/dslid counts the closes (screensleep.c); with a PIN set (/home/.lockpin) a new close starts
++ * dslock (it refuses a second copy itself) */
++static void poll_lid(void)
++{
++	static int last = -1;
++	FILE *f = fopen("/proc/dslid", "r");
++	int closes = -1;
++
++	if (!f)
++		return;
++	if (fscanf(f, "lid=%*s closes=%d", &closes) != 1)
++		closes = -1;
++	fclose(f);
++	if (closes < 0)
++		return;
++	if (last >= 0 && closes > last && access("/home/.lockpin", R_OK) == 0)
++		launch("/usr/bin/dslock", NULL);
++	last = closes;
++}
++
+ static int bat_level = -1, bat_chg;
+ 
+ static void poll_battery(void)
+@@ -1129,6 +1150,8 @@ int main(int argc, char **argv)
+ 				poll_battery();
+ 			if ((ticks % 10) == 2)		/* about every 3 s: two cheap ioctls, no server round trip */
+ 				poll_wifi();
++			if ((ticks % 3) == 0)		/* about every second: the lid closed -> lock (with a PIN set) */
++				poll_lid();
+ 			poll_volume();
+ 			if (tipwin && time(NULL) - tip_since >= TIP_SECONDS)
+ 				hide_tip();
+diff --git a/user/microwin/src/demos/nanox/dslock.c b/user/microwin/src/demos/nanox/dslock.c
+new file mode 100644
+index 000000000..e1fa4be81
+--- /dev/null
++++ b/user/microwin/src/demos/nanox/dslock.c
+@@ -0,0 +1,331 @@
++/*
++ * dslock - the lock screen of the DSLinuxDSi desktop (docs/SLEEP-LOCK-PLAN.md, step 4): it covers the whole top screen, taskbar included,
++ * until the PIN is typed. There is no lock at boot (the desktop logs in by itself).
++ *   dslock        lock now. The taskbar (dsdesk) starts it when the lid closes, and Start > Lock does. Without a PIN set it says so and ends.
++ *   dslock set    set, change or remove the PIN (Settings > Lock PIN): the old PIN first if there is one, then the new one twice;
++ *                 OK on an empty new PIN removes it (no more locking).
++ * The PIN (4 to 8 digits) is kept hashed (crypt(), MD5 with a random salt) in /home/.lockpin, never as plain text. Digits come from the
++ * touch keyboard's number row or from the keypad on the screen (tap with the trackpad pointer); Enter or OK checks, Backspace or < deletes
++ * one, Esc clears (or, in "set", gives up). After a wrong PIN it waits 1 s, then 2, 4 ... up to 30 s.
++ * This keeps out someone who picks up the DSi; it is not encryption: the card can be read in a PC and SSH still works with its key.
++ * A forgotten PIN: delete /home/.lockpin (over SSH, or with the card in the PC: debugfs -w -R "rm /home/.lockpin" ROOTFS.IMG).
++ */
++#define _XOPEN_SOURCE
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <unistd.h>
++#include <time.h>
++#include <fcntl.h>
++#include <signal.h>
++#include <sys/stat.h>
++#include "nano-X.h"
++#include "w95.h"
++
++#ifdef NANOX_TESTBED
++static char PINFILE[200];
++#else
++#define PINFILE	"/home/.lockpin"
++#endif
++#define PIDFILE	"/tmp/dslock.pid"
++#define MAXPIN	8
++
++extern char *crypt(const char *key, const char *salt);
++
++static GR_WINDOW_ID win;
++static GR_GC_ID gc;
++static int W, H, th;
++static char pin[MAXPIN + 1], first[MAXPIN + 1], stored[128];
++static int set_mode, step;		/* set: 0 old PIN, 1 new PIN, 2 new PIN again */
++static int fails;
++static time_t wait_until;
++static char msg[64];
++
++/* the keypad: 3 x 4 buttons */
++#define KW	36
++#define KH	19
++#define KGAP	4
++static int kx0, ky0;
++static const char *klabel[12] = { "1", "2", "3", "4", "5", "6", "7", "8", "9", "<", "0", "OK" };
++
++static int load_pin(void)
++{
++	FILE *f = fopen(PINFILE, "r");
++
++	stored[0] = 0;
++	if (!f)
++		return 0;
++	if (fgets(stored, sizeof(stored), f))
++		stored[strcspn(stored, "\r\n")] = 0;
++	fclose(f);
++	return stored[0] == '$';
++}
++
++static int pin_ok(const char *p)
++{
++	char *c = crypt(p, stored);
++
++	return c && !strcmp(c, stored);
++}
++
++static int save_pin(const char *p)
++{
++	static const char abc[] = "./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
++	unsigned char r[8];
++	char salt[16], *c;
++	int fd = open("/dev/urandom", O_RDONLY), i;
++	FILE *f;
++
++	if (fd < 0 || read(fd, r, sizeof(r)) != sizeof(r)) {
++		unsigned long t = (unsigned long)time(NULL) ^ ((unsigned long)getpid() << 16);
++
++		for (i = 0; i < 8; i++)
++			r[i] = (unsigned char)(t >> (i * 3));
++	}
++	if (fd >= 0)
++		close(fd);
++	strcpy(salt, "$1$");
++	for (i = 0; i < 8; i++)
++		salt[3 + i] = abc[r[i] % 64];
++	salt[11] = '$';
++	salt[12] = 0;
++	c = crypt(p, salt);
++	if (!c || strncmp(c, "$1$", 3))
++		return -1;
++	f = fopen(PINFILE, "w");
++	if (!f)
++		return -1;
++	fprintf(f, "%s\n", c);
++	fclose(f);
++	chmod(PINFILE, 0600);
++	return 0;
++}
++
++static const char *prompt(void)
++{
++	if (!set_mode)
++		return "Locked: enter your PIN";
++	if (step == 0)
++		return "Current PIN";
++	if (step == 1)
++		return "New PIN (4-8 digits; OK alone: no PIN)";
++	return "The new PIN again";
++}
++
++static void draw(void)
++{
++	char t[48];
++	time_t now = time(NULL);
++	struct tm *tm = localtime(&now);
++	int i, x, y;
++
++	w95_fill(win, gc, W95_NAVY, 0, 0, W, H);
++	strftime(t, sizeof(t), "%H:%M", tm);
++	w95_text(win, gc, W95_LIGHT, (W - w95_textw(gc, t)) / 2, 6, t);
++	strftime(t, sizeof(t), "%a %d %b %Y", tm);
++	w95_text(win, gc, W95_LIGHT, (W - w95_textw(gc, t)) / 2, 8 + th, t);
++	w95_text(win, gc, W95_LIGHT, (W - w95_textw(gc, prompt())) / 2, 14 + 2 * th, prompt());
++	/* the digits as dots */
++	x = (W - (MAXPIN * 12)) / 2;
++	y = 18 + 3 * th;
++	w95_box(win, gc, x - 4, y - 2, MAXPIN * 12 + 8, th + 4, 1, W95_WHITEFILL);
++	for (i = 0; i < (int)strlen(pin); i++)
++		w95_fill(win, gc, W95_DARK, x + i * 12 + 3, y + th / 2 - 2, 5, 5);
++	if (msg[0])
++		w95_text(win, gc, W95_LIGHT, (W - w95_textw(gc, msg)) / 2, y + th + 6, msg);
++	for (i = 0; i < 12; i++)
++		w95_button(win, gc, kx0 + (i % 3) * (KW + KGAP), ky0 + (i / 3) * (KH + KGAP), KW, KH, klabel[i], 0);
++	GrFlush();
++}
++
++static void finish(int code)
++{
++	unlink(PIDFILE);
++	GrClose();
++	exit(code);
++}
++
++static void ok(void)
++{
++	int n = strlen(pin);
++
++	if (time(NULL) < wait_until)
++		return;
++	msg[0] = 0;
++	if (!set_mode || step == 0) {
++		if (pin_ok(pin)) {
++			fails = 0;
++			if (!set_mode)
++				finish(0);			/* unlocked */
++			step = 1;
++		} else {
++			int d = 1 << (fails < 5 ? fails : 5);
++
++			if (d > 30)
++				d = 30;
++			fails++;
++			wait_until = time(NULL) + d;
++			snprintf(msg, sizeof(msg), "Wrong PIN: wait %d s", d);
++		}
++	} else if (step == 1) {
++		if (n == 0) {
++			unlink(PINFILE);
++			snprintf(msg, sizeof(msg), "PIN removed: no lock");
++			draw();
++			sleep(2);
++			finish(0);
++		} else if (n < 4) {
++			snprintf(msg, sizeof(msg), "At least 4 digits");
++		} else {
++			strcpy(first, pin);
++			step = 2;
++		}
++	} else {
++		if (strcmp(pin, first)) {
++			snprintf(msg, sizeof(msg), "Not the same: again");
++			step = 1;
++		} else if (save_pin(pin)) {
++			snprintf(msg, sizeof(msg), "Could not save the PIN");
++			step = 1;
++		} else {
++			snprintf(msg, sizeof(msg), "PIN set: closing the lid locks");
++			memset(pin, 0, sizeof(pin));
++			draw();
++			sleep(2);
++			finish(0);
++		}
++	}
++	memset(pin, 0, sizeof(pin));
++	draw();
++}
++
++static void key(int c)
++{
++	int n = strlen(pin);
++
++	if (c >= '0' && c <= '9') {
++		if (n < MAXPIN && time(NULL) >= wait_until) {
++			pin[n] = c;
++			pin[n + 1] = 0;
++		}
++	} else if (c == '<' || c == MWKEY_BACKSPACE || c == 8 || c == 127) {
++		if (n)
++			pin[n - 1] = 0;
++	} else if (c == MWKEY_ENTER || c == '\r' || c == '\n') {
++		ok();
++		return;
++	} else if (c == MWKEY_ESCAPE) {
++		if (set_mode)
++			finish(1);
++		pin[0] = 0;
++	} else {
++		return;
++	}
++	draw();
++}
++
++int main(int argc, char **argv)
++{
++	GR_SCREEN_INFO si;
++	GR_FONT_ID font;
++	GR_EVENT ev;
++	FILE *f;
++
++#ifdef NANOX_TESTBED
++	snprintf(PINFILE, sizeof(PINFILE), "%s/.lockpin", getenv("HOME") ? getenv("HOME") : ".");
++#endif
++	set_mode = argc > 1 && !strcmp(argv[1], "set");
++	if (GrOpen() < 0)
++		return 1;
++	if (load_pin())
++		step = 0;
++	else if (set_mode)
++		step = 1;			/* no PIN yet: straight to the new one */
++	else {
++		/* nothing to lock with: say so briefly */
++		GrClose();
++		fprintf(stderr, "dslock: no PIN set (Settings > Lock PIN)\n");
++		return 0;
++	}
++	if (!set_mode) {			/* one lock screen at a time */
++		if ((f = fopen(PIDFILE, "r"))) {
++			int p = 0;
++
++			if (fscanf(f, "%d", &p) == 1 && p > 0 && kill(p, 0) == 0) {
++				fclose(f);
++				GrClose();
++				return 0;
++			}
++			fclose(f);
++		}
++		if ((f = fopen(PIDFILE, "w"))) {
++			fprintf(f, "%d\n", (int)getpid());
++			fclose(f);
++		}
++	}
++	GrGetScreenInfo(&si);
++	W = si.cols;
++	H = si.rows;
++	gc = GrNewGC();
++	font = GrCreateFont("Tiny", 0, NULL);
++	GrSetGCFont(gc, font);
++	w95_init(font);
++	th = w95_texth(gc);
++	kx0 = (W - (3 * KW + 2 * KGAP)) / 2;
++	ky0 = H - 4 * (KH + KGAP) - 2;
++	win = GrNewWindowEx(GR_WM_PROPS_NODECORATE | GR_WM_PROPS_NOMOVE, (GR_CHAR *)"Locked", GR_ROOT_WINDOW_ID, 0, 0, W, H, W95_NAVY);
++	GrSelectEvents(win, GR_EVENT_MASK_EXPOSURE | GR_EVENT_MASK_KEY_DOWN | GR_EVENT_MASK_BUTTON_DOWN | GR_EVENT_MASK_CLOSE_REQ);
++	GrMapWindow(win);
++	GrRaiseWindow(win);
++	GrSetFocus(win);
++	for (;;) {
++		GrGetNextEventTimeout(&ev, 500);
++		switch (ev.type) {
++		case GR_EVENT_TYPE_EXPOSURE:
++			draw();
++			break;
++		case GR_EVENT_TYPE_KEY_DOWN:
++			key(ev.keystroke.ch);
++			break;
++		case GR_EVENT_TYPE_BUTTON_DOWN: {
++			int x = ev.button.x - kx0, y = ev.button.y - ky0, c = x / (KW + KGAP), r = y / (KH + KGAP);
++
++			if (x >= 0 && y >= 0 && c < 3 && r < 4 && x % (KW + KGAP) < KW && y % (KH + KGAP) < KH) {
++				const char *l = klabel[r * 3 + c];
++
++				key(l[0] == 'O' ? MWKEY_ENTER : l[0]);
++			}
++			break;
++		}
++		case GR_EVENT_TYPE_CLOSE_REQ:
++			if (set_mode)
++				finish(1);
++			break;				/* the lock cannot be closed */
++		case GR_EVENT_TYPE_TIMEOUT:
++			if (!set_mode) {		/* stay on top and keep the keys */
++				GrRaiseWindow(win);
++				if (GrGetFocus() != win)
++					GrSetFocus(win);
++			}
++			{
++				static int last_min = -1;
++				time_t now = time(NULL);
++				int redraw = 0;
++
++				if (wait_until && now >= wait_until && msg[0]) {
++					wait_until = 0;
++					msg[0] = 0;
++					redraw = 1;
++				}
++				if (localtime(&now)->tm_min != last_min) {	/* the clock */
++					last_min = localtime(&now)->tm_min;
++					redraw = 1;
++				}
++				if (redraw)
++					draw();
++			}
++			break;
++		}
++	}
++	return 0;
++}
+diff --git a/user/microwin/src/demos/nanox/dssettings.c b/user/microwin/src/demos/nanox/dssettings.c
+index 19c8083cc..4b27389e5 100644
+--- a/user/microwin/src/demos/nanox/dssettings.c
++++ b/user/microwin/src/demos/nanox/dssettings.c
+@@ -9,6 +9,7 @@
+  *                  program writes the choice to /home/settings.conf and tells dsdesk (SIGUSR1).
+  *   Clock          sets the system clock (hours, minutes, day, month, year). It is kept by the kernel until power off.
+  *   Info           battery level, volume level of the DSi's volume buttons, free memory.
++ *   Lock PIN       sets, changes or removes the lock screen's PIN (dslock set); with a PIN, closing the lid locks the desktop.
+  * Choices are saved at once in /home/settings.conf and applied again at every desktop start (dssettings apply).
+  * Keys: up/down choose a row, left/right change it, q or Esc closes. Buttons and the trackpad pointer work too.
+  */
+@@ -47,7 +48,7 @@ static const char *sleep_name[] = { "never", "after 30 s", "after 1 min", "after
+ #define NSLEEP	7
+ static int sleep_i = 3, have_sleep;		/* 2 minutes unless chosen */
+ static int focus, applying;			/* applying: only write the hardware, do not rewrite the saved file */
+-#define FIXED_BTNS	9			/* the four spin rows (8 buttons) and the Sound test button */
++#define FIXED_BTNS	10			/* the four spin rows (8 buttons), the Sound test and Lock PIN buttons */
+ static GR_WINDOW_ID win;
+ static GR_GC_ID gc;
+ static int th;
+@@ -319,7 +320,7 @@ static void add_btn(int x, int y, int w, int h, int id)
+ 	btns[nbtn++].id = id;
+ }
+ 
+-enum { B_BR_M = 1, B_BR_P, B_PD_M, B_PD_P, B_DK_M, B_DK_P, B_TH, B_TM, B_DD, B_DMO, B_DY, B_SOUND, B_SO_M, B_SO_P };
++enum { B_BR_M = 1, B_BR_P, B_PD_M, B_PD_P, B_DK_M, B_DK_P, B_TH, B_TM, B_DD, B_DMO, B_DY, B_SOUND, B_SO_M, B_SO_P, B_PIN };
+ 
+ static void draw_spin(int row, const char *label, int minus_id, int plus_id)
+ {
+@@ -436,6 +437,8 @@ static void draw_all(void)
+ 	draw_value(3, sleep_name[sleep_i]);
+ 	w95_button(win, gc, RX0, WIN_H - BTNH - 4, 70, BTNH, "Sound test", 0);
+ 	add_btn(RX0, WIN_H - BTNH - 4, 70, BTNH, B_SOUND);
++	w95_button(win, gc, RX0 + 76, WIN_H - BTNH - 4, 70, BTNH, "Lock PIN", 0);
++	add_btn(RX0 + 76, WIN_H - BTNH - 4, 70, BTNH, B_PIN);
+ 	draw_clock();
+ 	draw_info();
+ }
+@@ -474,6 +477,12 @@ static void act(int id)
+ 	case B_DD: adjust_time(86400, 0); draw_clock(); break;
+ 	case B_DMO: adjust_time(0, 1); draw_clock(); break;
+ 	case B_DY: adjust_time(0, 2); draw_clock(); break;
++	case B_PIN:					/* set, change or remove the lock screen's PIN */
++		if (vfork() == 0) {
++			execl("/usr/bin/dslock", "/usr/bin/dslock", "set", (char *)NULL);
++			_exit(127);
++		}
++		break;
+ 	case B_SOUND:
+ 		if (vfork() == 0) {
+ 			execl("/usr/bin/dsplay", "/usr/bin/dsplay", (char *)NULL);
+diff --git a/vendors/Nintendo/DSI/Makefile b/vendors/Nintendo/DSI/Makefile
+index 387d4adbf..f9ce1f9da 100644
+--- a/vendors/Nintendo/DSI/Makefile
++++ b/vendors/Nintendo/DSI/Makefile
+@@ -169,7 +169,7 @@ finishrom:
+ 	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/dsdesk $(ROMFSDIR)/boot/dsdesk
+ 	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/dssettings $(ROMFSDIR)/boot/dssettings
+ 	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/cmp $(ROMFSDIR)/boot/cmp
+-	-rm -f $(addprefix $(ROMFSDIR)/boot/,dsnotes dsfiles dsbench dsgl3d dsgx dsplay dsmemo dsgame dsarcade dsgb dscam landmine ntetris)
++	-rm -f $(addprefix $(ROMFSDIR)/boot/,dsnotes dsfiles dsbench dsgl3d dsgx dsplay dsmemo dsgame dsarcade dsgb dscam landmine ntetris dslock)
+ 	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/madplay $(ROMFSDIR)/$(OPTDIR)
+ 	# Compress the data area of these programs
+ 	$(CROSS)flthdr -d $(ROMFSDIR)/$(OPTDIR)/*
+-- 
+2.56.1
+

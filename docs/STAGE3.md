@@ -1124,3 +1124,16 @@ w99f (user): `echo "screen off" > /proc/dsisettings`: screens dark; `screen on`:
 w99g, patch 0137: 120 s default again; Settings "Screen off" row (screenoff= in settings.conf, applied by `dssettings apply`; info block
 two lines so the window fits; testbed picture checked); dsautolog shuts down (/boot/shutdown) at battery <= 1 without charger on two
 checks 10 s apart. On the card, image clean.
+
+### Sound test froze (w99g); the lock screen (w99h)
+
+User: Settings > Sound test froze the DSi. The card log (saved 71 s after boot, image clean) ends with "dsdesk: started /boot/dssettings"
+while the boot auto-connect was still "Joining GuestNet: 42 s"; dsplay's start writes nothing that dsautolog sees, so the freeze is not in
+the log. Sound test last worked in w96n, before the DSi Wi-Fi chip was used; its ARM7 path (sound_set_power -> dsivol_sound_power with
+pm_xfer and I2S) has no unbounded waits. Leading guess: a conflict with the Wi-Fi driver's long ARM7 requests. Not fixed yet: a test with
+Wi-Fi connected / off decides. (Also seen: the log's uptime header was 946684900, i.e. the RTC-read path at boot still sets xtime
+directly in time.c; dsfetch works around it; to fix in time.c like rtc.c.)
+w99h, patch 0138 (sleep plan step 4, the user's choice: a PIN, automatic login): dslock, /proc/dslid, dsdesk lid poll and Start > Lock,
+Settings > Lock PIN. Test bed: set PIN (2 digits refused, then 1234 twice -> /home/.lockpin "$1$..."), lock, 0000 keeps it locked,
+1234 unlocks (process gone, pid file removed), keypad clicks add digits. (A first test run looked wrong only because `pgrep -f`
+matched the test shell's own command line.) On the card, image clean.
