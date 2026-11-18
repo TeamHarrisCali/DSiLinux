@@ -11,8 +11,9 @@ Status (2026-11-18): **steps 2 and 3 built; w99e froze, w99f fixes it**, not yet
   /proc/dsisettings`, `sleep 0` never) and at once when the lid closes; a touch or button brings them back (the lid must be open),
   and that first touch or press does nothing else; programs keep running; SSH typing does not keep the screen on; `screen off` /
   `screen on` by hand; `cat /proc/dsisettings` shows `sleep= screen= lid=`.
-Unknowns: whether the power chip's backlight bits switch the DSi's backlights in DSi mode (the DS way; the same register's power-off
-bit does work), and whether the ARM7's hinge bit reports the lid in DSi mode. Not yet: "Screen off after" in Settings, switching the
+Backlight bits: **confirmed in the DSi's own System Menu code** (its DSi-mode ARM7 switches the backlights by setting and clearing
+power-chip register 0 bits 0x04 / 0x08 / 0x0C over SPI, with the same bus values as pm_xfer; DSI-INTERNALS.md), so w99f does what
+the DSi does. Still unknown: whether the ARM7's hinge bit reports the lid in DSi mode. Not yet: "Screen off after" in Settings, switching the
 LCDs off too, the lock screen (step 4, questions 2-3), low battery shut down (5), deep sleep (6).
 
 ## Today (checked in the source)

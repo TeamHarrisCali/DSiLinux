@@ -35,6 +35,7 @@ They live in `~/Desktop/DSIBACKUP/` (an SD card backup) and in copies under `~/D
 | eMMC | 240 MiB usable (an eMMC behind the TMIO SD controller, port 1); the SD slot is port 0 of the same controller at 0x04004800 | ARM7 | dump / measured |
 | SPI flash | 128 KB, on the DS-style SPI bus | ARM7 | dump |
 | Power/MCU | the "BPTWL" microcontroller on I2C (address 0x4A): battery, volume, backlight, power button, power-off | ARM7 over I2C | measured |
+| Power chip (SPI) | the DS-style power chip is still there in DSi mode: SPI device 0 (SPICNT 0x8802 for the command byte, 0x8002 for the data byte), register 0 bit 0 sound amplifier, bit 2 lower backlight, bit 3 upper backlight, bit 6 power off | ARM7 over SPI | **System Menu code** (HNAE's DSi-mode ARM7: its power thread sets and clears register 0 bits 0x04 / 0x08 / 0x0C for the backlights, 0x01, 0x40 for power off; sets 0x0C at start), 2026-11-18; power off measured (z build) |
 | DS-style SPI power chip | does **not** answer on the DSi (reads hang) | — | measured |
 | Sound | TSC2117-style codec (sound, microphone **and** the touch screen), I2S out (`SNDEXTCNT` 0x04004700), DS mixer as the source | ARM7 | measured |
 | Touch | through the codec registers in DSi mode | ARM7 | measured |

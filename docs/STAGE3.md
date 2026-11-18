@@ -1110,3 +1110,9 @@ fixed then by pm_xfer() in the z build). Should have been caught: the lesson "no
 w99f, patch 0136: the brightness, backlight-power and system-power commands use pm_xfer(); a register 0 / 4 read with bit 6 set is
 treated as a failed read (no write, so a bad read can never power the DSi off); screen sleep's idle timer off by default. The image
 was clean after the freeze (checked before writing). w99f on the card; w99e removed from the card by release.sh.
+
+Checked in the user's dump (the hiyaCFW system storage copy on the card, the System Menu HNAE, its DSi-mode ARM7 binary, which is not
+modcrypted), as the user asked: its power-management thread switches the backlights through power-chip register 0 over SPI (helpers
+"read register 0, OR / AND-NOT bits, write" called with 0x04, 0x08, 0x0C; 0x01 the amplifier, 0x40 power off; 0x0C set at start), with
+SPICNT 0x8802 / 0x8002 as pm_xfer. Its I2C (BPTWL) writes go through a message layer (registers 0x63, 0x70). So w99f's backlight path
+matches the DSi's own. The disassembly was done in a scratch folder and deleted; only these findings are kept.
