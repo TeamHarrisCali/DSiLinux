@@ -5,8 +5,8 @@ lists them, where each one stopped, and **every question still waiting for an an
 
 ## Where things stand
 
-- **On the card now: w99b** (2026-11-18): w98z plus the TODO fixes below (memory, stacks, nano, tar, clock). w99a's tar fix works
-  on the DSi; w99b's own changes are not yet run on the DSi.
+- **On the card now: w99c** (2026-11-18): w98z plus the TODO fixes below (memory, stacks, nano, tar, clock, fewer idle shells).
+  Verified on the DSi so far: tar `-z` (w99a), the memory reserve and memreport (w99b). w99c's own changes are not yet run.
 - **w98z** (2026-11-17) brought:
   - uptime fixed (it showed the date), dsfetch fixed and installed as `/usr/bin/dsfetch`;
   - the DSi asks DHCP for its last address again (`/home/wifi.lastip`), so `ssh dsi` keeps finding it;
@@ -15,7 +15,7 @@ lists them, where each one stopped, and **every question still waiting for an an
   - windows: maximize / restore box, resize with L + drag on the title bar;
   - the Terminal's scroll bar, and the Terminal fits itself to a resized window.
 - **First thing next time:**
-  1. Boot w99b (it includes everything in w98z and w99a).
+  1. Boot w99c (it includes everything before it).
   2. Check the desktop starts by itself and Wi-Fi Auto joins GuestNet.
   3. Start Network > SSH server, then run `ssh dsi` from the PC: no password.
   4. Try the maximize box, L + drag on a title bar, and the Terminal's scroll bar.
@@ -27,11 +27,13 @@ lists them, where each one stopped, and **every question still waiting for an an
 
 ## Small fixes to do (TODO)
 
-**w99b (2026-11-18) is on the card, not yet run on the DSi.** w99a's results on the DSi (user): **tar `xzf` works** (make-4.3 unpacked);
-nano still failed (`Error opening terminal: xterm`); memreport's per-process numbers were wrong. Both fixed in w99b. To check:
-1. Over SSH and in the desktop's Terminal: `nano notes.txt` opens.
-2. `memreport` with the desktop, Wi-Fi and SSH up: per-process numbers now (send the output: it decides the next memory step).
-3. After Wi-Fi connects, `date` shows the right date and time (California time).
+**w99c (2026-11-18) is on the card, not yet run on the DSi.** Results so far on the DSi: tar `xzf` works (w99a); the 192 KB reserve
+and memreport work (w99b: 5.8 MB free, largest free block 4 MB). Still failing in w99b: nano (`xterm-256color` not found) and the
+clock (`date` said 2016). To check with w99c:
+1. Over SSH and in the desktop's Terminal: `nano notes.txt` opens (no `export` needed).
+2. After Wi-Fi connects: `date` shows the right Central time, and `cat /tmp/clock.log` says which zone was found. Then reboot
+   without Wi-Fi: the time should still be right (it now comes from the DSi's clock chip, which w99c writes).
+3. `memreport` again: no `autolog`/`sleep`, one shell fewer behind the desktop (about 1 MB less in use).
 
 - **Memory (the real cause of "tar: SIGSEGV").** The card log showed `tar: page allocation failure. order:8`: 2.1 MB free, tar needing
   868 KB in one piece. A free 1 MB block existed, but the kernel's reserve check refused it: the reserve (`min_free_kbytes`) was
@@ -47,9 +49,17 @@ nano still failed (`Error opening terminal: xterm`); memreport's per-process num
     - **`memreport`**: each process's own memory, rounding slack and shared memory, the reserve, the free blocks by size and the
       largest one. w99b fills in the kernel's `/proc/PID/maps` (an empty stub on no-MMU before) so these numbers are real; the old
       per-process figures were wrong (the kernel sized regions from a page field its allocator never sets).
-  - w99a's memreport, totals (reliable): 2.7 MB free, 4.2 MB file cache (given back when needed), largest free block 1 MB.
-  - **Next, after memreport data from w99b:**
-    - what to cut from the biggest processes;
+  - w99a's memreport, totals: 2.7 MB free, largest free block 1 MB. **w99b** (reserve in the kernel): **5.8 MB free, largest free
+    block 4 MB**; per process (own memory): dropbear 524 KB, nano-X 520 KB, **six shells of about 400 KB each** (2.4 MB: the SSH
+    session, the Terminal's, the `desktop` script, the login shell behind it, `autolog` and one more), dsdesk 280 KB, autolog's
+    `sleep` 256 KB, nanowm 132 KB.
+  - **Done in w99c:** `autolog` (a shell plus a resident `sleep`, about 650 KB, and savelog's burst of programs every 10 s) is
+    replaced by `dsautolog`, a small C program that saves only when the kernel log or a log file changed (or every 5 minutes); the
+    login shell gives its place to the desktop instead of waiting behind it (about 400 KB); the SSH server window closes on Enter
+    instead of keeping a shell (about 400 KB while it was open).
+  - **Next:**
+    - the shells that remain (the Terminal's, the SSH session's, the `desktop` script): the BusyBox plan's hush may be smaller
+      (msh 1.00 holds about 250 KB of data each);
     - whether the RAM flag on our card programs (one big block for code + data) or two smaller blocks fragments less;
     - an "exact size" allocator: it would give back the rounding slack, but that slack doubles as stack space today, so it needs the
       stack sizes below and testing on the console.
@@ -60,7 +70,9 @@ nano still failed (`Error opening terminal: xterm`); memreport's per-process num
     perl, links ...) and 16 KB for the rest. Each raise stays **within the memory block the program already gets**, so nothing needs
     more RAM.
   - `release.sh` runs it after every install; the list of changes is in `out/stacks/report.txt`.
-- **nano: "Error opening terminal".** Fixed in w99b.
+- **nano: "Error opening terminal".** w99b installed the descriptions, but nano still failed: the DSi's ncurses was built without a
+  default directory (`TERMINFO "none"`), so it only looks where `$TERMINFO` points (or `$HOME/.terminfo`). **w99c** sets
+  `TERMINFO=/usr/share/terminfo` in the profile and the Terminal, and links `/home/.terminfo` to it.
   - The DSi's ncurses (5.4, 2005) reads terminal descriptions from `/usr/share/terminfo`, and the DSi had none, so every type
     failed. `scripts/install-terminfo.sh` compiles 16 (linux, xterm, xterm-256color, vt100, screen, tmux, ...) on the PC in the old
     format that ncurses reads and writes them into the image (release.sh runs it).
@@ -70,9 +82,18 @@ nano still failed (`Error opening terminal: xterm`); memreport's per-process num
 - **tar `-z` / `-j` ("Cannot fork").** Done, **works on the DSi** (w99a).
   - tar starts gzip or bzip2 with `vfork()` + `exec`, straight on the archive file or its stdin/stdout, joined by a pipe.
   - Not covered: remote tapes (rmt) and `--to-command`, which still need fork().
-- **The clock** (tar: "time stamp ... in the future"; the DSi's clock says December 2016). w99b: after each successful Wi-Fi
-  connection the Wi-Fi window runs `ntpclient` once to set the time. The time zone is `/etc/config/TZ`, California by default;
-  `scripts/set-timezone.sh` changes it. Not yet: writing the right time back into the DSi's clock chip, so it is right before Wi-Fi.
+- **The clock** (tar: "time stamp ... in the future"; the DSi's clock says December 2016). Asked for (2026-11-18): when it connects to
+  Wi-Fi, find its time zone and correct the DSi's own date and time.
+  - w99b tried `ntpclient`: NTP is blocked on GuestNet, it never got an answer and stayed in memory; `date` still said 2016.
+  - **w99c: `httpdate`**, run by the Wi-Fi window after each connection (also the automatic one at boot):
+    - the time from a web server's `Date:` header over plain HTTP (works wherever `wget` does), about a second accurate;
+    - the **time zone from where the network is** (worldtimeapi.org, then ip-api.com: free services over plain HTTP that see the
+      DSi's public address), written to `/etc/config/TZ`; `scripts/set-timezone.sh ZONE` picks one by hand and turns this off,
+      `scripts/set-timezone.sh auto` turns it back on;
+    - the local time **written into the DSi's clock chip** (new: the kernel can write the RTC), so the DSi's own menu shows it and
+      the next boot starts right even without Wi-Fi (`httpdate -L` at boot converts the chip's local time to UTC).
+  - The card is set to Central with automatic detection on.
+
 - **Card scripts and `debugfs mkdir`** (found and fixed 2026-11-18): `debugfs`'s `mkdir` on a directory that already exists orphans a
   new one and damages the image's counts. A second run of a script hit it (repaired with `rootfs-check.sh -y`; the empty orphan is
   `/lost+found/#866`, an older one `#820`). All six scripts that make directories now use `img_mkdir` (scripts/card.sh), which skips
@@ -102,10 +123,11 @@ Added 2026-11-18 at the user's request. Today it joins open networks, gets an ad
 |---|---|---|---|---|
 | 1 | **Speed** | about 17 KB/s (`wget` 2.3 MB in 2 min 15 s) | Two separate costs: the bus runs **1 bit wide** (the bring-up log says "bus 1-bit"; the chip can do 4) and data moves **one byte per command** (CMD52). 4-bit mode and CMD53 block transfers (up to 512 bytes per command) in the ARM7's SDIO code | the same `wget` many times faster |
 | 2 | **Connecting** | about 50 s: the chip answers only the third connect command | find why the first two are ignored (timing after the scan, a missing setup command); dswifi's order as the reference | joins within a few seconds |
-| 3 | **WPA2** | built and the crypto verified on the DSi, but it has never joined a network (the hotspot was on a channel the old scan missed; w98v scans every channel) | a test on a WPA2 network on channels 1-11: WorkNet (if you may use it) or a phone hotspot | DHCP and ping over WPA2 |
+| 3 | **WPA2** | built and the crypto verified on the DSi, but it has never joined a network (the hotspot was on a channel the old scan missed; w98v scans every channel) | a test on a WPA2 phone hotspot (2.4 GHz, channel 1-11). WorkNet cannot be the test: it asks for a username and password (WPA2-Enterprise) | DHCP and ping over WPA2 |
 | 4 | **Staying connected** | a dropped connection is not noticed or rejoined | rejoin after a disconnect event; signal strength in the tray; scan while connected | walk out of range and back: it rejoins by itself |
 | 5 | **Power** | the chip always runs at full power | its power-save mode while idle (ties in with the sleep plan) | longer battery life with Wi-Fi on |
-| 6 | **Firmware** | the chip runs the firmware from your DSi's own system files (copied from your dump with `scripts/add-dsi-wifi-fw.sh`) | Nintendo never released a newer one for this chip, and other DSi versions carry the same generation, so "updating the chip" means items 1-5 (the driver), not new firmware | (nothing to do unless a newer firmware turns up) |
+| 7 | **WPA2-Enterprise** (username and password, like WorkNet) | not supported: only WPA2 with one shared password | 802.1X with PEAP/MSCHAPv2 on top of the WPA2 code: a TLS client, MSCHAPv2, more memory; a project of its own | joins WorkNet |
+| 6 | **Firmware** | the chip runs the firmware from your DSi's own system files (copied from your dump with `scripts/add-dsi-wifi-fw.sh`) | Nintendo never released a newer one for this chip (the "update" you meant was the time and date on connecting: done in w99c, see the TODO list) | (nothing to do) |
 
 Items 1 and 2 are the ARM7 and the kernel's `dsiwifi.c`; 3 needs only a test; 4 and 5 build on 1 and 2.
 
@@ -147,7 +169,7 @@ Which plan goes first is your choice. A suggestion:
 
 **F. The DSi's Wi-Fi chip**
 1. Speed first (item 1), or the quicker connect (item 2)?
-2. WPA2 test: may WorkNet be used, or a phone hotspot (WPA2, 2.4 GHz, channel 1-11)?
+2. ~~WPA2 test on WorkNet?~~ No: WorkNet needs a username and password (WPA2-Enterprise, item 7). The test needs a WPA2 phone hotspot.
 
 **From earlier**
 - Set `passwd` on the DSi? With key login (w98z) the SSH server no longer accepts passwords at all, so this matters only on the

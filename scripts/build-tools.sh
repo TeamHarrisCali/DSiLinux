@@ -2,11 +2,13 @@
 # Builds the small DSi tools in vendors/Nintendo/DSI with the DSi's compiler and writes them into the card's ROOTFS.IMG as /usr/bin/<name>:
 #   dsfetch    neofetch for the DSi
 #   memreport  where the RAM goes: per process, free memory by block size, the largest free block
+#   httpdate   the clock from the network over HTTP, the time zone, the DSi's clock chip (the Wi-Fi window and /boot/rc run it)
+#   dsautolog  saves the card log when something changed (/boot/rc starts it instead of the /boot/autolog shell loop)
 # Usage: scripts/build-tools.sh [-i ROOTFS.IMG]     (release.sh runs it)
 . "$(dirname "$0")/card.sh"
 if [ "$1" = "-i" ]; then IMG="$2"; shift 2; fi
 cd "$(dirname "$0")/.."
-TOOLS="dsfetch memreport"
+TOOLS="dsfetch memreport httpdate dsautolog"
 mkdir -p out/tools
 for t in $TOOLS; do cp work/dslinux/vendors/Nintendo/DSI/$t.c out/tools/; done
 scripts/in-container.sh 'export ROOTDIR=/work CONFIG_LIBCDIR=uClibc CONFIG_DEFAULTS_LIBC_UCLIBC=y; CCF="/work/tools/ucfront-gcc arm-linux-elf-gcc"; cd /out/tools &&

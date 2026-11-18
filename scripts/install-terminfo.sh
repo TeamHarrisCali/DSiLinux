@@ -36,6 +36,8 @@ scripts/rootfs-check.sh "$IMG" > /dev/null || { echo "image has errors: scripts/
 			echo "sif /usr/share/terminfo/$d/$f mode 0100644"
 		done
 	done
+	# $HOME/.terminfo is the other place ncurses looks (root's home is /home): a link, for programs started without the profile
+	debugfs -R "stat /home/.terminfo" "$IMG" 2>/dev/null | grep -q "Type: symlink" || echo "symlink /home/.terminfo /usr/share/terminfo"
 } > $D-src/cmds
 debugfs -w -f $D-src/cmds "$IMG" > /dev/null 2>&1
 sync

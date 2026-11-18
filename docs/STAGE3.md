@@ -1050,3 +1050,27 @@ w99a (user, over SSH): `tar xzf make-4.3.tar.gz` unpacked the make source (the v
   rootfs-check.sh -y (the empty orphan is /lost+found/#866). `img_mkdir` in scripts/card.sh now emits mkdir only for missing
   directories; used by add-ssh-key, add-roms, add-dsi-wifi-fw, install-terminfo, set-timezone and doom/install.sh. Tested: two runs
   in a row on a scratch image, e2fsck clean. On the card afterwards: 16 terminal types, the time zone, image clean, w99b checksum ok.
+
+### w99b on the console; w99c
+
+w99b (user, over SSH): `nano notes.txt`: "Error opening terminal: xterm-256color"; `date`: Thu Dec 22 07:29 2016 (real: 9:26 Central,
+15:26 UTC); memreport: reserve 192 KB, 5792 KB free, file cache 1800 KB, free blocks 1x32K 3x128K 3x256K 1x512K 1x4096K; own memory
+dropbear 524, nano-X 520, six sh/desktop/autolog of 392-408 KB (152 KB of it slack each), dsdesk 280, sleep 256, init 132, nanowm 132,
+ntpclient 100 (still waiting), memreport 68, inetd 52 KB.
+- nano: ncurses 5.4 here was configured without a terminfo directory (ncurses_def.h TERMINFO "none"; read_entry.c then only uses
+  $TERMINFO, $HOME/.terminfo and TERMINFO_DIRS). w99c: nxterm sets TERMINFO=/usr/share/terminfo, /etc/profile block "terminal types
+  (3)" exports it, install-terminfo.sh links /home/.terminfo to it.
+- Clock: NTP gets no answer on GuestNet (ntpclient waits forever). w99c, patch 0133: httpdate (Date header over HTTP; -z zone from
+  worldtimeapi.org / ip-api.com mapped to POSIX TZ, unless /etc/config/TZ.manual; -w local time into the RTC; -L at boot: the RTC holds
+  local time, the kernel took it as UTC). The RTC write: NDS_SD_CMD_RTC on the ARM7 (command 0x64 / read 0x65, status 0x61 for 12/24 h;
+  the command byte bit 7 first, data bit 0 first, as arm7/time.c reads; a busy loop instead of swiDelay because SD requests run in the
+  IRQ handler), dsisd_rtc(), /proc/dsisettings "rtc Y M D WD h m s". Tested on the PC: httpdate's Date parsing against Google and
+  example.com (matches the PC clock), -z found America/Chicago from this network. The RTC write is not testable off the console.
+  set-timezone.sh: default Central, writes TZ.manual (auto detection off) unless --if-missing; "auto" removes it. The card: Central,
+  automatic on.
+- Shells: dsautolog (C: klogctl checksum + log sizes/times every 10 s, savelog only on a change or every 5 min) replaces the autolog
+  shell loop when /usr/bin/dsautolog exists; /boot/session execs /boot/desktop (DSDESK_SESSION=1) and /boot/desktop execs /bin/sh
+  when nano-X ends; wifi-ssh waits for Enter instead of exec /bin/sh. Expected saving about 1 MB.
+- Also asked: the Wi-Fi chip "update" meant the time and date on connecting (done here). WorkNet uses a username and password
+  (WPA2-Enterprise): not supported, added to the roadmap; the WPA2 test needs a phone hotspot.
+- w99c on the card (checksum ok, image clean, 16 terminfo types, /home/.terminfo link, TZ Central automatic). Not yet run.

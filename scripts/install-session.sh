@@ -11,15 +11,17 @@ cd "$(dirname "$0")/.."
 scripts/rootfs-check.sh "$IMG" > /dev/null || { echo "image has errors: scripts/rootfs-check.sh -y first"; exit 1; }
 mkdir -p out/session
 OLD=$(debugfs -R "cat /etc/profile" "$IMG" 2>/dev/null)
-if printf '%s\n' "$OLD" | grep -q "DSLinuxDSi: terminal types (2)" && printf '%s\n' "$OLD" | grep -q "/boot/session"; then
+if printf '%s\n' "$OLD" | grep -q "DSLinuxDSi: terminal types (3)" && printf '%s\n' "$OLD" | grep -q "/boot/session"; then
 	echo "/etc/profile already has the terminal types and /boot/session"
 	exit 0
 fi
 {
 	# what is there, without an older terminal-types block and the session lines (both are written again below)
 	printf '%s\n' "$OLD" | sed '/DSLinuxDSi: terminal types/,/^esac$/d' | grep -v "boot/session" | grep -v '^$'
-	echo '# DSLinuxDSi: terminal types (2). The types in /usr/share/terminfo (scripts/install-terminfo.sh) stay as they are; anything'
-	echo '# else becomes xterm (the DSi'"'"'s ncurses knows no other).'
+	echo '# DSLinuxDSi: terminal types (3). The DSi'"'"'s ncurses has no default directory: TERMINFO says where the descriptions are'
+	echo '# (scripts/install-terminfo.sh). Those types stay as they are; anything else becomes xterm.'
+	echo 'TERMINFO=/usr/share/terminfo'
+	echo 'export TERMINFO'
 	echo 'case "$TERM" in'
 	echo 'linux|xterm|xterm-256color|xterm-color|vt100|vt102|vt220|screen|screen-256color|tmux|tmux-256color|ansi|dumb) ;;'
 	echo '*) TERM=xterm; export TERM ;;'
@@ -31,4 +33,4 @@ printf 'rm /etc/profile\nwrite out/session/profile /etc/profile\nsif /etc/profil
 debugfs -w -f out/session/cmds "$IMG" > /dev/null 2>&1
 sync
 P=$(debugfs -R "cat /etc/profile" "$IMG" 2>/dev/null)
-printf '%s\n' "$P" | grep -q "/boot/session" && printf '%s\n' "$P" | grep -q "DSLinuxDSi: terminal types (2)" && echo "/etc/profile: terminal types, starts /boot/session" || { echo "/etc/profile NOT written"; exit 1; }
+printf '%s\n' "$P" | grep -q "/boot/session" && printf '%s\n' "$P" | grep -q "DSLinuxDSi: terminal types (3)" && echo "/etc/profile: terminal types, starts /boot/session" || { echo "/etc/profile NOT written"; exit 1; }

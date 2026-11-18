@@ -1,0 +1,755 @@
+From e85b1cbff9b691c54877421c32a576c0da3c37c2 Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 09:36:50 -0600
+Subject: [PATCH] Clock from HTTP with time zone and the DSi's clock chip;
+ fewer idle shells; TERMINFO
+
+- w99b on the console: ntpclient never got an answer (NTP blocked on the
+  guest network) and stayed resident; date said 2016. httpdate: the time
+  from a web server's Date header (HTTP 80); -z the time zone from where
+  the network is (worldtimeapi.org, then ip-api.com; IANA name mapped to
+  a POSIX TZ for uClibc; skipped with /etc/config/TZ.manual); -w the
+  local time into the DSi's clock chip; -L at boot (rc): the chip holds
+  local time, the kernel took it as UTC. The Wi-Fi window runs
+  httpdate -z -s -w after a successful DHCP instead of ntpclient.
+- The clock chip: NDS_SD_CMD_RTC (ARM7, sdmmc.c): the DS RTC protocol
+  of arm7/time.c (command bit 7 first, data bit 0 first) with a busy
+  loop instead of swiDelay (SD requests run in the IRQ handler), 24/12 h
+  mode from status register 1; dsisd_rtc(); /proc/dsisettings
+  "rtc YYYY MM DD WD hh mm ss".
+- memreport (w99b) showed six msh shells of about 400 KB: dsautolog
+  (C) replaces the /boot/autolog loop (a shell plus a resident sleep,
+  ~650 KB, and savelog every 10 s); it runs savelog only when the
+  kernel log or a log file changed, or every 5 min. The boot session
+  execs /boot/desktop in place of the login shell, and the desktop
+  script execs a shell when the desktop ends. The SSH server window
+  closes on Enter instead of keeping a shell.
+- nano: the DSi's ncurses has no default terminfo directory, so the
+  installed descriptions were not found: nxterm sets
+  TERMINFO=/usr/share/terminfo (and the profile does, scripts side).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c   | 105 +++++++
+ linux-2.6.x/arch/arm/mach-nds/volume.c       |  20 +-
+ linux-2.6.x/drivers/block/dldi_c.c           |  17 ++
+ linux-2.6.x/include/asm-arm/arch-nds/dsisd.h |   1 +
+ user/microwin/src/demos/nanox/dsnet.c        |   7 +-
+ user/microwin/src/demos/nanox/nxterm.c       |   1 +
+ vendors/Nintendo/DSI/desktop                 |   7 +
+ vendors/Nintendo/DSI/dsautolog.c             |  83 ++++++
+ vendors/Nintendo/DSI/httpdate.c              | 280 +++++++++++++++++++
+ vendors/Nintendo/DSI/rc                      |  14 +-
+ vendors/Nintendo/DSI/session                 |   6 +-
+ vendors/Nintendo/DSI/wifi-ssh                |   4 +-
+ 12 files changed, 537 insertions(+), 8 deletions(-)
+ create mode 100644 vendors/Nintendo/DSI/dsautolog.c
+ create mode 100644 vendors/Nintendo/DSI/httpdate.c
+
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c b/linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c
+index 5f092037d..abf332601 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/sdmmc.c
+@@ -765,6 +765,107 @@ static int region_ok(u32 sector, u32 count)
+ 
+ extern void dsi_poweroff_diag(volatile unsigned int *diag);
+ 
++/*
++ * The RTC (date and time), for NDS_SD_CMD_RTC. The same serial protocol as arm7/time.c's rtcTransaction (the command byte goes most
++ * significant bit first, data least significant bit first), but with a busy loop instead of swiDelay: SD requests run in the ARM7's
++ * interrupt handler, where a BIOS call lost the context before (twlwifi.c's rtc_write2 does the same).
++ */
++#define RTC_CR8_REG	0x04000138
++#define RTC_CS0		(1 << 6)
++#define RTC_CS1		((1 << 6) | (1 << 2))
++#define RTC_SCK0	(1 << 5)
++#define RTC_SCK1	((1 << 5) | (1 << 1))
++#define RTC_SIOOUT	(1 << 4)
++
++static void rtc_wait(void)
++{
++	volatile u32 i;
++
++	for (i = 0; i < 50; i++)
++		;
++}
++
++static void rtc_io(u8 cmd, const u8 *out, int nout, u8 *in, int nin)
++{
++	int i, bit;
++
++	*(volatile u8 *)RTC_CR8_REG = RTC_CS0 | RTC_SCK1 | RTC_SIOOUT | 1;
++	rtc_wait();
++	*(volatile u8 *)RTC_CR8_REG = RTC_CS1 | RTC_SCK1 | RTC_SIOOUT | 1;
++	rtc_wait();
++	for (bit = 0; bit < 8; bit++) {			/* the command byte: bit 7 first */
++		*(volatile u8 *)RTC_CR8_REG = RTC_CS1 | RTC_SCK0 | RTC_SIOOUT | ((cmd >> 7) & 1);
++		rtc_wait();
++		*(volatile u8 *)RTC_CR8_REG = RTC_CS1 | RTC_SCK1 | RTC_SIOOUT | ((cmd >> 7) & 1);
++		rtc_wait();
++		cmd <<= 1;
++	}
++	for (i = 0; i < nout; i++)			/* data: bit 0 first */
++		for (bit = 0; bit < 8; bit++) {
++			*(volatile u8 *)RTC_CR8_REG = RTC_CS1 | RTC_SCK0 | RTC_SIOOUT | ((out[i] >> bit) & 1);
++			rtc_wait();
++			*(volatile u8 *)RTC_CR8_REG = RTC_CS1 | RTC_SCK1 | RTC_SIOOUT | ((out[i] >> bit) & 1);
++			rtc_wait();
++		}
++	for (i = 0; i < nin; i++) {
++		in[i] = 0;
++		for (bit = 0; bit < 8; bit++) {
++			*(volatile u8 *)RTC_CR8_REG = RTC_CS1 | RTC_SCK0;
++			rtc_wait();
++			*(volatile u8 *)RTC_CR8_REG = RTC_CS1 | RTC_SCK1;
++			rtc_wait();
++			if (*(volatile u8 *)RTC_CR8_REG & 1)
++				in[i] |= 1 << bit;
++		}
++	}
++	*(volatile u8 *)RTC_CR8_REG = RTC_CS0 | RTC_SCK1;
++	rtc_wait();
++}
++
++static u8 to_bcd(u32 v)
++{
++	return (u8)(((v / 10) << 4) | (v % 10));
++}
++
++/* count 1: set from b->data[0..6]; then read back status register 1 and the 7 date/time bytes into b->data[0..7] */
++static void rtc_request(struct nds_sd_block *b)
++{
++	u8 st, t[7];
++
++	if (b->count == 1) {
++		u32 h = b->data[4];
++
++		if (b->data[0] > 99 || b->data[1] < 1 || b->data[1] > 12 || b->data[2] < 1 || b->data[2] > 31 || b->data[3] > 6 ||
++		    h > 23 || b->data[5] > 59 || b->data[6] > 59) {
++			b->result = NDS_SD_ERR_PARAM;
++			return;
++		}
++		rtc_io(0x61, 0, 0, &st, 1);		/* status register 1: bit 1 = 24 hour mode */
++		t[0] = to_bcd(b->data[0]);
++		t[1] = to_bcd(b->data[1]);
++		t[2] = to_bcd(b->data[2]);
++		t[3] = b->data[3];
++		if (st & 2)				/* 24 h: 0..23, bit 6 = afternoon */
++			t[4] = to_bcd(h) | (h >= 12 ? 0x40 : 0);
++		else					/* 12 h: 0..11 and the PM bit */
++			t[4] = to_bcd(h % 12) | (h >= 12 ? 0x40 : 0);
++		t[5] = to_bcd(b->data[5]);
++		t[6] = to_bcd(b->data[6]);
++		rtc_io(0x64, t, 7, 0, 0);		/* write date and time */
++	}
++	rtc_io(0x61, 0, 0, &st, 1);
++	rtc_io(0x65, 0, 0, t, 7);			/* read date and time */
++	b->data[0] = st;
++	b->data[1] = t[0];
++	b->data[2] = t[1];
++	b->data[3] = t[2];
++	b->data[4] = t[3];
++	b->data[5] = t[4];
++	b->data[6] = t[5];
++	b->data[7] = t[6];
++	b->result = NDS_SD_OK;
++}
++
+ static void nds_sd_request_inner(struct nds_sd_block *b)
+ {
+ 	u32 res;
+@@ -869,6 +970,10 @@ static void nds_sd_request_inner(struct nds_sd_block *b)
+ 		b->result = NDS_SD_OK;
+ 		return;
+ 
++	case NDS_SD_CMD_RTC:
++		rtc_request(b);
++		return;
++
+ 	case NDS_SD_CMD_PM:
+ 		if (!dsitouch_active()) {			/* DS mode: no I2C power chip */
+ 			b->result = NDS_SD_ERR_PARAM;
+diff --git a/linux-2.6.x/arch/arm/mach-nds/volume.c b/linux-2.6.x/arch/arm/mach-nds/volume.c
+index a60a4fb0b..111b1bb8b 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/volume.c
++++ b/linux-2.6.x/arch/arm/mach-nds/volume.c
+@@ -87,12 +87,15 @@ static int mic_read_proc(char *page, char **start, off_t off, int count, int *eo
+ }
+ 
+ extern int dsisd_pm(unsigned int op, unsigned int val, unsigned int *out);
++extern int dsisd_rtc(const unsigned char *v, unsigned char *out);
+ extern int ndspad_gain;
+ 
+ /*
+  * /proc/dsisettings: battery, volume, backlight and trackpad speed.
+  *   read:  battery=N charger=0|1 volume=N backlight=N padgain=N    (battery 0..15, volume 0..31, backlight 1..5; -1 = unknown)
+  *   write: "backlight N" (1..5, never off) or "padgain N" (1..8)
++ *          or "rtc YYYY MM DD WD hh mm ss": the DSi's clock chip (local time, as the DSi's own menu shows it; WD = weekday 0..6, Sunday 0).
++ *          httpdate -w writes it after setting the clock from the network.
+  */
+ static int settings_read_proc(char *page, char **start, off_t off, int count, int *eof, void *data)
+ {
+@@ -115,7 +118,7 @@ static int settings_read_proc(char *page, char **start, off_t off, int count, in
+ 
+ static int settings_write_proc(struct file *file, const char __user *buffer, unsigned long count, void *data)
+ {
+-	char buf[32];
++	char buf[48];
+ 	unsigned int o[3];
+ 	unsigned long n;
+ 
+@@ -129,6 +132,21 @@ static int settings_write_proc(struct file *file, const char __user *buffer, uns
+ 		if (n < 1 || n > 5)
+ 			return -EINVAL;
+ 		dsisd_pm(1, n - 1, o);
++	} else if (!strncmp(buf, "rtc ", 4)) {
++		unsigned int y, mo, d, wd, h, mi, s;
++		unsigned char v[7];
++
++		if (sscanf(buf + 4, "%u %u %u %u %u %u %u", &y, &mo, &d, &wd, &h, &mi, &s) != 7 || y < 2000 || y > 2099)
++			return -EINVAL;
++		v[0] = y - 2000;
++		v[1] = mo;
++		v[2] = d;
++		v[3] = wd;
++		v[4] = h;
++		v[5] = mi;
++		v[6] = s;
++		if (dsisd_rtc(v, NULL) != 0)
++			return -EIO;
+ 	} else if (!strncmp(buf, "padgain ", 8)) {
+ 		n = simple_strtoul(buf + 8, NULL, 10);
+ 		if (n < 1 || n > 8)
+diff --git a/linux-2.6.x/drivers/block/dldi_c.c b/linux-2.6.x/drivers/block/dldi_c.c
+index c2226a3b3..106f62610 100644
+--- a/linux-2.6.x/drivers/block/dldi_c.c
++++ b/linux-2.6.x/drivers/block/dldi_c.c
+@@ -331,6 +331,23 @@ int dsisd_twlop_rx(unsigned int op, unsigned int addr, unsigned int arg, const u
+ 	return ret;
+ }
+ 
++/* The RTC: with v (7 numbers: year 0..99, month, day, weekday 0..6, hour 0..23, minute, second) set it; out[0..7] = status register 1
++ * and the chip's 7 date/time bytes (BCD) as read afterwards. 0 = ok. */
++int dsisd_rtc(const unsigned char *v, unsigned char *out)
++{
++	int ret, i;
++
++	down(&sd_mutex);
++	for (i = 0; i < 8; i++)
++		sd_block.data[i] = v && i < 7 ? v[i] : 0;
++	ret = sd_request_locked(NDS_SD_CMD_RTC, 0, v ? 1 : 0);
++	if (ret == NDS_SD_OK && out)
++		for (i = 0; i < 8; i++)
++			out[i] = sd_block.data[i];
++	up(&sd_mutex);
++	return ret;
++}
++
+ /* Power chip status (and the backlight): op 1 sets the backlight register to val (0..4). out[0] battery register, out[1] volume register,
+  * out[2] backlight register (0xffffffff = unreadable). 0 = ok. */
+ int dsisd_pm(unsigned int op, unsigned int val, unsigned int *out)
+diff --git a/linux-2.6.x/include/asm-arm/arch-nds/dsisd.h b/linux-2.6.x/include/asm-arm/arch-nds/dsisd.h
+index 72e3ce16c..734a51ca4 100644
+--- a/linux-2.6.x/include/asm-arm/arch-nds/dsisd.h
++++ b/linux-2.6.x/include/asm-arm/arch-nds/dsisd.h
+@@ -19,6 +19,7 @@
+ #define NDS_SD_CMD_INIT		0
+ #define NDS_SD_CMD_READ		1
+ #define NDS_SD_CMD_WRITE	2
++#define NDS_SD_CMD_RTC		14	/* not SD: the RTC's date and time. count 1 = set it from data[0..6] (year 0..99, month, day, weekday 0..6, hour 0..23, minute, second; plain numbers, the ARM7 makes BCD and follows the chip's 12/24 h mode); answer data[0] status register 1, data[1..7] the chip's date and time bytes as read (BCD) */
+ #define NDS_SD_CMD_TWLWIFI	13	/* not SD: bring up the DSi's Atheros Wi-Fi chip and report (arm7/twlwifi.c): touch[], diag[], info[] */
+ #define NDS_SD_CMD_WIFIPROBE	12	/* not SD: look at the Wi-Fi hardware once (arm7/wifiprobe.c): touch[0..7], diag[0..7], info[0..2] */
+ #define NDS_SD_CMD_PM		11	/* not SD: power chip status and backlight. count 1 = also set the backlight register to sector (0..4); answer: info[0] battery reg 0x20, info[1] volume reg 0x40, info[2] backlight reg 0x41 (0xffffffff if unreadable) */
+diff --git a/user/microwin/src/demos/nanox/dsnet.c b/user/microwin/src/demos/nanox/dsnet.c
+index 5998458ba..e1d63ebf7 100644
+--- a/user/microwin/src/demos/nanox/dsnet.c
++++ b/user/microwin/src/demos/nanox/dsnet.c
+@@ -359,11 +359,12 @@ static void cap_log(const char *path)
+ 	}
+ }
+ 
+-/* the clock from the network, once, in the background (the DSi's own clock said 2016: tar warned about "time stamps in the future");
+- * ntpclient is DSLinux's, -c 1: one answer and exit; the time zone is /etc/config/TZ (scripts/set-timezone.sh) */
++/* the clock from the network, once, in the background (the DSi's own clock said 2016: tar warned about "time stamps in the future"):
++ * httpdate finds the time zone, sets the clock from a web server's Date header and writes the local time into the DSi's clock chip.
++ * (ntpclient waited forever: NTP is blocked on guest networks.) */
+ static void set_clock(void)
+ {
+-	run("ntpclient -s -c 1 -h pool.ntp.org > /tmp/ntp.log 2>&1 &");
++	run("httpdate -z -s -w > /tmp/clock.log 2>&1 &");
+ }
+ 
+ /* what the window did, for the log (Save log puts /tmp/dsnet.log on the card) */
+diff --git a/user/microwin/src/demos/nanox/nxterm.c b/user/microwin/src/demos/nanox/nxterm.c
+index 772127ab4..e337c6bc1 100644
+--- a/user/microwin/src/demos/nanox/nxterm.c
++++ b/user/microwin/src/demos/nanox/nxterm.c
+@@ -538,6 +538,7 @@ static int start_child(char **argv)
+ 
+ 		setenv("TERM", "linux", 1);	/* nano and the other curses programs have only "linux" and "xterm" built in (no terminfo
+ 						 * files on the DSi); linux matches these keys and sequences (vt100 was unknown to them) */
++		setenv("TERMINFO", "/usr/share/terminfo", 1);	/* the DSi's ncurses has no default directory (TERMINFO "none") */
+ 		sprintf(t, "%d", cols);
+ 		setenv("COLUMNS", t, 1);
+ 		sprintf(t, "%d", rows);
+diff --git a/vendors/Nintendo/DSI/desktop b/vendors/Nintendo/DSI/desktop
+index 9573b1fdf..e993554d2 100644
+--- a/vendors/Nintendo/DSI/desktop
++++ b/vendors/Nintendo/DSI/desktop
+@@ -36,3 +36,10 @@ grep Mem /proc/meminfo >> $LOG 2>&1
+ /boot/nano-X -p -e >> $LOG 2>&1
+ echo "desktop: nano-X ended" >> $LOG
+ fbset -fb /dev/fb0 -depth 8 -n >> $LOG 2>&1
++# started by /boot/session in place of the login shell: the text console gets a shell again
++if [ -n "$DSDESK_SESSION" ]
++then
++	DSDESK_SESSION=
++	export DSDESK_SESSION
++	exec /bin/sh
++fi
+diff --git a/vendors/Nintendo/DSI/dsautolog.c b/vendors/Nintendo/DSI/dsautolog.c
+new file mode 100644
+index 000000000..4a98fdee3
+--- /dev/null
++++ b/vendors/Nintendo/DSI/dsautolog.c
+@@ -0,0 +1,83 @@
++/*
++ * dsautolog - keeps sd:/linux/DSILOG.TXT up to date: runs "/boot/savelog quiet" when something changed, at most every 10 seconds.
++ * Replaces the /boot/autolog shell loop, which cost about 650 KB all the time (a shell plus the "sleep" it ran, memreport w99b) and
++ * started savelog every 10 s: two more shells and some twenty programs each time, several copied from the card into RAM, even when
++ * nothing had changed. Here a change means: the kernel's messages (a checksum) or the size or time of one of the logs savelog
++ * collects; otherwise it saves every 5 minutes. savelog still skips while a recording runs (/tmp/rec.lock).
++ * Started by /boot/rc in the background; prints nothing (text from a background program would be drawn over the desktop).
++ * Built by scripts/build-tools.sh.
++ */
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <unistd.h>
++#include <fcntl.h>
++#include <errno.h>
++#include <time.h>
++#include <sys/stat.h>
++#include <sys/types.h>
++#include <sys/wait.h>
++#include <sys/klog.h>
++
++static const char *logs[] = {
++	"/tmp/desktop.log", "/tmp/dsnet.log", "/tmp/dsnet-dhcp.log", "/tmp/wifi-auto.log", "/tmp/wifi-ssh.log", "/tmp/clock.log",
++	"/tmp/rc.common.log", "/home/wlan0-test.log", NULL
++};
++
++static char kbuf[16384];
++
++/* a checksum over the kernel's messages and the logs' sizes and times */
++static unsigned long signature(void)
++{
++	unsigned long h = 2166136261UL;
++	struct stat st;
++	int n, i;
++
++	n = klogctl(3, kbuf, sizeof(kbuf));		/* read the whole kernel log buffer, without clearing it */
++	for (i = 0; i < n; i++)
++		h = (h ^ (unsigned char)kbuf[i]) * 16777619UL;
++	for (i = 0; logs[i]; i++)
++		if (stat(logs[i], &st) == 0)
++			h = (h ^ (unsigned long)st.st_size ^ ((unsigned long)st.st_mtime << 7)) * 16777619UL;
++	return h;
++}
++
++static void save(void)
++{
++	pid_t pid = vfork();
++	int status;
++
++	if (pid == 0) {
++		execl("/boot/savelog", "savelog", "quiet", (char *)0);
++		_exit(127);
++	}
++	if (pid > 0)
++		while (waitpid(pid, &status, 0) < 0 && errno == EINTR)
++			;
++}
++
++int main(void)
++{
++	unsigned long last = 0, sig;
++	time_t saved = time(NULL);
++	int fd = open("/dev/null", O_RDWR);
++
++	if (fd >= 0) {				/* nothing may reach the console */
++		dup2(fd, 0);
++		dup2(fd, 1);
++		dup2(fd, 2);
++		if (fd > 2)
++			close(fd);
++	}
++	last = signature();
++	for (;;) {
++		sleep(10);
++		sig = signature();
++		if (sig != last || time(NULL) - saved >= 300) {
++			save();
++			last = signature();	/* what savelog itself changed does not count */
++			saved = time(NULL);
++		}
++	}
++	return 0;
++}
+diff --git a/vendors/Nintendo/DSI/httpdate.c b/vendors/Nintendo/DSI/httpdate.c
+new file mode 100644
+index 000000000..ad6cc4e90
+--- /dev/null
++++ b/vendors/Nintendo/DSI/httpdate.c
+@@ -0,0 +1,280 @@
++/*
++ * httpdate - the date and time from the network, the time zone, and the DSi's own clock chip.
++ * NTP (ntpclient, UDP port 123) is blocked on guest networks such as GuestNet: ntpclient waited forever and the clock stayed at the DSi's
++ * December 2016. A web server's "Date:" header (HTTP, port 80) works wherever wget does; it is UTC, accurate to about a second.
++ *   httpdate [-z] [-s] [-w] [host ...]   the Wi-Fi window runs "httpdate -z -s -w" after each connection
++ *     -z  find the time zone from where the network is (worldtimeapi.org, then ip-api.com; both free, plain HTTP, and they see the
++ *         DSi's public address) and write it to /etc/config/TZ. Skipped when /etc/config/TZ.manual exists (scripts/set-timezone.sh).
++ *     -s  set the clock (root); without -s: only print
++ *     -w  write the local time into the DSi's clock chip (/proc/dsisettings "rtc ..."): the DSi's own menu shows it, and the next boot
++ *         starts with the right time even before Wi-Fi
++ *     hosts for the Date header: default www.google.com, example.com
++ *   httpdate -L   at boot (/boot/rc): the clock chip holds local time (the DS/DSi convention), the kernel took it as UTC: convert
++ * The time zone is /etc/config/TZ (POSIX form, uClibc reads it). Built by scripts/build-tools.sh.
++ */
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <unistd.h>
++#include <signal.h>
++#include <time.h>
++#include <sys/time.h>
++#include <sys/socket.h>
++#include <netinet/in.h>
++#include <netdb.h>
++#include <sys/stat.h>
++
++#define TZFILE	"/etc/config/TZ"
++
++/* IANA zone -> POSIX TZ for uClibc (which has no zone database). Unknown zones keep the TZ file as it is. */
++static const char *zones[][2] = {
++	{ "America/New_York", "EST5EDT,M3.2.0,M11.1.0" }, { "America/Detroit", "EST5EDT,M3.2.0,M11.1.0" },
++	{ "America/Toronto", "EST5EDT,M3.2.0,M11.1.0" }, { "America/Indiana/Indianapolis", "EST5EDT,M3.2.0,M11.1.0" },
++	{ "America/Kentucky/Louisville", "EST5EDT,M3.2.0,M11.1.0" },
++	{ "America/Chicago", "CST6CDT,M3.2.0,M11.1.0" }, { "America/Winnipeg", "CST6CDT,M3.2.0,M11.1.0" },
++	{ "America/Indiana/Knox", "CST6CDT,M3.2.0,M11.1.0" }, { "America/Menominee", "CST6CDT,M3.2.0,M11.1.0" },
++	{ "America/North_Dakota/Center", "CST6CDT,M3.2.0,M11.1.0" }, { "America/Mexico_City", "CST6" },
++	{ "America/Denver", "MST7MDT,M3.2.0,M11.1.0" }, { "America/Boise", "MST7MDT,M3.2.0,M11.1.0" },
++	{ "America/Edmonton", "MST7MDT,M3.2.0,M11.1.0" }, { "America/Phoenix", "MST7" },
++	{ "America/Los_Angeles", "PST8PDT,M3.2.0,M11.1.0" }, { "America/Vancouver", "PST8PDT,M3.2.0,M11.1.0" },
++	{ "America/Tijuana", "PST8PDT,M3.2.0,M11.1.0" }, { "America/Anchorage", "AKST9AKDT,M3.2.0,M11.1.0" },
++	{ "Pacific/Honolulu", "HST10" }, { "America/Halifax", "AST4ADT,M3.2.0,M11.1.0" }, { "America/Puerto_Rico", "AST4" },
++	{ "Europe/London", "GMT0BST,M3.5.0/1,M10.5.0" }, { "Europe/Dublin", "GMT0IST,M3.5.0/1,M10.5.0" },
++	{ "Europe/Lisbon", "WET0WEST,M3.5.0/1,M10.5.0" }, { "Europe/Berlin", "CET-1CEST,M3.5.0,M10.5.0/3" },
++	{ "Europe/Paris", "CET-1CEST,M3.5.0,M10.5.0/3" }, { "Europe/Madrid", "CET-1CEST,M3.5.0,M10.5.0/3" },
++	{ "Europe/Rome", "CET-1CEST,M3.5.0,M10.5.0/3" }, { "Europe/Amsterdam", "CET-1CEST,M3.5.0,M10.5.0/3" },
++	{ "Europe/Brussels", "CET-1CEST,M3.5.0,M10.5.0/3" }, { "Europe/Vienna", "CET-1CEST,M3.5.0,M10.5.0/3" },
++	{ "Europe/Zurich", "CET-1CEST,M3.5.0,M10.5.0/3" }, { "Europe/Stockholm", "CET-1CEST,M3.5.0,M10.5.0/3" },
++	{ "Europe/Oslo", "CET-1CEST,M3.5.0,M10.5.0/3" }, { "Europe/Copenhagen", "CET-1CEST,M3.5.0,M10.5.0/3" },
++	{ "Europe/Warsaw", "CET-1CEST,M3.5.0,M10.5.0/3" }, { "Europe/Prague", "CET-1CEST,M3.5.0,M10.5.0/3" },
++	{ "Europe/Athens", "EET-2EEST,M3.5.0/3,M10.5.0/4" }, { "Europe/Helsinki", "EET-2EEST,M3.5.0/3,M10.5.0/4" },
++	{ "Europe/Kyiv", "EET-2EEST,M3.5.0/3,M10.5.0/4" }, { "Europe/Kiev", "EET-2EEST,M3.5.0/3,M10.5.0/4" },
++	{ "Europe/Bucharest", "EET-2EEST,M3.5.0/3,M10.5.0/4" }, { "Asia/Tokyo", "JST-9" }, { "Asia/Seoul", "KST-9" },
++	{ "Asia/Shanghai", "CST-8" }, { "Asia/Hong_Kong", "HKT-8" }, { "Asia/Taipei", "CST-8" }, { "Asia/Singapore", "SGT-8" },
++	{ "Asia/Kolkata", "IST-5:30" }, { "Asia/Dubai", "GST-4" }, { "Australia/Sydney", "AEST-10AEDT,M10.1.0,M4.1.0/3" },
++	{ "Australia/Melbourne", "AEST-10AEDT,M10.1.0,M4.1.0/3" }, { "Australia/Brisbane", "AEST-10" },
++	{ "Australia/Perth", "AWST-8" }, { "Pacific/Auckland", "NZST-12NZDT,M9.5.0,M4.1.0/3" }, { "Etc/UTC", "UTC0" }, { "UTC", "UTC0" },
++	{ 0, 0 }
++};
++
++static void timeout(int sig)
++{
++	(void)sig;
++	fprintf(stderr, "httpdate: no answer within 15 s\n");
++	exit(1);
++}
++
++/* days since 1970-01-01 of a civil date (proleptic Gregorian) */
++static long days_from_civil(int y, int m, int d)
++{
++	long era, yoe, doy, doe;
++
++	y -= m <= 2;
++	era = (y >= 0 ? y : y - 399) / 400;
++	yoe = y - era * 400;
++	doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
++	doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
++	return era * 146097 + doe - 719468;
++}
++
++/* "Wed, 18 Nov 2026 15:26:00 GMT" -> seconds since 1970 (UTC), -1 if not that form */
++static long parse_date(const char *s)
++{
++	static const char *mon = "JanFebMarAprMayJunJulAugSepOctNovDec";
++	char wd[8], mn[8];
++	int d, y, h, mi, se;
++	const char *p;
++
++	if (sscanf(s, "%7[^,], %d %7s %d %d:%d:%d", wd, &d, mn, &y, &h, &mi, &se) != 7)
++		return -1;
++	p = strstr(mon, mn);
++	if (!p || strlen(mn) != 3 || (p - mon) % 3 || y < 2020)
++		return -1;
++	return days_from_civil(y, (p - mon) / 3 + 1, d) * 86400L + h * 3600L + mi * 60L + se;
++}
++
++/* METHOD http://host/path into buf (headers and body); bytes read, -1 on failure */
++static int http(const char *method, const char *host, const char *path, char *buf, int size)
++{
++	struct hostent *he = gethostbyname(host);
++	struct sockaddr_in sa;
++	char req[200];
++	int fd, n, len = 0;
++
++	if (!he) {
++		fprintf(stderr, "httpdate: %s: name not found\n", host);
++		return -1;
++	}
++	if ((fd = socket(AF_INET, SOCK_STREAM, 0)) < 0)
++		return -1;
++	memset(&sa, 0, sizeof(sa));
++	sa.sin_family = AF_INET;
++	sa.sin_port = htons(80);
++	memcpy(&sa.sin_addr, he->h_addr, sizeof(sa.sin_addr));
++	if (connect(fd, (struct sockaddr *)&sa, sizeof(sa)) < 0) {
++		fprintf(stderr, "httpdate: %s: no connection\n", host);
++		close(fd);
++		return -1;
++	}
++	snprintf(req, sizeof(req), "%s %s HTTP/1.0\r\nHost: %s\r\nUser-Agent: httpdate (DSLinuxDSi)\r\n\r\n", method, path, host);
++	write(fd, req, strlen(req));
++	while (len < size - 1 && (n = read(fd, buf + len, size - 1 - len)) > 0)
++		len += n;
++	close(fd);
++	buf[len] = 0;
++	return len;
++}
++
++static long ask(const char *host)
++{
++	char buf[1024];
++	char *p;
++
++	if (http("HEAD", host, "/", buf, sizeof(buf)) <= 0)
++		return -1;
++	for (p = buf; p && *p; p = strchr(p, '\n')) {
++		if (*p == '\n')
++			p++;
++		if (!strncasecmp(p, "Date:", 5))
++			return parse_date(p + 5 + strspn(p + 5, " "));
++	}
++	fprintf(stderr, "httpdate: %s: no Date header\n", host);
++	return -1;
++}
++
++/* the IANA zone of where the network is, "" if neither service answers */
++static void find_zone(char *zone, int size)
++{
++	char buf[2048], *p;
++
++	zone[0] = 0;
++	/* worldtimeapi.org: "timezone: America/Chicago" in a text body */
++	if (http("GET", "worldtimeapi.org", "/api/ip.txt", buf, sizeof(buf)) > 0 && (p = strstr(buf, "\ntimezone: "))) {
++		sscanf(p + 11, "%63s", zone);
++		return;
++	}
++	/* ip-api.com: the zone alone as the body */
++	if (http("GET", "ip-api.com", "/line/?fields=timezone", buf, sizeof(buf)) > 0 && (p = strstr(buf, "\r\n\r\n")))
++		sscanf(p + 4, "%63s", zone);
++	(void)size;
++}
++
++/* -z: the zone into /etc/config/TZ (and this process's TZ); 0 if the zone is known */
++static int set_zone(void)
++{
++	char zone[64], cur[64] = "";
++	const char *tz = NULL;
++	FILE *f;
++	int i;
++
++	if (access(TZFILE ".manual", F_OK) == 0)
++		return 0;			/* chosen by hand (scripts/set-timezone.sh) */
++	find_zone(zone, sizeof(zone));
++	for (i = 0; zone[0] && zones[i][0]; i++)
++		if (!strcmp(zones[i][0], zone))
++			tz = zones[i][1];
++	if (!tz) {
++		fprintf(stderr, "httpdate: time zone %s not known here: %s unchanged\n", zone[0] ? zone : "(no answer)", TZFILE);
++		return -1;
++	}
++	if ((f = fopen(TZFILE, "r"))) {
++		if (fgets(cur, sizeof(cur), f))
++			cur[strcspn(cur, "\n")] = 0;
++		fclose(f);
++	}
++	if (strcmp(cur, tz)) {
++		mkdir("/etc/config", 0755);
++		if ((f = fopen(TZFILE, "w"))) {
++			fprintf(f, "%s\n", tz);
++			fclose(f);
++		}
++	}
++	setenv("TZ", tz, 1);		/* this process: uClibc reads the file only once */
++	printf("time zone: %s (%s)\n", zone, tz);
++	return 0;
++}
++
++/* -w: the local time into the DSi's clock chip */
++static int write_rtc(time_t t)
++{
++	struct tm *lt = localtime(&t);
++	FILE *f = fopen("/proc/dsisettings", "w");
++	int bad;
++
++	if (!f)
++		return -1;
++	bad = fprintf(f, "rtc %d %d %d %d %d %d %d\n", lt->tm_year + 1900, lt->tm_mon + 1, lt->tm_mday, lt->tm_wday, lt->tm_hour,
++		      lt->tm_min, lt->tm_sec) < 0;
++	bad |= fclose(f) != 0;
++	if (bad)
++		fprintf(stderr, "httpdate: could not write the DSi's clock chip\n");
++	return bad ? -1 : 0;
++}
++
++/* -L: the kernel took the clock chip's local time as UTC: shift by the time zone's offset (needs /etc/config/TZ) */
++static int rtc_local_to_utc(void)
++{
++	time_t t = time(NULL), u;
++	struct tm g = *gmtime(&t);
++	struct timeval tv;
++
++	if (access(TZFILE, R_OK) != 0)
++		return 0;			/* no time zone yet: leave it */
++	g.tm_isdst = -1;
++	u = mktime(&g);			/* the same wall clock, read as local time */
++	if (u == (time_t)-1 || u == t)
++		return 0;
++	tv.tv_sec = u;
++	tv.tv_usec = 0;
++	return settimeofday(&tv, NULL);
++}
++
++int main(int argc, char **argv)
++{
++	static const char *defaults[] = { "www.google.com", "example.com", NULL };
++	const char *hosts[8];
++	int set = 0, zone = 0, wrtc = 0, nh = 0, i;
++	long t = -1;
++
++	for (i = 1; i < argc; i++) {
++		if (!strcmp(argv[i], "-L"))
++			return rtc_local_to_utc() ? 1 : 0;
++		else if (!strcmp(argv[i], "-s"))
++			set = 1;
++		else if (!strcmp(argv[i], "-z"))
++			zone = 1;
++		else if (!strcmp(argv[i], "-w"))
++			wrtc = 1;
++		else if (nh < 7)
++			hosts[nh++] = argv[i];
++	}
++	if (!nh)
++		for (i = 0; defaults[i]; i++)
++			hosts[nh++] = defaults[i];
++	signal(SIGALRM, timeout);
++	alarm(zone ? 30 : 15);
++	if (zone)
++		set_zone();
++	for (i = 0; i < nh && t < 0; i++)
++		t = ask(hosts[i]);
++	if (t < 0)
++		return 1;
++	if (set) {
++		struct timeval tv;
++
++		tv.tv_sec = t;
++		tv.tv_usec = 0;
++		if (settimeofday(&tv, NULL) != 0) {
++			perror("httpdate: settimeofday");
++			return 1;
++		}
++	}
++	if (set && wrtc)
++		write_rtc(t);
++	{
++		time_t tt = t;
++
++		printf("%s%s", set ? "clock set: " : "", ctime(&tt));
++	}
++	return 0;
++}
+diff --git a/vendors/Nintendo/DSI/rc b/vendors/Nintendo/DSI/rc
+index 772abe910..4bbf0614f 100644
+--- a/vendors/Nintendo/DSI/rc
++++ b/vendors/Nintendo/DSI/rc
+@@ -27,6 +27,12 @@ then
+ fi
+ mount -t ramfs none /var/run
+ mount -t sysfs none /sys
++# the DSi's clock chip holds local time (as the DSi's menu shows it); the kernel took it as UTC: convert with /etc/config/TZ
++# (httpdate -w writes the chip after each Wi-Fi connection, so this is right even before Wi-Fi)
++if [ -x /usr/bin/httpdate ]
++then
++	/usr/bin/httpdate -L > /dev/null 2>&1
++fi
+ 
+ # Create r/w /dev entries so dropbear will work
+ mknod /var/run/ttyp0 c 3 0
+@@ -60,9 +66,13 @@ then
+ fi
+ # the first login shell (tty1) starts the desktop (/boot/session, through /etc/profile)
+ echo boot > /tmp/.boot-session
+-# while testing: keep saving the log every 10 s (see /boot/autolog)
++# keep the card log up to date: dsautolog (a small program on the card: saves when something changed) or, with an older image, the
++# /boot/autolog shell loop (about 650 KB of shells all the time)
+ # (msh runs "a && b &" in the foreground, so start it with a plain command in an if)
+-if [ -x /boot/autolog ]
++if [ -x /usr/bin/dsautolog ]
++then
++	/usr/bin/dsautolog &
++elif [ -x /boot/autolog ]
+ then
+ 	/boot/autolog &
+ fi
+diff --git a/vendors/Nintendo/DSI/session b/vendors/Nintendo/DSI/session
+index d6af6da1c..3795c4110 100644
+--- a/vendors/Nintendo/DSI/session
++++ b/vendors/Nintendo/DSI/session
+@@ -18,6 +18,10 @@ then
+ 	else
+ 		echo started > /home/.desktop-starting
+ 		sync
+-		/boot/desktop
++		# the desktop takes this login shell's place (one shell less waiting behind it: about 400 KB); when the desktop ends,
++		# /boot/desktop starts a shell for the text console again
++		DSDESK_SESSION=1
++		export DSDESK_SESSION
++		exec /boot/desktop
+ 	fi
+ fi
+diff --git a/vendors/Nintendo/DSI/wifi-ssh b/vendors/Nintendo/DSI/wifi-ssh
+index 82ce20901..5d2f0a230 100755
+--- a/vendors/Nintendo/DSI/wifi-ssh
++++ b/vendors/Nintendo/DSI/wifi-ssh
+@@ -4,6 +4,7 @@
+ # -i"), which is why up to w98w the server never answered (connection refused). Makes the host key the first time (about a minute).
+ # With /home/.ssh/authorized_keys present passwords are switched off (-s); without it the root password logs in, so use that only on a
+ # network you trust. Runs until the DSi is switched off; "kill `cat /var/run/inetd.pid`" stops it. Output also in /tmp/wifi-ssh.log.
++# The window closes on Enter (it used to keep a shell open: about 400 KB).
+ L=/tmp/wifi-ssh.log
+ echo "SSH server" > $L
+ if [ ! -f /etc/dropbear_rsa_host_key ]
+@@ -43,4 +44,5 @@ do
+ 	[ -n "$A" ] && echo "$A" >> $L
+ done
+ echo "From the PC: ssh -o HostName=ADDRESS dsi"
+-exec /bin/sh
++echo "(the server keeps running) Enter: close this window"
++read ANSWER
+-- 
+2.56.1
+
