@@ -13,6 +13,9 @@ How to use DSLinux on the DSi XL: the buttons, the desktop, every program, Wi-Fi
   the message can be read.
 - **Shut down** (Start menu) powers the DSi off cleanly. Prefer it to the power button: the system lives in an ext2 image without a journal.
 - **Exit desktop** returns to the text console; `/boot/desktop` starts it again.
+- **Screen off:** after 2 minutes without a touch or button the screens go dark, and at once when the lid closes; a touch or button
+  (with the lid open) brings them back, without clicking or typing anything. Programs keep running. Settings > Screen off sets the time
+  (or never). At a critical battery without a charger the DSi shuts down cleanly by itself.
 
 ## Buttons and touch
 

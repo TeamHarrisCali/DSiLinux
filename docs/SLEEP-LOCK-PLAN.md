@@ -1,20 +1,14 @@
 # Plan: screen sleep, locking, and sleep when the lid closes
 
-Status (2026-11-18): **steps 2 and 3 built; w99e froze, w99f fixes it**, not yet tried on the console.
-- **w99e:** `echo "screen off" > /proc/dsisettings` left the screens on and froze the console and SSH. The ARM7's backlight command
-  used the old power-chip helpers, which wait for the SPI bus with a BIOS delay and no limit: inside the ARM7's interrupt handler
-  that hangs it, and with it the SD card, Wi-Fi and touch. The same helpers froze `poweroff` long ago (STAGE3, the y build), fixed
-  then with a bounded routine (`pm_xfer`), with which power-off works in DSi mode. The image was not damaged.
-- **w99f:** all three power commands (backlight on/off, brightness, power off) use `pm_xfer`; a register read with the power-off bit
-  set counts as a bad read and nothing is written. The **2-minute timer is off by default** until `screen off` is confirmed.
-- What it does once it works: the backlights go off after the set time without a touch or button (`echo "sleep 120" >
-  /proc/dsisettings`, `sleep 0` never) and at once when the lid closes; a touch or button brings them back (the lid must be open),
-  and that first touch or press does nothing else; programs keep running; SSH typing does not keep the screen on; `screen off` /
-  `screen on` by hand; `cat /proc/dsisettings` shows `sleep= screen= lid=`.
-Backlight bits: **confirmed in the DSi's own System Menu code** (its DSi-mode ARM7 switches the backlights by setting and clearing
-power-chip register 0 bits 0x04 / 0x08 / 0x0C over SPI, with the same bus values as pm_xfer; DSI-INTERNALS.md), so w99f does what
-the DSi does. Still unknown: whether the ARM7's hinge bit reports the lid in DSi mode. Not yet: "Screen off after" in Settings, switching the
-LCDs off too, the lock screen (step 4, questions 2-3), low battery shut down (5), deep sleep (6).
+Status (2026-11-18): **steps 2 and 3 work on the DSi (w99f)**: `screen off` / `screen on`, the idle timer and the lid (the screen
+goes off when it closes and comes back when it opens; `cat /proc/dsisettings` shows `lid=closed`). w99e had frozen the ARM7 (an old
+power-chip helper with an unbounded BIOS delay; w99f uses the bounded `pm_xfer`, and the DSi's own System Menu code switches the
+backlights the same way, power-chip register 0 bits 0x04 / 0x08).
+**w99g** (not yet on the console): Settings has a **"Screen off"** row (never, 30 s, 1, 2, 5, 10, 30 min; saved, applied at every
+desktop start; 2 minutes by default), and **step 5**: at a critical battery (the power micro's level 1 or 0) without a charger, on two
+checks 10 s apart, `dsautolog` runs `/boot/shutdown`.
+Not yet: switching the LCDs off too (more saving), a warning before the battery shut down, the lock screen (step 4, waiting on
+questions 2-3), deep sleep (step 6).
 
 ## Today (checked in the source)
 

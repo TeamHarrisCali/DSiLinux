@@ -5,8 +5,9 @@ lists them, where each one stopped, and **every question still waiting for an an
 
 ## Where things stand
 
-- **On the card now: w99f** (2026-11-18): screen sleep and the lid (sleep plan steps 2-3). w99e's `screen off` froze the ARM7
-  (an old power-chip helper; fixed in w99f, see the sleep plan); the 2-minute timer is off until `screen off` works. Everything in the
+- **On the card now: w99g** (2026-11-18). **Screen sleep works on the DSi** (w99f): `screen off`/`on`, the 2-minute idle timer
+  and the lid. w99g adds the "Screen off" choice in Settings (2 min default) and a clean shutdown on a critical battery, not yet
+  run on the DSi. Everything in the
   TODO list below is **verified on the DSi** as of w99d: tar `-z`, the memory reserve and memreport, the clock and time zone (and
   the DSi's clock chip keeps the time across a restart), about 1.5 MB less memory in use, **nano over SSH**.
 - **w98z** (2026-11-17) brought:
@@ -115,7 +116,7 @@ memreport: programs 2.9 MB, 7.4 MB free, largest free block 4 MB.
 | A current BusyBox with the hush shell | [BUSYBOX-HUSH-PLAN.md](BUSYBOX-HUSH-PLAN.md) | Step 0: download BusyBox 1.36.1 | **Your OK for the download**, questions B |
 | File management, tidy layout, leaner system | [FILES-CLEANUP-PLAN.md](FILES-CLEANUP-PLAN.md) | Step 1: the Files program with Delete / Recycle Bin | Questions C |
 | Touch screen revamp (input page + dashboard) | [TOUCHSCREEN-PLAN.md](TOUCHSCREEN-PLAN.md) | Step 0: your feedback, then mock-ups | Questions D |
-| Screen sleep, locking, lid sleep | [SLEEP-LOCK-PLAN.md](SLEEP-LOCK-PLAN.md) | **Started:** steps 2-3 in w99f (w99e froze); test `screen off`, then the idle timer, the lid, then the lock (step 4) | Questions E (2-4) |
+| Screen sleep, locking, lid sleep | [SLEEP-LOCK-PLAN.md](SLEEP-LOCK-PLAN.md) | **Steps 2-3 verified** (screen off when idle and when the lid closes); Settings choice and step 5 (critical battery) in w99g; next the lock (step 4) | Questions E2 (PIN/password, when to lock), E3, E4 |
 | The DSi's Wi-Fi chip: faster, quicker to connect, WPA2 | (this page, below) | Speed: the 4-bit bus and block transfers | Questions F |
 | Later, bigger: a package manager (`dspkg`) | (no file yet) | After BusyBox: `wget` with HTTPS makes it possible | Your choice |
 | Later, much bigger: new kernel and modern compiler | (no file yet) | Needed for anything that a 2005 compiler cannot build | Months of work; your choice |

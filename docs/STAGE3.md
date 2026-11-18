@@ -1116,3 +1116,11 @@ modcrypted), as the user asked: its power-management thread switches the backlig
 "read register 0, OR / AND-NOT bits, write" called with 0x04, 0x08, 0x0C; 0x01 the amplifier, 0x40 power off; 0x0C set at start), with
 SPICNT 0x8802 / 0x8002 as pm_xfer. Its I2C (BPTWL) writes go through a message layer (registers 0x63, 0x70). So w99f's backlight path
 matches the DSi's own. The disassembly was done in a scratch folder and deleted; only these findings are kept.
+
+### Screen sleep verified (w99f); w99g
+
+w99f (user): `echo "screen off" > /proc/dsisettings`: screens dark; `screen on`: back. `echo "sleep 120"`, then /proc/dsisettings read
+`sleep=120 screen=on lid=open`, later `screen=off lid=closed`: the idle timer and the lid (the ARM7's hinge bit works in DSi mode).
+w99g, patch 0137: 120 s default again; Settings "Screen off" row (screenoff= in settings.conf, applied by `dssettings apply`; info block
+two lines so the window fits; testbed picture checked); dsautolog shuts down (/boot/shutdown) at battery <= 1 without charger on two
+checks 10 s apart. On the card, image clean.
