@@ -1,0 +1,103 @@
+From f406dd9f1d190012cf80b74e8c4afd1d654f3dbf Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 12:52:04 -0600
+Subject: [PATCH] FIFO: the ARM9 reads the ARM7's messages while waiting to
+ send (deadlock)
+
+Sound test froze the DSi while the DSi Wi-Fi chip was connecting, and
+worked once it was connected (user, w99g/w99h). The ARM7 runs SD and
+Wi-Fi requests inside its FIFO handler; while connecting they take up
+to about a second, so it does not read the queue from the ARM9 (16
+entries). The sound driver sends its setup burst from ALSA's trigger,
+with interrupts off; nds_fifo_send() spun until there was room and
+read nothing meanwhile, so the ARM7's queue to the ARM9 filled, the
+ARM7 spun in its own send, and the two waited for each other forever.
+fifo.c's receive loop is now nds_fifo_drain() (the interrupt calls
+it), and nds_fifo_send() calls it, interrupts off, while the queue is
+full; a guard keeps a callback that sends from draining again.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ linux-2.6.x/arch/arm/mach-nds/fifo.c        | 22 +++++++++++++++++++--
+ linux-2.6.x/include/asm-arm/arch-nds/fifo.h | 13 +++++++++++-
+ 2 files changed, 32 insertions(+), 3 deletions(-)
+
+diff --git a/linux-2.6.x/arch/arm/mach-nds/fifo.c b/linux-2.6.x/arch/arm/mach-nds/fifo.c
+index 9bfa34195..64739c58a 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/fifo.c
++++ b/linux-2.6.x/arch/arm/mach-nds/fifo.c
+@@ -25,14 +25,25 @@
+ static LIST_HEAD(cblist);
+ static DECLARE_MUTEX(cblist_mtx);
+ 
+-static irqreturn_t ndsfifo_interrupt(int irq, void *dev_id,
+-				     struct pt_regs *regs)
++/*
++ * Everything waiting from the ARM7, each message to its callback. Called by the FIFO interrupt, and by nds_fifo_send() while the queue to
++ * the ARM7 is full: the ARM7 may itself be stuck sending to us (its queue to us full), and if we only waited for space, both processors
++ * would wait for each other forever. That froze the DSi when Sound test started while the DSi Wi-Fi chip was connecting (2026-11-18): the
++ * ARM7 was busy in long Wi-Fi requests, the sound driver's start sends a burst from ALSA's trigger with interrupts off, so the ARM9 never
++ * read the ARM7's messages. Callers run with interrupts off; "draining" stops a callback that sends from draining again inside.
++ */
++static int draining;
++
++void nds_fifo_drain(void)
+ {
+ 	u32 fifo_recv;
+ 	u32 data;
+ 	struct list_head *p;
+ 	struct fifo_cb *cb;
+ 
++	if (draining)
++		return;
++	draining = 1;
+ 	while (!(NDS_REG_IPCFIFOCNT & FIFO_EMPTY)) {
+ 		fifo_recv = NDS_REG_IPCFIFORECV;
+ 		list_for_each(p, &cblist) {
+@@ -76,7 +87,14 @@ static irqreturn_t ndsfifo_interrupt(int irq, void *dev_id,
+ 			}
+ 		}
+ 	}
++	draining = 0;
++}
++EXPORT_SYMBOL(nds_fifo_drain);
+ 
++static irqreturn_t ndsfifo_interrupt(int irq, void *dev_id,
++				     struct pt_regs *regs)
++{
++	nds_fifo_drain();
+ 	return IRQ_HANDLED;
+ }
+ 
+diff --git a/linux-2.6.x/include/asm-arm/arch-nds/fifo.h b/linux-2.6.x/include/asm-arm/arch-nds/fifo.h
+index 07173397d..b528e0074 100644
+--- a/linux-2.6.x/include/asm-arm/arch-nds/fifo.h
++++ b/linux-2.6.x/include/asm-arm/arch-nds/fifo.h
+@@ -203,12 +203,23 @@ static inline void nds_fifo_send(u32 command)
+ 	NDS_REG_IPCFIFOSEND = command;
+ }
+ #else
++#include <asm/system.h>
++
++/* fifo.c: handles what the ARM7 sent; called here while waiting for room, so the two processors cannot wait for each other forever */
++extern void nds_fifo_drain(void);
++
+ static inline void nds_fifo_send(u32 command)
+ {
+ 	int fifo_full = 0;
+ 
+-	while (NDS_REG_IPCFIFOCNT & FIFO_SEND_FULL)
++	while (NDS_REG_IPCFIFOCNT & FIFO_SEND_FULL) {
++		unsigned long flags;
++
+ 		fifo_full = 1;
++		local_irq_save(flags);
++		nds_fifo_drain();
++		local_irq_restore(flags);
++	}
+ 	
+ 	NDS_REG_IPCFIFOSEND = command;
+ 	
+-- 
+2.56.1
+

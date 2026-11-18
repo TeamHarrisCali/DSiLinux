@@ -1137,3 +1137,14 @@ w99h, patch 0138 (sleep plan step 4, the user's choice: a PIN, automatic login):
 Settings > Lock PIN. Test bed: set PIN (2 digits refused, then 1234 twice -> /home/.lockpin "$1$..."), lock, 0000 keeps it locked,
 1234 unlocks (process gone, pid file removed), keypad clicks add digits. (A first test run looked wrong only because `pgrep -f`
 matched the test shell's own command line.) On the card, image clean.
+
+### PIN lock and screen-off setting verified; the Sound test freeze was a FIFO deadlock (w99i)
+
+User (w99h): the PIN works (set, lock, unlock), Screen off works, and **Sound test works when Wi-Fi is connected** (it froze while the
+boot auto-connect was still joining). Cause: the ARM7 handles SD/Wi-Fi requests inside its FIFO interrupt; during the connect, Wi-Fi
+mailbox reads wait up to about a second, so the ARM7 stops reading the ARM9's queue (16 words). ALSA calls the sound driver's trigger
+with interrupts off, and it sends a burst through nds_fifo_send(), which spun until there was room without reading anything; the ARM7's
+own sends to the ARM9 then filled its queue and the ARM7 spun in its nds_fifo_send() inside the handler: both processors waiting for
+each other. w99i, patch 0139: fifo.c's receive loop is nds_fifo_drain() (the IRQ handler calls it) and the ARM9's nds_fifo_send() calls
+it with interrupts off while the queue to the ARM7 is full (a guard against re-entry from a callback that sends). On the card, image
+clean; not yet tried.
