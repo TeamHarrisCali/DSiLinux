@@ -10,7 +10,7 @@ cd "$(dirname "$0")/.."
 APPS="dsarcade dsgb dsmemo dsgl3d dscam dsgame ntetris landmine dsbench dsgx dsplay dsnotes dsfiles nxclock"
 # DSLinux programs patched by this project, written as built (no RAM flag: code and data stay two smaller blocks, easier to find in
 # fragmented memory); scripts/fix-stacks.sh then sets their stacks
-SYSAPPS="tar"
+SYSAPPS="tar nano"
 SRC=work/dslinux/images/linux/usr/bin
 STAGE=out/sd-apps
 [ -f "$IMG" ] || { echo "no image: $IMG (card not mounted?)"; exit 1; }

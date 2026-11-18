@@ -1,0 +1,39 @@
+From 80cd8ecf44179d1ebbbedbdc82d29290b11a0e71 Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 10:00:38 -0600
+Subject: [PATCH] ncurses: read terminal descriptions from /usr/share/terminfo
+
+w99c on the console: nano still said "Error opening terminal:
+xterm-256color" with the 16 descriptions installed and TERMINFO set.
+This ncurses 5.4 was configured without USE_DATABASE: grab_entry() was
+compiled out and its only terminal was the built-in fallback "linux".
+Built natively on the PC with a database, the same 5.4 reads all the
+installed files (setupterm ok for xterm-256color, xterm, linux, vt100,
+screen). ncurses_cfg.h now defines USE_DATABASE and TERMINFO
+"/usr/share/terminfo" ($TERMINFO and $HOME/.terminfo still first);
+nano relinked (284400 bytes).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ lib/libncurses/include/ncurses_cfg.h | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/lib/libncurses/include/ncurses_cfg.h b/lib/libncurses/include/ncurses_cfg.h
+index 84c7710d9..6b32aadb3 100644
+--- a/lib/libncurses/include/ncurses_cfg.h
++++ b/lib/libncurses/include/ncurses_cfg.h
+@@ -51,6 +51,11 @@
+ #define HAVE_LONG_FILE_NAMES 1
+ #define MIXEDCASE_FILENAMES 1
+ #define PURE_TERMINFO 1
++/* DSLinuxDSi: read terminal descriptions from files. This build had no USE_DATABASE (configured without it): its only terminal was
++ * the built-in "linux", so nano over SSH ("xterm-256color") always said "Error opening terminal". The files come from
++ * scripts/install-terminfo.sh; $TERMINFO and $HOME/.terminfo are still looked at first. */
++#define USE_DATABASE 1
++#define TERMINFO "/usr/share/terminfo"
+ #define USE_HOME_TERMINFO 1
+ #define USE_ROOT_ENVIRON 1
+ #define HAVE_REMOVE 1
+-- 
+2.56.1
+

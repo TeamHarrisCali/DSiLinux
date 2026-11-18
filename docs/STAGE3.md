@@ -1074,3 +1074,17 @@ ntpclient 100 (still waiting), memreport 68, inetd 52 KB.
 - Also asked: the Wi-Fi chip "update" meant the time and date on connecting (done here). WorkNet uses a username and password
   (WPA2-Enterprise): not supported, added to the roadmap; the WPA2 test needs a phone hotspot.
 - w99c on the card (checksum ok, image clean, 16 terminfo types, /home/.terminfo link, TZ Central automatic). Not yet run.
+
+### w99c on the console; w99d
+
+w99c (user, over SSH): `date`: Wed Nov 18 09:55:12 2026, correct (Central, found automatically, time from HTTP). memreport: programs
+2908 KB own (1003 KB slack), RAM free 7364 KB, file cache 1804 KB, reserve 192 KB, free blocks 1x4K 1x64K 1x128K 2x512K 1x2048K 1x4096K;
+dropbear 524, nano-X 456, sh 400 (Terminal), desktop 400, sh 400 (SSH), dsdesk 280, init 132, nanowm 132, memreport 68, dsautolog 64,
+inetd 52 KB. `nano notes.txt`: "Error opening terminal: xterm-256color", also after `export TERMINFO=/usr/share/terminfo`.
+- The compiled descriptions are fine: ncurses 5.4 from this tree, built natively on the PC with a database, reads all of them
+  (_nc_read_file_entry 1, setupterm 0 / err 1 for xterm-256color, xterm, linux, vt100, screen). The DSi's ncurses_cfg.h has no
+  USE_DATABASE (and no USE_TERMCAP): lib_setup.c's grab_entry() was compiled out, only the fallback table (ncurses/fallback.c: "linux")
+  remained.
+- w99d, patch 0134: ncurses_cfg.h defines USE_DATABASE and TERMINFO "/usr/share/terminfo"; libncurses rebuilt from clean objects; nano
+  relinked (284400 bytes, grab_entry present) and installed by install-apps.sh (SYSAPPS "tar nano"; fix-stacks gave it 60 KB). mc and
+  irssi still have the old ncurses. On the card: w99d checksum ok, image clean.

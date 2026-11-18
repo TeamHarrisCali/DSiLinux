@@ -5,8 +5,8 @@ lists them, where each one stopped, and **every question still waiting for an an
 
 ## Where things stand
 
-- **On the card now: w99c** (2026-11-18): w98z plus the TODO fixes below (memory, stacks, nano, tar, clock, fewer idle shells).
-  Verified on the DSi so far: tar `-z` (w99a), the memory reserve and memreport (w99b). w99c's own changes are not yet run.
+- **On the card now: w99d** (2026-11-18): w98z plus the TODO fixes below. Verified on the DSi: tar `-z` (w99a), the memory reserve
+  and memreport (w99b), **the clock and time zone, and about 1.5 MB less memory in use (w99c)**. w99d's nano fix is not yet run.
 - **w98z** (2026-11-17) brought:
   - uptime fixed (it showed the date), dsfetch fixed and installed as `/usr/bin/dsfetch`;
   - the DSi asks DHCP for its last address again (`/home/wifi.lastip`), so `ssh dsi` keeps finding it;
@@ -15,7 +15,7 @@ lists them, where each one stopped, and **every question still waiting for an an
   - windows: maximize / restore box, resize with L + drag on the title bar;
   - the Terminal's scroll bar, and the Terminal fits itself to a resized window.
 - **First thing next time:**
-  1. Boot w99c (it includes everything before it).
+  1. Boot w99d (it includes everything before it).
   2. Check the desktop starts by itself and Wi-Fi Auto joins GuestNet.
   3. Start Network > SSH server, then run `ssh dsi` from the PC: no password.
   4. Try the maximize box, L + drag on a title bar, and the Terminal's scroll bar.
@@ -27,13 +27,17 @@ lists them, where each one stopped, and **every question still waiting for an an
 
 ## Small fixes to do (TODO)
 
-**w99c (2026-11-18) is on the card, not yet run on the DSi.** Results so far on the DSi: tar `xzf` works (w99a); the 192 KB reserve
-and memreport work (w99b: 5.8 MB free, largest free block 4 MB). Still failing in w99b: nano (`xterm-256color` not found) and the
-clock (`date` said 2016). To check with w99c:
-1. Over SSH and in the desktop's Terminal: `nano notes.txt` opens (no `export` needed).
-2. After Wi-Fi connects: `date` shows the right Central time, and `cat /tmp/clock.log` says which zone was found. Then reboot
-   without Wi-Fi: the time should still be right (it now comes from the DSi's clock chip, which w99c writes).
-3. `memreport` again: no `autolog`/`sleep`, one shell fewer behind the desktop (about 1 MB less in use).
+**w99d (2026-11-18) is on the card, not yet run on the DSi.** Results on the DSi so far:
+- w99a: tar `xzf` works.
+- w99b: the 192 KB reserve and memreport work.
+- **w99c: `date` is right** (the time from HTTP, the Central time zone found automatically); **memory: 2.9 MB in use by programs
+  (was 4.4 MB), 7.4 MB free (was 5.8 MB)**, `autolog`/`sleep` gone (`dsautolog` takes 64 KB), one shell fewer.
+- Still failing in w99c: nano over SSH (`Error opening terminal: xterm-256color`, also with `TERMINFO` set). Fixed in w99d.
+
+To check with w99d:
+1. Over SSH and in the desktop's Terminal: `nano notes.txt` opens.
+2. Reboot without Wi-Fi: the time is still right (it now comes from the DSi's clock chip, which w99c writes after connecting). The
+   DSi's own menu should show the right time too.
 
 - **Memory (the real cause of "tar: SIGSEGV").** The card log showed `tar: page allocation failure. order:8`: 2.1 MB free, tar needing
   868 KB in one piece. A free 1 MB block existed, but the kernel's reserve check refused it: the reserve (`min_free_kbytes`) was
@@ -53,6 +57,8 @@ clock (`date` said 2016). To check with w99c:
     block 4 MB**; per process (own memory): dropbear 524 KB, nano-X 520 KB, **six shells of about 400 KB each** (2.4 MB: the SSH
     session, the Terminal's, the `desktop` script, the login shell behind it, `autolog` and one more), dsdesk 280 KB, autolog's
     `sleep` 256 KB, nanowm 132 KB.
+  - **w99c on the DSi:** programs 2.9 MB (was 4.4), free 7.4 MB (was 5.8), largest free block 4 MB; dropbear 524, nano-X 456, three
+    shells of 400 KB (the Terminal's, the SSH session's, the `desktop` script), dsdesk 280, init and nanowm 132, dsautolog 64 KB.
   - **Done in w99c:** `autolog` (a shell plus a resident `sleep`, about 650 KB, and savelog's burst of programs every 10 s) is
     replaced by `dsautolog`, a small C program that saves only when the kernel log or a log file changed (or every 5 minutes); the
     login shell gives its place to the desktop instead of waiting behind it (about 400 KB); the SSH server window closes on Enter
@@ -70,9 +76,14 @@ clock (`date` said 2016). To check with w99c:
     perl, links ...) and 16 KB for the rest. Each raise stays **within the memory block the program already gets**, so nothing needs
     more RAM.
   - `release.sh` runs it after every install; the list of changes is in `out/stacks/report.txt`.
-- **nano: "Error opening terminal".** w99b installed the descriptions, but nano still failed: the DSi's ncurses was built without a
-  default directory (`TERMINFO "none"`), so it only looks where `$TERMINFO` points (or `$HOME/.terminfo`). **w99c** sets
-  `TERMINFO=/usr/share/terminfo` in the profile and the Terminal, and links `/home/.terminfo` to it.
+- **nano: "Error opening terminal".** Three layers, found one at a time:
+  - w99b installed the terminal descriptions in `/usr/share/terminfo` (the DSi had none);
+  - w99c set `TERMINFO` (the library had no default directory) and linked `/home/.terminfo`: still failing;
+  - **the real cause:** the DSi's ncurses 5.4 was built **without file support at all** (no `USE_DATABASE`): its only terminal was
+    the built-in `linux`. Built on the PC with file support, the same ncurses reads every installed description. **w99d** rebuilds
+    it with file support and the `/usr/share/terminfo` default, and relinks nano (installed with the other system programs).
+  - Still to relink with the new ncurses: mc and irssi (built through their own configure stamps); dialog, hexedit, sc and the
+    other small users if they are ever needed.
   - The DSi's ncurses (5.4, 2005) reads terminal descriptions from `/usr/share/terminfo`, and the DSi had none, so every type
     failed. `scripts/install-terminfo.sh` compiles 16 (linux, xterm, xterm-256color, vt100, screen, tmux, ...) on the PC in the old
     format that ncurses reads and writes them into the image (release.sh runs it).
@@ -82,7 +93,7 @@ clock (`date` said 2016). To check with w99c:
 - **tar `-z` / `-j` ("Cannot fork").** Done, **works on the DSi** (w99a).
   - tar starts gzip or bzip2 with `vfork()` + `exec`, straight on the archive file or its stdin/stdout, joined by a pipe.
   - Not covered: remote tapes (rmt) and `--to-command`, which still need fork().
-- **The clock** (tar: "time stamp ... in the future"; the DSi's clock says December 2016). Asked for (2026-11-18): when it connects to
+- **The clock: works on the DSi (w99c).** (tar: "time stamp ... in the future"; the DSi's clock said December 2016.) Asked for (2026-11-18): when it connects to
   Wi-Fi, find its time zone and correct the DSi's own date and time.
   - w99b tried `ntpclient`: NTP is blocked on GuestNet, it never got an answer and stayed in memory; `date` still said 2016.
   - **w99c: `httpdate`**, run by the Wi-Fi window after each connection (also the automatic one at boot):
