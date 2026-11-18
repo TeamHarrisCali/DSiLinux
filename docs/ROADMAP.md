@@ -23,10 +23,7 @@ lists them, where each one stopped, and **every question still waiting for an an
 - Verified on the console so far:
   - the DSi's own Wi-Fi chip on open networks (DHCP, ping, `wget`), the Wi-Fi window, the desktop at boot;
   - SSH through inetd (w98x), and dsfetch (w98x, before the w98y fixes).
-- Still open from the Wi-Fi work:
-  - WPA2 has not joined a network yet (the hotspot was off channel 1 before w98v's scan fix);
-  - connecting takes about 50 s;
-  - data moves one byte at a time (CMD53 block transfers would speed it up).
+- Still open from the Wi-Fi work: see "The DSi's Wi-Fi chip" below.
 
 ## Small fixes to do (TODO)
 
@@ -93,8 +90,24 @@ nano still failed (`Error opening terminal: xterm`); memreport's per-process num
 | File management, tidy layout, leaner system | [FILES-CLEANUP-PLAN.md](FILES-CLEANUP-PLAN.md) | Step 1: the Files program with Delete / Recycle Bin | Questions C |
 | Touch screen revamp (input page + dashboard) | [TOUCHSCREEN-PLAN.md](TOUCHSCREEN-PLAN.md) | Step 0: your feedback, then mock-ups | Questions D |
 | Screen sleep, locking, lid sleep | [SLEEP-LOCK-PLAN.md](SLEEP-LOCK-PLAN.md) | Step 1: check the lid event, backlight off/on | Questions E |
+| The DSi's Wi-Fi chip: faster, quicker to connect, WPA2 | (this page, below) | Speed: the 4-bit bus and block transfers | Questions F |
 | Later, bigger: a package manager (`dspkg`) | (no file yet) | After BusyBox: `wget` with HTTPS makes it possible | Your choice |
 | Later, much bigger: new kernel and modern compiler | (no file yet) | Needed for anything that a 2005 compiler cannot build | Months of work; your choice |
+
+### The DSi's Wi-Fi chip (Atheros AR6013), what is left
+
+Added 2026-11-18 at the user's request. Today it joins open networks, gets an address and stays connected (wget, SSH, NTP work), but:
+
+| # | Item | Today | Idea | Check |
+|---|---|---|---|---|
+| 1 | **Speed** | about 17 KB/s (`wget` 2.3 MB in 2 min 15 s) | Two separate costs: the bus runs **1 bit wide** (the bring-up log says "bus 1-bit"; the chip can do 4) and data moves **one byte per command** (CMD52). 4-bit mode and CMD53 block transfers (up to 512 bytes per command) in the ARM7's SDIO code | the same `wget` many times faster |
+| 2 | **Connecting** | about 50 s: the chip answers only the third connect command | find why the first two are ignored (timing after the scan, a missing setup command); dswifi's order as the reference | joins within a few seconds |
+| 3 | **WPA2** | built and the crypto verified on the DSi, but it has never joined a network (the hotspot was on a channel the old scan missed; w98v scans every channel) | a test on a WPA2 network on channels 1-11: WorkNet (if you may use it) or a phone hotspot | DHCP and ping over WPA2 |
+| 4 | **Staying connected** | a dropped connection is not noticed or rejoined | rejoin after a disconnect event; signal strength in the tray; scan while connected | walk out of range and back: it rejoins by itself |
+| 5 | **Power** | the chip always runs at full power | its power-save mode while idle (ties in with the sleep plan) | longer battery life with Wi-Fi on |
+| 6 | **Firmware** | the chip runs the firmware from your DSi's own system files (copied from your dump with `scripts/add-dsi-wifi-fw.sh`) | Nintendo never released a newer one for this chip, and other DSi versions carry the same generation, so "updating the chip" means items 1-5 (the driver), not new firmware | (nothing to do unless a newer firmware turns up) |
+
+Items 1 and 2 are the ARM7 and the kernel's `dsiwifi.c`; 3 needs only a test; 4 and 5 build on 1 and 2.
 
 Which plan goes first is your choice. A suggestion:
 - **Sleep + lock** and **BusyBox + hush** are the most useful day to day.
@@ -131,6 +144,10 @@ Which plan goes first is your choice. A suggestion:
 2. Lock with a PIN, a password, or both? Lock after every screen sleep, or only when the lid closes?
 3. Lid closed: Wi-Fi stays on (SSH keeps working) or goes off (more battery)?
 4. Deep sleep worth the risk, or is light sleep enough?
+
+**F. The DSi's Wi-Fi chip**
+1. Speed first (item 1), or the quicker connect (item 2)?
+2. WPA2 test: may WorkNet be used, or a phone hotspot (WPA2, 2.4 GHz, channel 1-11)?
 
 **From earlier**
 - Set `passwd` on the DSi? With key login (w98z) the SSH server no longer accepts passwords at all, so this matters only on the
