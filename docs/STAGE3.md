@@ -1027,3 +1027,26 @@ stack (tar: about 180 KB; uClibc's malloc uses mmap, not brk, so the slack is ot
   fork() made to fail with ENOSYS by a preload as uClibc's does): czf/xzf/cjf/xjf, file and stdin/stdout, trees identical; the PC's
   own tar fails under the same preload with the DSi's message. install-apps.sh now also installs tar (as built, no RAM flag).
 - w99a is on the card (checksum checked, image clean). Not yet run on the DSi.
+
+### w99a on the console; w99b
+
+w99a (user, over SSH): `tar xzf make-4.3.tar.gz` unpacked the make source (the vfork patch works on the DSi), with warnings "time stamp
+2020-01-03 ... is 95615726 s in the future" (the DSi's clock says December 2016). `nano notes.txt`: "Error opening terminal: xterm".
+`memreport`: totals 2704 KB free, 4252 KB file cache, free blocks 1x16K 1x128K 3x512K 1x1024K; per-process figures nonsense (savelog
+9080 KB, slacks of 4194282 KB) and no reserve line.
+- nano: ncurses 5.4 (2005, TERMINFO "/usr/share/terminfo", no fallbacks) and no terminfo directory on the DSi: no type worked. The
+  "xterm"/"linux" strings in nano are not built-in entries. scripts/install-terminfo.sh: infocmp + tic of 16 types on the PC, every file
+  checked for the old format (magic 0432) and at most 4 KB; the *-256color entries have pairs#0x10000, which tic writes in the 32-bit
+  format, so pairs is capped at 32767 first. /etc/profile (install-session.sh, block "terminal types (2)") keeps those types.
+- The reserve: CONFIG_SYSCTL is off, so w99a's `echo 192 > /proc/sys/vm/min_free_kbytes` did nothing (tar worked because memory
+  happened to allow it). w99b, patch 0132: page_alloc.c sets min_free_kbytes = 192 for CONFIG_ARCH_NDS; the rc line is gone.
+- memreport: task_mem() sizes regions with kobjsize(), which reads page->index (an order SLAB sets; SLOB does not). /proc/PID/maps
+  was an empty stub on no-MMU: it now prints each region (start-end, rwx p/s, size, ksize for VM_MAPPED_COPY regions, 0 for regions
+  used in place, vm_usage, file) as one seq_file record. memreport sums own/slack/shared from it; the reserve from /proc/zoneinfo.
+- Clock: dsnet runs `ntpclient -s -c 1 -h pool.ntp.org` in the background after a successful DHCP (window and boot auto-connect);
+  scripts/set-timezone.sh writes /etc/config/TZ (uClibc's UCLIBC_TZ_FILE_PATH), California by default; release.sh only when none.
+- During the w99b release a second run of install-terminfo.sh damaged the image: debugfs (e2fsprogs 1.47) `mkdir` on an existing
+  directory allocates and orphans a new one (Unconnected directory inode 866, wrong link and free counts). Repaired with
+  rootfs-check.sh -y (the empty orphan is /lost+found/#866). `img_mkdir` in scripts/card.sh now emits mkdir only for missing
+  directories; used by add-ssh-key, add-roms, add-dsi-wifi-fw, install-terminfo, set-timezone and doom/install.sh. Tested: two runs
+  in a row on a scratch image, e2fsck clean. On the card afterwards: 16 terminal types, the time zone, image clean, w99b checksum ok.

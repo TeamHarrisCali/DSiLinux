@@ -10,9 +10,8 @@ cd "$(dirname "$0")/.."
 [ -f out/doom-build/dsdoom ] || { echo "build first: doom/build.sh"; exit 1; }
 "$(dirname "$0")/../scripts/rootfs-check.sh" "$IMG" || exit 1
 CMDS=$(mktemp)
-cat > "$CMDS" <<EOT
-mkdir /home/doom
-mkdir /home/doom/save
+img_mkdir /home/doom /home/doom/save > "$CMDS"
+cat >> "$CMDS" <<EOT
 rm /home/doom/dsdoom
 rm /home/doom/default.cfg
 write out/doom-build/dsdoom /home/doom/dsdoom

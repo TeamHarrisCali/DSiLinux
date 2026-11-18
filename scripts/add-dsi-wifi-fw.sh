@@ -25,7 +25,7 @@ print("Wi-Fi firmware: %d bytes, %d blobs, SHA-1 sums ok" % (len(d), n))
 PY
 "$(dirname "$0")/rootfs-check.sh" "$IMG" || exit 1
 CMDS=$(mktemp)
-printf 'mkdir /usr/lib/firmware\nrm /usr/lib/firmware/dsi-wifi.bin\nwrite "%s" /usr/lib/firmware/dsi-wifi.bin\n' "$SRC" > "$CMDS"
+{ img_mkdir /usr/lib/firmware; printf 'rm /usr/lib/firmware/dsi-wifi.bin\nwrite "%s" /usr/lib/firmware/dsi-wifi.bin\n' "$SRC"; } > "$CMDS"
 debugfs -w -f "$CMDS" "$IMG" > /dev/null 2>&1
 rm -f "$CMDS"
 sync

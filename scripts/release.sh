@@ -78,4 +78,6 @@ scripts/install-apps.sh -i "$CARD/linux/ROOTFS.IMG" || { echo "PROGRAMS NOT INST
 scripts/install-session.sh -i "$CARD/linux/ROOTFS.IMG" || { echo "BOOT SESSION HOOK NOT INSTALLED (scripts/install-session.sh)"; exit 1; }
 scripts/build-tools.sh -i "$CARD/linux/ROOTFS.IMG" | tail -1
 scripts/fix-stacks.sh -i "$CARD/linux/ROOTFS.IMG" | tail -1
+scripts/install-terminfo.sh -i "$CARD/linux/ROOTFS.IMG" | tail -1
+scripts/set-timezone.sh -i "$CARD/linux/ROOTFS.IMG" --if-missing
 ls "$CARD"/*.nds | xargs -n1 basename

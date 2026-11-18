@@ -1,0 +1,286 @@
+From cf45c624cf26fd9e6f0742817bb91ed82c9589e3 Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 09:20:58 -0600
+Subject: [PATCH] Reserve set in the kernel, /proc/PID/maps for no-MMU, clock
+ from NTP
+
+- w99a's "echo 192 > /proc/sys/vm/min_free_kbytes" did nothing: this
+  kernel has no sysctl. page_alloc.c sets min_free_kbytes = 192 on
+  CONFIG_ARCH_NDS instead; the rc line is gone.
+- /proc/PID/maps was an empty stub on no-MMU. It now lists each region:
+  start-end, r/w/x and private/shared, size, what the allocator handed
+  out for a private copy (ksize; 0 for code used in place from the
+  ROM), how many processes share it, the file. (task_mem's Mem/Slack
+  use kobjsize(), which reads page->index, which SLOB never sets: the
+  user's memreport showed "9080 KB" for savelog and 4194282 KB slack.)
+- memreport adds up maps per process (own, slack, shared once), reads
+  the reserve from /proc/zoneinfo, and says so when the kernel is too
+  old for per-process figures.
+- The Wi-Fi window (and the boot auto-connect) set the clock after a
+  successful DHCP: ntpclient -s -c 1 -h pool.ntp.org in the background
+  (the DSi's clock said December 2016; tar warned "time stamp in the
+  future").
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ linux-2.6.x/fs/proc/task_nommu.c      | 35 ++++++++++++--
+ linux-2.6.x/mm/page_alloc.c           |  8 +++
+ user/microwin/src/demos/nanox/dsnet.c | 11 +++++
+ vendors/Nintendo/DSI/memreport.c      | 70 ++++++++++++++++++++++++---
+ vendors/Nintendo/DSI/rc               |  4 --
+ 5 files changed, 113 insertions(+), 15 deletions(-)
+
+diff --git a/linux-2.6.x/fs/proc/task_nommu.c b/linux-2.6.x/fs/proc/task_nommu.c
+index 8f68827ed..6e0c89134 100644
+--- a/linux-2.6.x/fs/proc/task_nommu.c
++++ b/linux-2.6.x/fs/proc/task_nommu.c
+@@ -3,6 +3,7 @@
+ #include <linux/file.h>
+ #include <linux/mount.h>
+ #include <linux/seq_file.h>
++#include <linux/slab.h>
+ #include "internal.h"
+ 
+ /*
+@@ -138,22 +139,50 @@ out:
+ }
+ 
+ /*
+- * Albert D. Cahalan suggested to fake entries for the traditional
+- * sections here.  This might be worth investigating.
++ * DSLinuxDSi: /proc/PID/maps for no-MMU, one line per region of the process:
++ *   start-end flags size alloc usage name
++ * flags r/w/x and p (private) or s (may be shared); size = end - start; alloc = what the allocator really handed out for a private
++ * copy (kmalloc, rounded up to a power of two), 0 for a region used in place (code run from the ROM, a file mapped directly); usage =
++ * how many processes share the region. memreport adds these up. The whole list is printed as one record, so the mm is only held
++ * while it is printed. (task_mem()'s "Mem"/"Slack" sizes regions with kobjsize(), which reads page->index, which SLOB never sets.)
+  */
+ static int show_map(struct seq_file *m, void *v)
+ {
++	struct task_struct *task = m->private;
++	struct mm_struct *mm = get_task_mm(task);
++	struct vm_list_struct *vml;
++
++	if (!mm)
++		return 0;
++	down_read(&mm->mmap_sem);
++	for (vml = mm->context.vmlist; vml; vml = vml->next) {
++		struct vm_area_struct *vma = vml->vma;
++		unsigned long flags, alloc = 0;
++
++		if (!vma)
++			continue;
++		flags = vma->vm_flags;
++		if (flags & VM_MAPPED_COPY)
++			alloc = ksize((void *) vma->vm_start);
++		seq_printf(m, "%08lx-%08lx %c%c%c%c %lu %lu %d %s\n", vma->vm_start, vma->vm_end,
++			   flags & VM_READ ? 'r' : '-', flags & VM_WRITE ? 'w' : '-', flags & VM_EXEC ? 'x' : '-',
++			   flags & VM_MAYSHARE ? 's' : 'p', vma->vm_end - vma->vm_start, alloc, atomic_read(&vma->vm_usage),
++			   vma->vm_file ? (const char *) vma->vm_file->f_dentry->d_name.name : "[anon]");
++	}
++	up_read(&mm->mmap_sem);
++	mmput(mm);
+ 	return 0;
+ }
+ static void *m_start(struct seq_file *m, loff_t *pos)
+ {
+-	return NULL;
++	return *pos == 0 ? (void *) 1 : NULL;		/* one record: the whole list */
+ }
+ static void m_stop(struct seq_file *m, void *v)
+ {
+ }
+ static void *m_next(struct seq_file *m, void *v, loff_t *pos)
+ {
++	++*pos;
+ 	return NULL;
+ }
+ struct seq_operations proc_pid_maps_op = {
+diff --git a/linux-2.6.x/mm/page_alloc.c b/linux-2.6.x/mm/page_alloc.c
+index e1d3d77f4..d0dd9e781 100644
+--- a/linux-2.6.x/mm/page_alloc.c
++++ b/linux-2.6.x/mm/page_alloc.c
+@@ -2443,6 +2443,14 @@ static int __init init_per_zone_pages_min(void)
+ 		min_free_kbytes = 128;
+ 	if (min_free_kbytes > 65536)
+ 		min_free_kbytes = 65536;
++#ifdef CONFIG_ARCH_NDS
++	/*
++	 * DSLinuxDSi: 192 KB instead of the formula's 508 KB for 16 MB. The watermark check wants part of the reserve in large pieces, so
++	 * with 508 KB a program needing one big block failed although a free block of that size existed (tar, 868 KB, 2026-11-17: refused
++	 * at the 128 KB order). Set here because this kernel has no sysctl (/proc/sys/vm/min_free_kbytes does not exist).
++	 */
++	min_free_kbytes = 192;
++#endif
+ 	setup_per_zone_pages_min();
+ 	setup_per_zone_lowmem_reserve();
+ 	return 0;
+diff --git a/user/microwin/src/demos/nanox/dsnet.c b/user/microwin/src/demos/nanox/dsnet.c
+index a5fe53327..5998458ba 100644
+--- a/user/microwin/src/demos/nanox/dsnet.c
++++ b/user/microwin/src/demos/nanox/dsnet.c
+@@ -359,6 +359,13 @@ static void cap_log(const char *path)
+ 	}
+ }
+ 
++/* the clock from the network, once, in the background (the DSi's own clock said 2016: tar warned about "time stamps in the future");
++ * ntpclient is DSLinux's, -c 1: one answer and exit; the time zone is /etc/config/TZ (scripts/set-timezone.sh) */
++static void set_clock(void)
++{
++	run("ntpclient -s -c 1 -h pool.ntp.org > /tmp/ntp.log 2>&1 &");
++}
++
+ /* what the window did, for the log (Save log puts /tmp/dsnet.log on the card) */
+ static void dlog(const char *s)
+ {
+@@ -714,6 +721,8 @@ static void connect_to(struct net *n, const char *key)
+ 		}
+ 	}
+ 	dlog(ip[0] ? ip : "no address (DHCP): /tmp/dsnet-dhcp.log");
++	if (ip[0])
++		set_clock();
+ 	if (ip[0]) {
+ 		snprintf(cur_ssid, sizeof(cur_ssid), "%s", n->ssid);
+ 		save_known(n->ssid, key ? key : "", 0);
+@@ -790,6 +799,8 @@ static void connect_dsi(struct net *n, const char *pass)
+ 			break;
+ 	}
+ 	dlog(ip[0] ? ip : "no address (DHCP): /tmp/dsnet-dhcp.log");
++	if (ip[0])
++		set_clock();
+ 	if (ip[0]) {
+ 		snprintf(cur_ssid, sizeof(cur_ssid), "%s", n->ssid);
+ 		save_known(n->ssid, n->wpa2 && pass ? pass : "", 0);
+diff --git a/vendors/Nintendo/DSI/memreport.c b/vendors/Nintendo/DSI/memreport.c
+index 97747c399..701fbb277 100644
+--- a/vendors/Nintendo/DSI/memreport.c
++++ b/vendors/Nintendo/DSI/memreport.c
+@@ -3,7 +3,9 @@
+  * On this system without an MMU a process holds its whole program copy (unless it runs in place from the ROM), its data, bss and stack,
+  * each block rounded up to a power of two ("Slack" is that rounding). A program starts only if one free block is big enough for it,
+  * so the largest free block matters as much as the total.
+- * Sources: /proc/PID/status (Name, Mem, Slack, Shared: fs/proc/task_nommu.c), /proc/meminfo, /proc/buddyinfo.
++ * Sources: /proc/PID/maps (one line per region with the size the allocator really handed out, from w99b's kernel; the old
++ * /proc/PID/status "Mem"/"Slack" figures were wrong, kobjsize() reads a page field SLOB never sets), /proc/PID/status (Name),
++ * /proc/meminfo, /proc/buddyinfo.
+  * Built and put on the card by scripts/build-tools.sh; run "memreport" in the Terminal or over SSH.
+  */
+ #include <stdio.h>
+@@ -16,9 +18,13 @@
+ struct proc {
+ 	int pid;
+ 	char name[20];
+-	unsigned long mem, slack, shared;
++	unsigned long mem, slack, shared;	/* own private copies (as allocated), their rounding slack, regions shared with others */
+ };
+ 
++#define MAXSH	128
++static unsigned long sh_start[MAXSH], sh_alloc[MAXSH];	/* shared regions, each counted once in the total */
++static int nsh, have_maps;
++
+ static struct proc procs[MAXP];
+ static int nprocs;
+ 
+@@ -47,6 +53,38 @@ static void read_proc(const char *pid)
+ 			p->shared = strtoul(line + 7, NULL, 10);
+ 	}
+ 	fclose(f);
++	/* /proc/PID/maps: "start-end flags size alloc usage name" */
++	snprintf(path, sizeof(path), "/proc/%s/maps", pid);
++	if ((f = fopen(path, "r"))) {
++		unsigned long st, en, size, alloc, mem = 0, slack = 0, shared = 0;
++		char fl[8];
++		int usage, n = 0, k;
++
++		while (fgets(line, sizeof(line), f))
++			if (sscanf(line, "%lx-%lx %7s %lu %lu %d", &st, &en, fl, &size, &alloc, &usage) == 6) {
++				n++;
++				if (usage > 1) {
++					shared += alloc;
++					for (k = 0; k < nsh && sh_start[k] != st; k++)
++						;
++					if (k == nsh && nsh < MAXSH) {
++						sh_start[nsh] = st;
++						sh_alloc[nsh++] = alloc;
++					}
++				} else {
++					mem += alloc;
++					if (alloc > size)
++						slack += alloc - size;
++				}
++			}
++		fclose(f);
++		if (n) {
++			have_maps = 1;
++			p->mem = mem;
++			p->slack = slack;
++			p->shared = shared;
++		}
++	}
+ 	nprocs++;
+ }
+ 
+@@ -90,7 +128,7 @@ int main(void)
+ 				procs[i] = procs[j];
+ 				procs[j] = t;
+ 			}
+-	printf("  PID NAME              MEM KB  SLACK KB  SHARED KB\n");
++	printf("  PID NAME              OWN KB  SLACK KB  SHARED KB\n");
+ 	for (i = 0; i < nprocs; i++) {
+ 		struct proc *p = &procs[i];
+ 
+@@ -98,15 +136,31 @@ int main(void)
+ 		total += p->mem;
+ 		slack += p->slack;
+ 	}
+-	printf("%d processes: %lu KB (of it %lu KB rounding slack)\n\n", nprocs, total / 1024, slack / 1024);
++	if (have_maps) {
++		unsigned long sh = 0;
++
++		for (i = 0; i < nsh; i++)
++			sh += sh_alloc[i];
++		printf("%d processes: %lu KB of their own (of it %lu KB rounding slack), %lu KB shared\n", nprocs, total / 1024,
++		       slack / 1024, sh / 1024);
++		printf("(code run in place from the ROM costs nothing here: only private copies count)\n\n");
++	} else {
++		printf("%d processes. These per-process figures are NOT reliable with this kernel (before w99b): see the totals below\n\n",
++		       nprocs);
++	}
+ 
+ 	printf("RAM: total %ld KB, free %ld KB, file cache %ld KB (given back when needed)\n", meminfo_kb("MemTotal"),
+ 	       meminfo_kb("MemFree"), meminfo_kb("Cached") + meminfo_kb("Buffers"));
+-	if ((f = fopen("/proc/min_free_kbytes", "r")) || (f = fopen("/proc/sys/vm/min_free_kbytes", "r"))) {
+-		long r;
++	/* the kernel's reserve: "min" (pages) in /proc/zoneinfo (this kernel has no /proc/sys) */
++	if ((f = fopen("/proc/zoneinfo", "r"))) {
++		char line[96];
++		unsigned long pages;
+ 
+-		if (fscanf(f, "%ld", &r) == 1)
+-			printf("Kept in reserve by the kernel: %ld KB\n", r);
++		while (fgets(line, sizeof(line), f))
++			if (sscanf(line, " min %lu", &pages) == 1) {
++				printf("Kept in reserve by the kernel: %lu KB\n", pages * 4);
++				break;
++			}
+ 		fclose(f);
+ 	}
+ 	/* /proc/buddyinfo: "Node 0, zone DMA n0 n1 n2 ...": free blocks of 4 KB << order */
+diff --git a/vendors/Nintendo/DSI/rc b/vendors/Nintendo/DSI/rc
+index d9d52dfda..772abe910 100644
+--- a/vendors/Nintendo/DSI/rc
++++ b/vendors/Nintendo/DSI/rc
+@@ -27,10 +27,6 @@ then
+ fi
+ mount -t ramfs none /var/run
+ mount -t sysfs none /sys
+-# Memory: the kernel keeps min_free_kbytes in reserve (508 KB by its formula for 16 MB) and wants part of it in large pieces, so a
+-# program needing one big block failed while a free block of that size existed (tar, 868 KB, 2026-11-17: the reserve check failed at
+-# the 128 KB size). 192 KB still leaves room for interrupt-time allocations (network packets).
+-echo 192 > /proc/sys/vm/min_free_kbytes
+ 
+ # Create r/w /dev entries so dropbear will work
+ mknod /var/run/ttyp0 c 3 0
+-- 
+2.56.1
+

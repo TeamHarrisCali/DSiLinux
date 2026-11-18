@@ -21,7 +21,7 @@ debugfs -R "cat /home/.ssh/authorized_keys" "$IMG" 2>/dev/null > out/sshkey/auth
 grep -qF "$(cut -d' ' -f2 "$KEY")" out/sshkey/authorized_keys && { echo "already in /home/.ssh/authorized_keys"; exit 0; }
 cat "$KEY" >> out/sshkey/authorized_keys
 {
-	echo "mkdir /home/.ssh"
+	img_mkdir /home/.ssh
 	echo "rm /home/.ssh/authorized_keys"
 	echo "write out/sshkey/authorized_keys /home/.ssh/authorized_keys"
 	echo "sif /home mode 040755"

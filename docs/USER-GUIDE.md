@@ -129,6 +129,8 @@ The DSi only ever writes inside `sd:/linux/ROOTFS.IMG` (the whole system) and `s
 | `scripts/add-roms.sh game.gb ...` | your own Game Boy games into `/home/roms` |
 | `scripts/set-wifi.sh NAME [wepkey]` | Wi-Fi settings and the SSH server |
 | `scripts/add-ssh-key.sh [key.pub]` | key login over SSH (`~/.ssh/id_rsa_dsi.pub` by default; RSA only) |
+| `scripts/set-timezone.sh [TZ]` | the time zone (default California, `PST8PDT,M3.2.0,M11.1.0`); the clock itself is set from the network after each Wi-Fi connection |
+| `scripts/install-terminfo.sh` | terminal descriptions for nano and the other full-screen programs (release.sh does it) |
 | `scripts/install-session.sh` | the boot hook in `/etc/profile` that starts the desktop (release.sh does it) |
 | `scripts/install-apps.sh` | the games, accessories and multimedia programs into `/usr/bin` (release.sh does it; they are no longer in the ROM) |
 | `doom/install.sh [doom1.wad]` | DOOM into `/home/doom` |

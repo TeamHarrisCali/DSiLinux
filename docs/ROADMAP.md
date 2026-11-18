@@ -5,7 +5,8 @@ lists them, where each one stopped, and **every question still waiting for an an
 
 ## Where things stand
 
-- **On the card now: w99a** (2026-11-18): w98z plus the TODO fixes below (memory, stacks, nano, tar). Not yet run on the DSi.
+- **On the card now: w99b** (2026-11-18): w98z plus the TODO fixes below (memory, stacks, nano, tar, clock). w99a's tar fix works
+  on the DSi; w99b's own changes are not yet run on the DSi.
 - **w98z** (2026-11-17) brought:
   - uptime fixed (it showed the date), dsfetch fixed and installed as `/usr/bin/dsfetch`;
   - the DSi asks DHCP for its last address again (`/home/wifi.lastip`), so `ssh dsi` keeps finding it;
@@ -14,7 +15,7 @@ lists them, where each one stopped, and **every question still waiting for an an
   - windows: maximize / restore box, resize with L + drag on the title bar;
   - the Terminal's scroll bar, and the Terminal fits itself to a resized window.
 - **First thing next time:**
-  1. Boot w99a (it includes everything in w98z).
+  1. Boot w99b (it includes everything in w98z and w99a).
   2. Check the desktop starts by itself and Wi-Fi Auto joins GuestNet.
   3. Start Network > SSH server, then run `ssh dsi` from the PC: no password.
   4. Try the maximize box, L + drag on a title bar, and the Terminal's scroll bar.
@@ -29,10 +30,11 @@ lists them, where each one stopped, and **every question still waiting for an an
 
 ## Small fixes to do (TODO)
 
-**Done in w99a (2026-11-18), on the card, not yet run on the DSi.** To check on the DSi:
-1. Over SSH, `nano notes.txt` opens without `export TERM=...`; in the desktop's Terminal, `nano` works with Home/End and arrows.
-2. `tar xzf make-4.3.tar.gz` unpacks (the make source you downloaded); `tar czf test.tgz folder` packs.
-3. Run `memreport` with the desktop, Wi-Fi and SSH up and send its output: it decides the next memory step.
+**w99b (2026-11-18) is on the card, not yet run on the DSi.** w99a's results on the DSi (user): **tar `xzf` works** (make-4.3 unpacked);
+nano still failed (`Error opening terminal: xterm`); memreport's per-process numbers were wrong. Both fixed in w99b. To check:
+1. Over SSH and in the desktop's Terminal: `nano notes.txt` opens.
+2. `memreport` with the desktop, Wi-Fi and SSH up: per-process numbers now (send the output: it decides the next memory step).
+3. After Wi-Fi connects, `date` shows the right date and time (California time).
 
 - **Memory (the real cause of "tar: SIGSEGV").** The card log showed `tar: page allocation failure. order:8`: 2.1 MB free, tar needing
   868 KB in one piece. A free 1 MB block existed, but the kernel's reserve check refused it: the reserve (`min_free_kbytes`) was
@@ -40,12 +42,16 @@ lists them, where each one stopped, and **every question still waiting for an an
   The 4 KB stacks were not the cause: the loader puts the stack at the end of a power-of-two block, so the rounding slack below it
   already works as stack (tar had about 180 KB).
   - **Done:**
-    - the reserve is 192 KB from boot (`/boot/rc`), so the same request passes;
+    - the reserve is 192 KB. w99a tried this from the boot script, but this kernel has no `/proc/sys`, so it did nothing; w99b sets it
+      in the kernel;
     - the Wi-Fi firmware copy (up to 128 KB) is freed once the chip runs it;
-    - the loader's message now says "not enough memory in one piece ... out of memory";
+    - the loader's message says "not enough memory in one piece ... out of memory";
     - the Wi-Fi window's logs in `/tmp` (RAM) are capped at 32 KB each;
-    - **`memreport`** (in `/usr/bin`) lists each process's memory and slack, the free blocks by size and the largest one.
-  - **Next, after memreport data from the DSi:**
+    - **`memreport`**: each process's own memory, rounding slack and shared memory, the reserve, the free blocks by size and the
+      largest one. w99b fills in the kernel's `/proc/PID/maps` (an empty stub on no-MMU before) so these numbers are real; the old
+      per-process figures were wrong (the kernel sized regions from a page field its allocator never sets).
+  - w99a's memreport, totals (reliable): 2.7 MB free, 4.2 MB file cache (given back when needed), largest free block 1 MB.
+  - **Next, after memreport data from w99b:**
     - what to cut from the biggest processes;
     - whether the RAM flag on our card programs (one big block for code + data) or two smaller blocks fragments less;
     - an "exact size" allocator: it would give back the rounding slack, but that slack doubles as stack space today, so it needs the
@@ -57,15 +63,23 @@ lists them, where each one stopped, and **every question still waiting for an an
     perl, links ...) and 16 KB for the rest. Each raise stays **within the memory block the program already gets**, so nothing needs
     more RAM.
   - `release.sh` runs it after every install; the list of changes is in `out/stacks/report.txt`.
-- **nano: "Error opening terminal".** Done.
-  - `/etc/profile` maps any terminal type nano does not know (an SSH client's `xterm-256color`, the old `vt100`) to `xterm`.
-  - The desktop's Terminal now says `linux`, with Home/End sending the Linux console's codes.
-  - Fixed on the way: the Terminal answered nano's "hide the cursor" sequence as if asked "what are you?", typing garbage into nano.
-- **tar `-z` / `-j` ("Cannot fork").** Done.
+- **nano: "Error opening terminal".** Fixed in w99b.
+  - The DSi's ncurses (5.4, 2005) reads terminal descriptions from `/usr/share/terminfo`, and the DSi had none, so every type
+    failed. `scripts/install-terminfo.sh` compiles 16 (linux, xterm, xterm-256color, vt100, screen, tmux, ...) on the PC in the old
+    format that ncurses reads and writes them into the image (release.sh runs it).
+  - `/etc/profile` keeps those types and turns anything else into `xterm`.
+  - The desktop's Terminal says `linux`, with Home/End sending the Linux console's codes. Fixed on the way: the Terminal answered
+    nano's "hide the cursor" sequence as if asked "what are you?", typing garbage into nano.
+- **tar `-z` / `-j` ("Cannot fork").** Done, **works on the DSi** (w99a).
   - tar starts gzip or bzip2 with `vfork()` + `exec`, straight on the archive file or its stdin/stdout, joined by a pipe.
-  - Tested on the PC with fork() made to fail exactly as on the DSi: the patched tar packs and unpacks `.tar.gz` and `.tar.bz2`
-    correctly, and the unpatched one fails with the DSi's message.
   - Not covered: remote tapes (rmt) and `--to-command`, which still need fork().
+- **The clock** (tar: "time stamp ... in the future"; the DSi's clock says December 2016). w99b: after each successful Wi-Fi
+  connection the Wi-Fi window runs `ntpclient` once to set the time. The time zone is `/etc/config/TZ`, California by default;
+  `scripts/set-timezone.sh` changes it. Not yet: writing the right time back into the DSi's clock chip, so it is right before Wi-Fi.
+- **Card scripts and `debugfs mkdir`** (found and fixed 2026-11-18): `debugfs`'s `mkdir` on a directory that already exists orphans a
+  new one and damages the image's counts. A second run of a script hit it (repaired with `rootfs-check.sh -y`; the empty orphan is
+  `/lost+found/#866`, an older one `#820`). All six scripts that make directories now use `img_mkdir` (scripts/card.sh), which skips
+  existing ones; tested twice in a row on a scratch image, clean.
 - **Downloads run at about 17 KB/s** over the DSi's Wi-Fi chip (`wget` of 2.3 MB took 2 min 15 s, 2026-11-17): the cost of moving
   data over the chip's bus one byte at a time. CMD53 block transfers should make this many times faster. **Not started** (larger:
   the ARM7's SDIO code).
