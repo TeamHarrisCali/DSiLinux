@@ -1,15 +1,19 @@
 # Plan: screen sleep, locking, and sleep when the lid closes
 
-Status (2026-11-18): **steps 2 and 3 built in w99e** (patch 0135), not yet tried on the console:
-- the backlights go off after **2 minutes** without a touch or button (the default; `echo "sleep 300" > /proc/dsisettings` sets
-  seconds, `sleep 0` never), and **at once when the lid closes**; a touch or button brings them back (the lid must be open), and
-  that first touch or press does nothing else;
-- programs keep running (Wi-Fi, SSH, downloads); SSH typing does not keep the screen on;
-- `echo "screen off" > /proc/dsisettings` / `screen on` by hand; `cat /proc/dsisettings` shows `sleep= screen= lid=`.
-Unknowns: whether the power chip's backlight bits (the DS way, which w99e uses) switch the DSi's backlights in DSi mode, and
-whether the ARM7's hinge bit reports the lid in DSi mode. Not yet: a "Screen off after" choice in Settings, switching the LCDs off
-too, the lock screen (step 4, waiting on questions 2-3), low battery shut down (5), deep sleep (6). Related: [TOUCHSCREEN-PLAN.md](TOUCHSCREEN-PLAN.md) (the lock screen
-can use the dashboard page), [FILES-CLEANUP-PLAN.md](FILES-CLEANUP-PLAN.md) (settings move to `/home/.config/dslinux`).
+Status (2026-11-18): **steps 2 and 3 built; w99e froze, w99f fixes it**, not yet tried on the console.
+- **w99e:** `echo "screen off" > /proc/dsisettings` left the screens on and froze the console and SSH. The ARM7's backlight command
+  used the old power-chip helpers, which wait for the SPI bus with a BIOS delay and no limit: inside the ARM7's interrupt handler
+  that hangs it, and with it the SD card, Wi-Fi and touch. The same helpers froze `poweroff` long ago (STAGE3, the y build), fixed
+  then with a bounded routine (`pm_xfer`), with which power-off works in DSi mode. The image was not damaged.
+- **w99f:** all three power commands (backlight on/off, brightness, power off) use `pm_xfer`; a register read with the power-off bit
+  set counts as a bad read and nothing is written. The **2-minute timer is off by default** until `screen off` is confirmed.
+- What it does once it works: the backlights go off after the set time without a touch or button (`echo "sleep 120" >
+  /proc/dsisettings`, `sleep 0` never) and at once when the lid closes; a touch or button brings them back (the lid must be open),
+  and that first touch or press does nothing else; programs keep running; SSH typing does not keep the screen on; `screen off` /
+  `screen on` by hand; `cat /proc/dsisettings` shows `sleep= screen= lid=`.
+Unknowns: whether the power chip's backlight bits switch the DSi's backlights in DSi mode (the DS way; the same register's power-off
+bit does work), and whether the ARM7's hinge bit reports the lid in DSi mode. Not yet: "Screen off after" in Settings, switching the
+LCDs off too, the lock screen (step 4, questions 2-3), low battery shut down (5), deep sleep (6).
 
 ## Today (checked in the source)
 

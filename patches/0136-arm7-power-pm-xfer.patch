@@ -1,0 +1,133 @@
+From bbcc8a7d46df2f9ed838bdb9b033d160d948aa66 Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 10:18:20 -0600
+Subject: [PATCH] ARM7 power commands with pm_xfer (w99e "screen off" froze the
+ ARM7)
+
+w99e on the console: echo "screen off" > /proc/dsisettings left the
+screens on and froze the console and SSH. FIFO_POWER_CMD_BACKLIGHT_POWER
+used power_read()/power_write(), which wait for the SPI bus with
+swiDelay and no limit: inside the ARM7's interrupt handler that hangs
+the ARM7 and with it SD, Wi-Fi and touch. The same helpers froze
+poweroff before (STAGE3, y build); the fix then was pm_xfer() (bounded
+waits, no BIOS call), with which poweroff works in DSi mode.
+- The backlight power, backlight brightness and system power commands
+  use pm_xfer(); a register that reads with the power-off bit set
+  counts as a bad read and nothing is written.
+- Screen sleep off by default (nds_sleep_secs 0) until "screen off" is
+  confirmed on the console; "sleep N" turns it on.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ linux-2.6.x/arch/arm/mach-nds/arm7/main.c   | 68 ++++++++-------------
+ linux-2.6.x/arch/arm/mach-nds/screensleep.c |  4 +-
+ 2 files changed, 29 insertions(+), 43 deletions(-)
+
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/main.c b/linux-2.6.x/arch/arm/mach-nds/arm7/main.c
+index 0d984d0e6..373337dce 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/arm7/main.c
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/main.c
+@@ -136,51 +136,37 @@ static void recieveFIFOCommand(void)
+ 			cmd = FIFO_POWER_GET_CMD(data);
+ 			cmddata = FIFO_POWER_GET_DATA(data);
+ 			switch (cmd) {
+-			case FIFO_POWER_CMD_BACKLIGHT_BRIGHTNESS:
+-					if (isDSPhat()) 
+-						break;
+-					switch (cmddata) {
+-					case 0:
+-						data = power_read(POWER_BACKLIGHT);
+-						data &=  ~3;
+-						power_write(POWER_BACKLIGHT, data);
+-						break;
+-					case 1:
+-						data = power_read(POWER_BACKLIGHT);
+-						data &=  ~3;
+-						data |= (POWER4_BRIGHTNESS_MED);
+-						power_write(POWER_BACKLIGHT, data);
+-						break;
+-					case 2:
+-						data = power_read(POWER_BACKLIGHT);
+-						data &=  ~3;
+-						data |= (POWER4_BRIGHTNESS_HIGH);
+-						power_write(POWER_BACKLIGHT, data);
+-						break;
+-					case 3:
+-						
+-						data = power_read(POWER_BACKLIGHT);
+-						data |= (POWER4_BRIGHTNESS_MAX);
+-						power_write(POWER_BACKLIGHT, data);
+-						break;
+-					}
++			/*
++			 * The power chip over SPI with pm_xfer() (bounded waits, no BIOS call): power_read()/power_write() wait for the
++			 * bus with swiDelay and no limit, which hangs in this interrupt handler and with it everything the ARM7 does
++			 * (SD, Wi-Fi, touch). That froze the console at poweroff before (STAGE3, the y build) and again at "screen off"
++			 * (w99e). A register 0 that reads with the power-off bit (6) set is a bad read: then nothing is written, so a
++			 * failed read can never switch the DSi off.
++			 */
++			case FIFO_POWER_CMD_BACKLIGHT_BRIGHTNESS: {
++					u8 v;
++
++					if (!pm_xfer(0x80 | POWER_BACKLIGHT, 0, &v) || (v & (1 << 6)))
++						break;		/* unreadable, or a DS Phat (no brightness levels) */
++					v &= ~3;
++					v |= cmddata & 3;	/* 0 low .. 3 max (POWER4_BRIGHTNESS_*) */
++					pm_xfer(POWER_BACKLIGHT, v, 0);
++				}
+ 			break;
+-			case FIFO_POWER_CMD_BACKLIGHT_POWER:
+-					switch (cmddata) {
+-					case 0:
+-	 					data = power_read(POWER_CONTROL);
+-		        			data &= ~(POWER0_LOWER_BACKLIGHT | POWER0_UPPER_BACKLIGHT);
+-						power_write(POWER_CONTROL, data);
+-						break;
+-					case 1:
+-						data = power_read(POWER_CONTROL);
+-						data |= (POWER0_LOWER_BACKLIGHT | POWER0_UPPER_BACKLIGHT);
+-						power_write(POWER_CONTROL, data);
++			case FIFO_POWER_CMD_BACKLIGHT_POWER: {
++					u8 v;
++
++					if (!pm_xfer(0x80 | POWER_CONTROL, 0, &v) || (v & POWER0_SYSTEM_POWER))
+ 						break;
+-					}
++					if (cmddata)
++						v |= POWER0_LOWER_BACKLIGHT | POWER0_UPPER_BACKLIGHT;
++					else
++						v &= ~(POWER0_LOWER_BACKLIGHT | POWER0_UPPER_BACKLIGHT);
++					pm_xfer(POWER_CONTROL, v, 0);
++				}
+ 			break;
+ 			case FIFO_POWER_CMD_SYSTEM_POWER:
+-					power_write(POWER_CONTROL, POWER0_SYSTEM_POWER);
++					pm_xfer(POWER_CONTROL, POWER0_SYSTEM_POWER, 0);
+ 				break;
+ 				}
+ 	 		break;
+diff --git a/linux-2.6.x/arch/arm/mach-nds/screensleep.c b/linux-2.6.x/arch/arm/mach-nds/screensleep.c
+index 3dd7caed4..9be452794 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/screensleep.c
++++ b/linux-2.6.x/arch/arm/mach-nds/screensleep.c
+@@ -4,7 +4,7 @@
+  * downloads go on. The input drivers (button.c, nds_ts.c) report every new press with nds_screen_activity(), and drop the press that
+  * woke the screen, so waking never clicks or types. Input over SSH does not count: it is not someone in front of the DSi.
+  * The backlights are switched with the ARM7's FIFO_POWER_CMD_BACKLIGHT_POWER (the power chip's backlight bits, as DSLinux's ndsbl).
+- * /proc/dsisettings (volume.c): "sleep N" seconds without input before the screen goes off (0 = never; default 120), "screen off" /
++ * /proc/dsisettings (volume.c): "sleep N" seconds without input before the screen goes off (0 = never, the default for now), "screen off" /
+  * "screen on"; the read line gains sleep=N screen=on|off lid=open|closed.
+  */
+ #include <linux/kernel.h>
+@@ -13,7 +13,7 @@
+ #include <linux/jiffies.h>
+ #include <asm/arch/fifo.h>
+ 
+-int nds_sleep_secs = 120;
++int nds_sleep_secs;		/* 0 = never (default until "screen off" is confirmed to work in DSi mode: w99e froze, see arm7/main.c) */
+ int nds_screen_is_off;
+ int nds_lid_closed;
+ static unsigned long last_input;
+-- 
+2.56.1
+

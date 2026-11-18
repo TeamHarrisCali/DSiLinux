@@ -1100,3 +1100,13 @@ after nds_sleep_secs (120) without local input; button.c (keys at vblank, X/Y an
 and nds_ts.c call nds_screen_activity() on every new press and hold back the press that woke the screen until it is released; the
 hinge bit (1 = closed) turns the screen off at once and back on when opened. /proc/dsisettings: "sleep N", "screen off|on", and
 sleep=/screen=/lid= in the read line (dsdesk, dssettings and dsfetch read only the leading fields). On the card, image clean.
+
+### w99e froze at "screen off"; w99f
+
+w99e (user, over SSH): `echo "screen off" > /proc/dsisettings`: the screens stayed on, the console froze and SSH stopped answering.
+Cause: arm7/main.c's FIFO_POWER_CMD_BACKLIGHT_POWER (DSLinux's own, used by ndsbl) calls power_read()/power_write() from spi.c, whose
+WAIT_FOR_NOT_BUSY() loops on swiDelay(1) without a limit: in the ARM7's interrupt handler that hangs (the y build's poweroff hang,
+fixed then by pm_xfer() in the z build). Should have been caught: the lesson "no BIOS calls in IRQ-context ARM7 code" was on record.
+w99f, patch 0136: the brightness, backlight-power and system-power commands use pm_xfer(); a register 0 / 4 read with bit 6 set is
+treated as a failed read (no write, so a bad read can never power the DSi off); screen sleep's idle timer off by default. The image
+was clean after the freeze (checked before writing). w99f on the card; w99e removed from the card by release.sh.
