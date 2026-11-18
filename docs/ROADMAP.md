@@ -5,7 +5,8 @@ lists them, where each one stopped, and **every question still waiting for an an
 
 ## Where things stand
 
-- **On the card now: w98z** (`dslinux-dsimode-w98z-uc3.nds`, checksum checked). **Not yet run on the DSi.** It brings:
+- **On the card now: w99a** (2026-11-18): w98z plus the TODO fixes below (memory, stacks, nano, tar). Not yet run on the DSi.
+- **w98z** (2026-11-17) brought:
   - uptime fixed (it showed the date), dsfetch fixed and installed as `/usr/bin/dsfetch`;
   - the DSi asks DHCP for its last address again (`/home/wifi.lastip`), so `ssh dsi` keeps finding it;
   - **key login over SSH:** the PC's `~/.ssh/id_rsa_dsi` is in the DSi's `/home/.ssh/authorized_keys`, so the SSH server is
@@ -13,7 +14,7 @@ lists them, where each one stopped, and **every question still waiting for an an
   - windows: maximize / restore box, resize with L + drag on the title bar;
   - the Terminal's scroll bar, and the Terminal fits itself to a resized window.
 - **First thing next time:**
-  1. Boot w98z.
+  1. Boot w99a (it includes everything in w98z).
   2. Check the desktop starts by itself and Wi-Fi Auto joins GuestNet.
   3. Start Network > SSH server, then run `ssh dsi` from the PC: no password.
   4. Try the maximize box, L + drag on a title bar, and the Terminal's scroll bar.
@@ -28,57 +29,46 @@ lists them, where each one stopped, and **every question still waiting for an an
 
 ## Small fixes to do (TODO)
 
-- **nano over SSH: "Error opening terminal: xterm-256color"** (seen 2026-11-17). The PC sends its terminal type, and the DSi has no
-  terminal-description files at all. nano only knows the two types built into it, `xterm` and `linux`.
-  - **For now:** run `export TERM=xterm` in the SSH session, then `nano`.
-  - **Fix:** `/etc/profile` maps unknown types (`xterm-256color`, `xterm-kitty`, ...) to `xterm`.
-  - **To check:** nano in the desktop's Terminal too. nxterm sets `TERM=vt100`, which is not among nano's built-in types either, so it
-    probably fails there as well. Either nxterm says `xterm` (then check that its escape-sequence support is enough for nano and `mc`),
-    or a small terminfo set (`vt100`, `xterm`, `linux`) goes into `/usr/share/terminfo` on the card.
-  - The BusyBox plan's `less`/`top` and the files plan's `mc` depend on this too.
+**Done in w99a (2026-11-18), on the card, not yet run on the DSi.** To check on the DSi:
+1. Over SSH, `nano notes.txt` opens without `export TERM=...`; in the desktop's Terminal, `nano` works with Home/End and arrows.
+2. `tar xzf make-4.3.tar.gz` unpacks (the make source you downloaded); `tar czf test.tgz folder` packs.
+3. Run `memreport` with the desktop, Wi-Fi and SSH up and send its output: it decides the next memory step.
 
-- **tar with compression fails** (`-z`, `-j`: "Cannot fork", seen 2026-11-17). GNU tar 1.16 (`/usr/bin/tar`) starts gzip or bzip2 by
-  forking a child that runs it, plus a second child that keeps copying data. The C library's `fork()` only returns "Function not
-  implemented" on this CPU (no MMU). Plain `tar cf` / `xf` / `tf` work (no fork); so do the shell's pipes.
-  - **For now:** unpack with `gzip -dc file.tar.gz | tar xf -` (or `bzip2 -dc file.tar.bz2 | tar xf -`), pack with
-    `tar cf - folder | gzip > folder.tar.gz`.
-  - **Fix, preferred:** BusyBox's tar (BusyBox plan) unpacks gz, bz2 and xz inside itself, with no second process at all.
-  - **Fix, sooner if wanted:** patch GNU tar's `sys_child_open_for_compress` / `_uncompress` in `src/system.c`: start gzip with
-    `vfork()` + `exec` directly on a pipe and drop the copying child.
-
-- **Memory is getting low** (user, 2026-11-17; dsfetch showed 6.1 of 12.6 MiB used with the desktop and Wi-Fi up). Of the 16 MB, the
-  4 MiB ROM image (kernel + `/boot`) sits in RAM, so 12.6 MiB is all the programs get.
-  - **Step 1, measure:** a small `memreport` (how much each process holds: on this no-MMU system that is its whole program copy,
-    data and stack; plus the kernel's buffers, `/tmp` and the page cache), run with the desktop, Wi-Fi and SSH up. Cut from the top
-    of that list, not by guessing.
-  - **Known suspects to check:**
-    - the Wi-Fi firmware buffer: 128 KB kept in the kernel after the upload (`/proc/dsiwifi2fw`), which could be freed and the file
-      read again when needed;
-    - programs started from the card are copied whole into RAM each time (`/usr/bin`: the games, dsfiles, dsnotes, nxclock...),
-      while ROM programs share their code; the busiest ones could move into the ROM (772 KB free there) or be rebuilt smaller (`-Os`);
-    - every Nano-X program carries its own copy of the Nano-X library (no shared libraries here);
-    - `/tmp` is RAM: the logs written there (`desktop.log`, `dsnet.log`, `wifi-*.log`, the DHCP log) only grow; cap them or keep
-      them on the card;
-    - stack sizes given to programs at link time (`elf2flt -s`), possibly larger than needed;
-    - each Terminal keeps 200 lines of scrollback (about 38 KB);
-    - kernel parts for DS-only hardware (the GBA-slot CF drivers and so on) that the DSi never uses;
-    - the `autolog` loop that saves the log every 10 s.
-  - Overlaps: the BusyBox plan (hush runs many tools inside itself, without a new process) and the files plan (removing unused
-    programs saves card space, not RAM, unless they were running).
-
-- **`gzip -dc make-4.3.tar.gz | tar xf -` ends in SIGSEGV** (user, 2026-11-17, the 2.3 MB make source). Likely cause: **tiny
-  stacks.** On this system each program's stack size is fixed in its file when it is built (`elf2flt -s`). `tar` and `gzip` have
-  **4 KB**, and GNU tar needs far more while extracting deep paths. Without an MMU an overflow is not caught: it overwrites memory,
-  and that shows up as SIGSEGV. **129 of the 185 programs in `/usr/bin` have 4 KB**, including tar, gzip, bzip2, unzip, nano, less,
-  links, mc, perl, sqlite3, irssi, scp and dropbear (the list is in `out/flt/stacks.txt` on the PC).
-  - **Confirm:** `dmesg | tail` on the DSi after the crash names the program that faulted (the fault handler prints it).
-  - **Approved by the user (2026-11-17): do this the next time the card is in the PC.**
-  - **Fix:** an install step (like `install-apps.sh`) rewrites each program's stack size in the image with `flthdr -s`, without
-    rebuilding: 16 KB for the small tools, 64 KB for tar, gzip, bzip2, unzip, perl, sqlite3, links, mc, irssi and nano. RAM cost: only
-    while a program runs (a few tens of KB each), within the memory TODO's budget.
-  - Also: tar's file holds about 860 KB of data that is copied into RAM on every run (the BusyBox plan's tar is much smaller).
+- **Memory (the real cause of "tar: SIGSEGV").** The card log showed `tar: page allocation failure. order:8`: 2.1 MB free, tar needing
+  868 KB in one piece. A free 1 MB block existed, but the kernel's reserve check refused it: the reserve (`min_free_kbytes`) was
+  508 KB, and part of it must sit in large pieces. The shell shows the process killed after exec's point of no return as SIGSEGV.
+  The 4 KB stacks were not the cause: the loader puts the stack at the end of a power-of-two block, so the rounding slack below it
+  already works as stack (tar had about 180 KB).
+  - **Done:**
+    - the reserve is 192 KB from boot (`/boot/rc`), so the same request passes;
+    - the Wi-Fi firmware copy (up to 128 KB) is freed once the chip runs it;
+    - the loader's message now says "not enough memory in one piece ... out of memory";
+    - the Wi-Fi window's logs in `/tmp` (RAM) are capped at 32 KB each;
+    - **`memreport`** (in `/usr/bin`) lists each process's memory and slack, the free blocks by size and the largest one.
+  - **Next, after memreport data from the DSi:**
+    - what to cut from the biggest processes;
+    - whether the RAM flag on our card programs (one big block for code + data) or two smaller blocks fragments less;
+    - an "exact size" allocator: it would give back the rounding slack, but that slack doubles as stack space today, so it needs the
+      stack sizes below and testing on the console.
+  - Other suspects from before, still to measure: every Nano-X program carries its own copy of the Nano-X library; kernel parts for
+    DS-only hardware; 200 lines of scrollback per Terminal (about 38 KB).
+- **Stack sizes:** done (approved 2026-11-17).
+  - `scripts/fix-stacks.sh` raised the stack field of **149 programs** in the image, towards 64 KB for the big ones (tar, gzip, nano,
+    perl, links ...) and 16 KB for the rest. Each raise stays **within the memory block the program already gets**, so nothing needs
+    more RAM.
+  - `release.sh` runs it after every install; the list of changes is in `out/stacks/report.txt`.
+- **nano: "Error opening terminal".** Done.
+  - `/etc/profile` maps any terminal type nano does not know (an SSH client's `xterm-256color`, the old `vt100`) to `xterm`.
+  - The desktop's Terminal now says `linux`, with Home/End sending the Linux console's codes.
+  - Fixed on the way: the Terminal answered nano's "hide the cursor" sequence as if asked "what are you?", typing garbage into nano.
+- **tar `-z` / `-j` ("Cannot fork").** Done.
+  - tar starts gzip or bzip2 with `vfork()` + `exec`, straight on the archive file or its stdin/stdout, joined by a pipe.
+  - Tested on the PC with fork() made to fail exactly as on the DSi: the patched tar packs and unpacks `.tar.gz` and `.tar.bz2`
+    correctly, and the unpatched one fails with the DSi's message.
+  - Not covered: remote tapes (rmt) and `--to-command`, which still need fork().
 - **Downloads run at about 17 KB/s** over the DSi's Wi-Fi chip (`wget` of 2.3 MB took 2 min 15 s, 2026-11-17): the cost of moving
-  data over the chip's bus one byte at a time. CMD53 block transfers (Wi-Fi list above) should make this many times faster.
+  data over the chip's bus one byte at a time. CMD53 block transfers should make this many times faster. **Not started** (larger:
+  the ARM7's SDIO code).
 
 ## The plans (none started)
 

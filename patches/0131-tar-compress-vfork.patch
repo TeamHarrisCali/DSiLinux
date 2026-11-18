@@ -1,0 +1,165 @@
+From 1389edd01cd37da582830868c7d9945f91021299 Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 09:04:26 -0600
+Subject: [PATCH 131/131] tar: -z / -j without fork (vfork + exec of the
+ compressor)
+
+uClibc's fork() only fails without an MMU ("Cannot fork: Function not
+implemented"). On __uClinux__, sys_child_open_for_compress/uncompress
+start the compressor with vfork() and exec straight on the archive file
+(or tar's stdin/stdout for "-"), joined to tar by a pipe, without the
+reblocking child (no rmt archives). The compressor's full path is
+looked up before the vfork: the child only dup2s, closes, execs or
+_exits. Tested on the PC with this source built with -D__uClinux__ and
+fork() made to fail as uClibc's does: czf/xzf/cjf/xjf, files and
+stdin/stdout, identical trees after extraction; the unpatched tar fails
+there with the DSi's message.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ user/tar/src/src/system.c | 115 ++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 115 insertions(+)
+
+diff --git a/user/tar/src/src/system.c b/user/tar/src/src/system.c
+index 612951bf9..7f7cc44f3 100644
+--- a/user/tar/src/src/system.c
++++ b/user/tar/src/src/system.c
+@@ -304,6 +304,64 @@ xdup2 (int from, int into)
+     }
+ }
+ 
++#ifdef __uClinux__
++/* DSLinuxDSi: no MMU, so no fork () (the C library's fork () only fails, "Cannot fork"). The compressor is started with vfork () and
++   exec directly on the archive file (or on tar's own stdin / stdout for "-"), joined to tar by a pipe, without the reblocking child
++   (so no rmt archives here). Its full path is found before the vfork, because a vfork child may only exec or _exit: anything else,
++   such as execlp's PATH search, would run in the parent's memory.  */
++static const char *
++nommu_find_program (const char *name)
++{
++  static char path[256];
++  const char *p = getenv ("PATH");
++
++  if (strchr (name, '/'))
++    return name;
++  if (!p)
++    p = "/bin:/usr/bin";
++  while (*p)
++    {
++      const char *e = strchr (p, ':');
++      size_t n = e ? (size_t) (e - p) : strlen (p);
++
++      if (n && n + strlen (name) + 2 < sizeof path)
++	{
++	  memcpy (path, p, n);
++	  path[n] = '/';
++	  strcpy (path + n + 1, name);
++	  if (access (path, X_OK) == 0)
++	    return path;
++	}
++      if (!e)
++	break;
++      p = e + 1;
++    }
++  return name;
++}
++
++/* PROG ARG with IN as its stdin and OUT as its stdout; CLOSEFD is the pipe end the child must not keep (so the reader sees the
++   end of the data).  */
++static pid_t
++nommu_spawn (const char *prog, const char *arg, int in, int out, int closefd)
++{
++  pid_t pid = vfork ();
++
++  if (pid < 0)
++    call_arg_fatal ("vfork", _("child process"));
++  if (pid == 0)
++    {
++      if (in != STDIN_FILENO)
++	dup2 (in, STDIN_FILENO);
++      if (out != STDOUT_FILENO)
++	dup2 (out, STDOUT_FILENO);
++      close (closefd);
++      execl (prog, prog, arg, (char *) 0);
++      _exit (127);
++    }
++  return pid;
++}
++#endif
++
+ /* Set ARCHIVE for writing, then compressing an archive.  */
+ pid_t
+ sys_child_open_for_compress (void)
+@@ -314,6 +372,39 @@ sys_child_open_for_compress (void)
+   pid_t child_pid;
+   int wait_status;
+ 
++#ifdef __uClinux__
++  {
++    int p[2], out;
++    const char *prog = nommu_find_program (use_compress_program_option);
++    pid_t pid;
++
++    xpipe (p);
++    if (strcmp (archive_name_array[0], "-") == 0)
++      out = STDOUT_FILENO;
++    else
++      {
++	if (backup_option)
++	  maybe_backup_file (archive_name_array[0], 1);
++	out = creat (archive_name_array[0], MODE_RW);
++	if (out < 0)
++	  {
++	    int saved_errno = errno;
++
++	    if (backup_option)
++	      undo_last_backup ();
++	    errno = saved_errno;
++	    open_fatal (archive_name_array[0]);
++	  }
++      }
++    pid = nommu_spawn (prog, (char *) 0, p[PREAD], out, p[PWRITE]);
++    if (out != STDOUT_FILENO)
++      xclose (out);
++    xclose (p[PREAD]);
++    archive = p[PWRITE];
++    return pid;
++  }
++#endif
++
+   xpipe (parent_pipe);
+   child_pid = xfork ();
+ 
+@@ -475,6 +566,30 @@ sys_child_open_for_uncompress (void)
+   pid_t child_pid;
+   int wait_status;
+ 
++#ifdef __uClinux__
++  {
++    int p[2], in;
++    const char *prog = nommu_find_program (use_compress_program_option);
++    pid_t pid;
++
++    xpipe (p);
++    if (strcmp (archive_name_array[0], "-") == 0)
++      in = STDIN_FILENO;
++    else
++      {
++	in = open (archive_name_array[0], O_RDONLY | O_BINARY, MODE_RW);
++	if (in < 0)
++	  open_fatal (archive_name_array[0]);
++      }
++    pid = nommu_spawn (prog, "-d", in, p[PWRITE], p[PREAD]);
++    if (in != STDIN_FILENO)
++      xclose (in);
++    xclose (p[PWRITE]);
++    archive = p[PREAD];
++    return pid;
++  }
++#endif
++
+   xpipe (parent_pipe);
+   child_pid = xfork ();
+ 
+-- 
+2.56.1
+

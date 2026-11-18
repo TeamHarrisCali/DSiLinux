@@ -70,6 +70,7 @@ itself to the new size; most other programs keep their layout.
 | System > Settings | `dssettings` | brightness, pointer speed, desktop colour / pattern / wallpaper (`/home/wallpapers`, photos), clock, info |
 | System > Bench, Save log | `dsbench`, `/boot/savelog` | |
 | (Terminal or SSH) | `dsfetch` | neofetch for the DSi: the system at a glance (`dsfetch -n`: no colours) |
+| (Terminal or SSH) | `memreport` | where the RAM goes: each program's memory, free memory by block size, the largest free block (a program needing more in one piece cannot start) |
 
 Every program closes with q or Esc, or with the window's close box.
 

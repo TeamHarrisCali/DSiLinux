@@ -1003,3 +1003,27 @@ not be hit); nxterm got a scroll bar and follows resizes (TIOCSWINSZ). Checked i
 maximise, restore, an L-drag shrinking the terminal to 33x11 with the prompt kept; nxctl gained rdown/rmove for the right button.
 The virtual desktop plan is docs/VIRTUAL-DESKTOPS-PLAN.md (dsdesk does it by mapping and unmapping; nanowm and the server unchanged).
 w98z is on the card (checksum checked) with /usr/bin/dsfetch and the PC's SSH key in /home/.ssh/authorized_keys. Not yet run.
+
+### TODO fixes: memory, stacks, nano, tar (w99a, patches 0129-0131)
+
+The card log of the user's "gzip -dc make-4.3.tar.gz | tar xf -: SIGSEGV": `tar: page allocation failure. order:8`, the free lists
+`112*4kB 13*8kB 3*16kB 2*32kB 1*64kB 3*128kB 0*256kB 0*512kB 1*1024kB` (2136 KB free), "Allocation of length 867912 from process
+2752 failed", then "Unable to allocate RAM for process data, errno 0" and "Prefetch abort: tar ... pc=0xac0": exec failed after its
+point of no return, which kills the process (the shell's SIGSEGV). Earlier `ls` and `echo` had failed the same way (order 6). Working
+the kernel's zone_watermark_ok with these numbers: min 127 pages (min_free_kbytes 508), halved per order, fails at order 5 (128 KB)
+although a free 1 MB block exists; with min_free_kbytes 192 the same request passes. The 4 KB stacks in the program files were not the
+cause: binfmt_flat puts the stack at the end of the kmalloc block (rounded to a power of two by SLOB), so the slack below it works as
+stack (tar: about 180 KB; uClibc's malloc uses mmap, not brk, so the slack is otherwise unused).
+- w99a, patch 0129: `/boot/rc` sets min_free_kbytes 192; dsiwifi frees the firmware copy after the upload (and on "clear"); binfmt_flat
+  says "not enough memory in one piece for its data (N bytes): out of memory"; `memreport` (Mem/Slack/Shared per process from
+  task_nommu.c, meminfo, the reserve, /proc/buddyinfo); dsnet's /tmp logs rotate to .old past 32 KB.
+- `scripts/fix-stacks.sh` (in release.sh): the stack field of 149 programs in the image raised towards 64 KB / 16 KB, each only as far
+  as the power-of-two block it already gets (no more RAM; dry run first, then idempotent).
+- Patch 0130: nxterm TERM=linux (nano has only linux and xterm built in, no terminfo files on the DSi), Home/End as ESC[1~ / ESC[4~,
+  and no device-attributes answer to "ESC [ ? n c" (the Linux console's cursor shape, which nano sends; the answer was typed into
+  nano). `scripts/install-session.sh` adds to /etc/profile: unknown TERM values (xterm-256color from SSH) become xterm.
+- Patch 0131: GNU tar -z/-j start the compressor with vfork + exec on the archive (or stdin/stdout), joined by a pipe; the full path is
+  found before the vfork. Tested on the PC (this source with -D__uClinux__, the 2006 gnulib futimens renamed in the test copy only,
+  fork() made to fail with ENOSYS by a preload as uClibc's does): czf/xzf/cjf/xjf, file and stdin/stdout, trees identical; the PC's
+  own tar fails under the same preload with the DSi's message. install-apps.sh now also installs tar (as built, no RAM flag).
+- w99a is on the card (checksum checked, image clean). Not yet run on the DSi.

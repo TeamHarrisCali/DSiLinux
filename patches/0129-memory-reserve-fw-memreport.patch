@@ -1,0 +1,298 @@
+From 81aa300b2507d035ac996ba05e44210ff30dcbb8 Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 09:04:26 -0600
+Subject: [PATCH 129/131] Memory: smaller kernel reserve, firmware copy freed,
+ memreport, capped logs
+
+The card log of the "tar: SIGSEGV" (2026-11-17): "tar: page allocation
+failure. order:8", 2.1 MB free, tar needing 868 KB in one piece, and a
+free 1 MB block that the reserve check refused (min_free_kbytes 508 KB,
+part of it required in large pieces: the check failed at 128 KB).
+- rc: min_free_kbytes 192 at boot (the same request then passes).
+- dsiwifi: the firmware file's copy (up to 128 KB) is freed once the
+  chip runs it, and by "clear"; the Wi-Fi window and the test script
+  load the file again before the next ifconfig wlan0 up.
+- binfmt_flat: "Unable to allocate RAM for process data, errno 0"
+  becomes "<program>: not enough memory in one piece for its data (N
+  bytes): out of memory". (The process still dies: the failure comes
+  after exec's point of no return, which the shell shows as SIGSEGV.)
+- memreport: each process's memory and slack (/proc/PID/status), RAM,
+  the kernel's reserve, free blocks by size and the largest one.
+- dsnet: /tmp/dsnet.log and /tmp/dsnet-dhcp.log become NAME.old past
+  32 KB (/tmp is RAM).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ linux-2.6.x/arch/arm/mach-nds/dsiwifi.c |   7 ++
+ linux-2.6.x/fs/binfmt_flat.c            |   4 +-
+ user/microwin/src/demos/nanox/dsnet.c   |  21 +++-
+ vendors/Nintendo/DSI/memreport.c        | 145 ++++++++++++++++++++++++
+ vendors/Nintendo/DSI/rc                 |   4 +
+ 5 files changed, 178 insertions(+), 3 deletions(-)
+ create mode 100644 vendors/Nintendo/DSI/memreport.c
+
+diff --git a/linux-2.6.x/arch/arm/mach-nds/dsiwifi.c b/linux-2.6.x/arch/arm/mach-nds/dsiwifi.c
+index 5412be927..8a82c4dbc 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/dsiwifi.c
++++ b/linux-2.6.x/arch/arm/mach-nds/dsiwifi.c
+@@ -1225,6 +1225,11 @@ static int w_open(struct net_device *dev)
+ 	fail_state = 0;
+ 	conn_at = 0;
+ 	upload(1);
++	/* the firmware file's copy (up to 128 KB) is not needed once the chip runs it: give it back (memory is tight; the Wi-Fi window
++	 * and the test script load the file again before the next "ifconfig wlan0 up") */
++	kfree(fw);
++	fw = NULL;
++	fw_len = 0;
+ 	if (!session)
+ 		return -EIO;
+ 	memcpy(dev->dev_addr, mac, 6);
+@@ -1353,6 +1358,8 @@ static int twl_write_proc(struct file *file, const char __user *buffer, unsigned
+ 		return -EFAULT;
+ 	cmd[n] = 0;
+ 	if (!strncmp(cmd, "clear", 5)) {
++		kfree(fw);
++		fw = NULL;
+ 		fw_len = 0;
+ 		return count;
+ 	}
+diff --git a/linux-2.6.x/fs/binfmt_flat.c b/linux-2.6.x/fs/binfmt_flat.c
+index a6b450a54..c1ebfd07c 100644
+--- a/linux-2.6.x/fs/binfmt_flat.c
++++ b/linux-2.6.x/fs/binfmt_flat.c
+@@ -551,8 +551,8 @@ static int load_flat_file(struct linux_binprm * bprm,
+ 		if (realdatastart == 0 || realdatastart >= (unsigned long)-4096) {
+ 			if (!realdatastart)
+ 				realdatastart = (unsigned long) -ENOMEM;
+-			printk("Unable to allocate RAM for process data, errno %d\n",
+-					(int)-datapos);
++			printk("%s: not enough memory in one piece for its data (%lu bytes): out of memory\n", current->comm,
++			       (unsigned long)(data_len + extra + MAX_SHARED_LIBS * sizeof(unsigned long)));
+ 			do_munmap(current->mm, textpos, text_len);
+ 			return realdatastart;
+ 		}
+diff --git a/user/microwin/src/demos/nanox/dsnet.c b/user/microwin/src/demos/nanox/dsnet.c
+index ee1c5f351..a5fe53327 100644
+--- a/user/microwin/src/demos/nanox/dsnet.c
++++ b/user/microwin/src/demos/nanox/dsnet.c
+@@ -23,6 +23,7 @@
+ #include <string.h>
+ #include <unistd.h>
+ #include <sys/ioctl.h>
++#include <sys/stat.h>
+ #include <sys/socket.h>
+ #include <net/if.h>
+ #include <netinet/in.h>
+@@ -305,6 +306,8 @@ static void load_auto(void)
+  * DHCP on ifn, asking for the address this network gave last time (/home/wifi.lastip: "name TAB address" per network): most routers
+  * give it again, so "ssh dsi" (the PC's ~/.ssh/config) keeps finding the DSi. A new address is saved for next time.
+  */
++static void cap_log(const char *path);
++
+ #ifdef NANOX_TESTBED
+ #define LASTIP	"wifi.lastip"
+ #else
+@@ -329,6 +332,7 @@ static void dhcp(const char *ifn, const char *ssid)
+ 		}
+ 		fclose(f);
+ 	}
++	cap_log("/tmp/dsnet-dhcp.log");
+ 	if (last[0])
+ 		snprintf(cmd, sizeof(cmd), "udhcpc -n -q -i %s -r %s >> /tmp/dsnet-dhcp.log 2>&1", ifn, last);
+ 	else
+@@ -343,10 +347,25 @@ static void dhcp(const char *ifn, const char *ssid)
+ 	}
+ }
+ 
++/* /tmp is RAM: a log there past 32 KB becomes NAME.old (the one before is dropped), so the two together stay under 64 KB */
++static void cap_log(const char *path)
++{
++	struct stat st;
++	char old[64];
++
++	if (stat(path, &st) == 0 && st.st_size > 32768) {
++		snprintf(old, sizeof(old), "%s.old", path);
++		rename(path, old);
++	}
++}
++
+ /* what the window did, for the log (Save log puts /tmp/dsnet.log on the card) */
+ static void dlog(const char *s)
+ {
+-	FILE *f = fopen("/tmp/dsnet.log", "a");
++	FILE *f;
++
++	cap_log("/tmp/dsnet.log");
++	f = fopen("/tmp/dsnet.log", "a");
+ 
+ 	if (f) {
+ 		fprintf(f, "dsnet: %s\n", s);
+diff --git a/vendors/Nintendo/DSI/memreport.c b/vendors/Nintendo/DSI/memreport.c
+new file mode 100644
+index 000000000..97747c399
+--- /dev/null
++++ b/vendors/Nintendo/DSI/memreport.c
+@@ -0,0 +1,145 @@
++/*
++ * memreport - where the DSi's RAM goes: every process with the memory it holds, then the free memory by block size.
++ * On this system without an MMU a process holds its whole program copy (unless it runs in place from the ROM), its data, bss and stack,
++ * each block rounded up to a power of two ("Slack" is that rounding). A program starts only if one free block is big enough for it,
++ * so the largest free block matters as much as the total.
++ * Sources: /proc/PID/status (Name, Mem, Slack, Shared: fs/proc/task_nommu.c), /proc/meminfo, /proc/buddyinfo.
++ * Built and put on the card by scripts/build-tools.sh; run "memreport" in the Terminal or over SSH.
++ */
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <dirent.h>
++
++#define MAXP	96
++
++struct proc {
++	int pid;
++	char name[20];
++	unsigned long mem, slack, shared;
++};
++
++static struct proc procs[MAXP];
++static int nprocs;
++
++static void read_proc(const char *pid)
++{
++	char path[48], line[96];
++	struct proc *p;
++	FILE *f;
++
++	if (nprocs >= MAXP)
++		return;
++	snprintf(path, sizeof(path), "/proc/%s/status", pid);
++	if (!(f = fopen(path, "r")))
++		return;
++	p = &procs[nprocs];
++	memset(p, 0, sizeof(*p));
++	p->pid = atoi(pid);
++	while (fgets(line, sizeof(line), f)) {
++		if (!strncmp(line, "Name:", 5))
++			sscanf(line + 5, "%19s", p->name);
++		else if (!strncmp(line, "Mem:", 4))
++			p->mem = strtoul(line + 4, NULL, 10);
++		else if (!strncmp(line, "Slack:", 6))
++			p->slack = strtoul(line + 6, NULL, 10);
++		else if (!strncmp(line, "Shared:", 7))
++			p->shared = strtoul(line + 7, NULL, 10);
++	}
++	fclose(f);
++	nprocs++;
++}
++
++static long meminfo_kb(const char *key)
++{
++	FILE *f = fopen("/proc/meminfo", "r");
++	char line[96];
++	long v = -1;
++	int k = strlen(key);
++
++	if (!f)
++		return -1;
++	while (fgets(line, sizeof(line), f))
++		if (!strncmp(line, key, k) && line[k] == ':') {
++			v = atol(line + k + 1);
++			break;
++		}
++	fclose(f);
++	return v;
++}
++
++int main(void)
++{
++	DIR *d = opendir("/proc");
++	struct dirent *e;
++	unsigned long total = 0, slack = 0;
++	int i, j;
++	FILE *f;
++
++	if (d) {
++		while ((e = readdir(d)))
++			if (e->d_name[0] >= '1' && e->d_name[0] <= '9')
++				read_proc(e->d_name);
++		closedir(d);
++	}
++	for (i = 0; i < nprocs; i++)			/* biggest first */
++		for (j = i + 1; j < nprocs; j++)
++			if (procs[j].mem > procs[i].mem) {
++				struct proc t = procs[i];
++
++				procs[i] = procs[j];
++				procs[j] = t;
++			}
++	printf("  PID NAME              MEM KB  SLACK KB  SHARED KB\n");
++	for (i = 0; i < nprocs; i++) {
++		struct proc *p = &procs[i];
++
++		printf("%5d %-16s %7lu  %8lu  %9lu\n", p->pid, p->name, p->mem / 1024, p->slack / 1024, p->shared / 1024);
++		total += p->mem;
++		slack += p->slack;
++	}
++	printf("%d processes: %lu KB (of it %lu KB rounding slack)\n\n", nprocs, total / 1024, slack / 1024);
++
++	printf("RAM: total %ld KB, free %ld KB, file cache %ld KB (given back when needed)\n", meminfo_kb("MemTotal"),
++	       meminfo_kb("MemFree"), meminfo_kb("Cached") + meminfo_kb("Buffers"));
++	if ((f = fopen("/proc/min_free_kbytes", "r")) || (f = fopen("/proc/sys/vm/min_free_kbytes", "r"))) {
++		long r;
++
++		if (fscanf(f, "%ld", &r) == 1)
++			printf("Kept in reserve by the kernel: %ld KB\n", r);
++		fclose(f);
++	}
++	/* /proc/buddyinfo: "Node 0, zone DMA n0 n1 n2 ...": free blocks of 4 KB << order */
++	if ((f = fopen("/proc/buddyinfo", "r"))) {
++		char line[256];
++
++		while (fgets(line, sizeof(line), f)) {
++			char *p = strstr(line, "zone");
++			unsigned long n[12];
++			int k = 0, off = 0, largest = -1;
++
++			if (!p)
++				continue;
++			p += 4;
++			while (*p == ' ')
++				p++;
++			while (*p && *p != ' ')		/* the zone's name */
++				p++;
++			while (k < 12 && sscanf(p, "%lu%n", &n[k], &off) == 1) {
++				p += off;
++				k++;
++			}
++			printf("Free blocks:");
++			for (i = 0; i < k; i++) {
++				if (n[i])
++					largest = i;
++				if (n[i])
++					printf(" %lux%luK", n[i], 4UL << i);
++			}
++			printf("\nLargest free block: %lu KB (a program needing more in one piece cannot start now)\n",
++			       largest >= 0 ? 4UL << largest : 0);
++		}
++		fclose(f);
++	}
++	return 0;
++}
+diff --git a/vendors/Nintendo/DSI/rc b/vendors/Nintendo/DSI/rc
+index 772abe910..d9d52dfda 100644
+--- a/vendors/Nintendo/DSI/rc
++++ b/vendors/Nintendo/DSI/rc
+@@ -27,6 +27,10 @@ then
+ fi
+ mount -t ramfs none /var/run
+ mount -t sysfs none /sys
++# Memory: the kernel keeps min_free_kbytes in reserve (508 KB by its formula for 16 MB) and wants part of it in large pieces, so a
++# program needing one big block failed while a free block of that size existed (tar, 868 KB, 2026-11-17: the reserve check failed at
++# the 128 KB size). 192 KB still leaves room for interrupt-time allocations (network packets).
++echo 192 > /proc/sys/vm/min_free_kbytes
+ 
+ # Create r/w /dev entries so dropbear will work
+ mknod /var/run/ttyp0 c 3 0
+-- 
+2.56.1
+

@@ -1,0 +1,70 @@
+From b29ef4d1bee4e3d8f5f1081efe3363d9d1337d08 Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 09:04:26 -0600
+Subject: [PATCH 130/131] Terminal: TERM=linux, Home/End as the Linux console,
+ no false DA reply
+
+nano and the other curses programs know only the types built into them
+(linux, xterm; the DSi has no terminfo files), so under TERM=vt100 nano
+said "Error opening terminal". nxterm now says linux: its keys match
+(arrows, Delete) once Home/End send ESC[1~ / ESC[4~ (the shell's line
+editing knows both forms). "ESC [ ? n c" is the Linux console's cursor
+shape, which nano sends under TERM=linux; nxterm answered it as a
+device-attributes query and typed the answer into the program: only
+"ESC [ c" / "ESC [ 0 c" get the answer now.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ user/microwin/src/demos/nanox/nxterm.c | 15 +++++++++------
+ 1 file changed, 9 insertions(+), 6 deletions(-)
+
+diff --git a/user/microwin/src/demos/nanox/nxterm.c b/user/microwin/src/demos/nanox/nxterm.c
+index 4c8346637..772127ab4 100644
+--- a/user/microwin/src/demos/nanox/nxterm.c
++++ b/user/microwin/src/demos/nanox/nxterm.c
+@@ -11,7 +11,7 @@
+  * 16 colours (bold = bright), reverse video, cursor on/off, autowrap with the usual deferred wrap at the last column, and answers to
+  * cursor position / device status requests. The screen is kept as cells, so the window redraws correctly when it is uncovered, and the last
+  * SBLINES lines that scrolled off the top can be looked at again with Page Up / Page Down (the X and Y buttons on the DSi) or the scroll
+- * bar on the right (tap the arrows: 3 lines, above or below the thumb: a page); any other key returns to the live screen. TERM=vt100.
++ * bar on the right (tap the arrows: 3 lines, above or below the thumb: a page); any other key returns to the live screen. TERM=linux.
+  * The window follows a resize (the window manager's maximise box, or L + drag on the title bar): new columns and rows, the size passed
+  * to the pseudo terminal (TIOCSWINSZ, so programs get SIGWINCH), the cursor's line kept on the screen.
+  * Drawing: only rows that changed, as runs of equal colours (one request per run), and a whole-screen scroll is one copy request, because
+@@ -407,8 +407,10 @@ static void csi(unsigned char f)
+ 			reply(t);
+ 		}
+ 		break;
+-	case 'c':			/* what are you: a VT100 */
+-		reply("\033[?1;0c");
++	case 'c':			/* what are you: a VT100 (only "CSI c" / "CSI 0 c": "CSI ? n c" is the Linux console's cursor shape,
++					 * which nano sends under TERM=linux; answering it typed garbage into the program) */
++		if (!priv && !p0)
++			reply("\033[?1;0c");
+ 		break;
+ 	}
+ }
+@@ -534,7 +536,8 @@ static int start_child(char **argv)
+ 	{
+ 		char t[16];
+ 
+-		setenv("TERM", "vt100", 1);
++		setenv("TERM", "linux", 1);	/* nano and the other curses programs have only "linux" and "xterm" built in (no terminfo
++						 * files on the DSi); linux matches these keys and sequences (vt100 was unknown to them) */
+ 		sprintf(t, "%d", cols);
+ 		setenv("COLUMNS", t, 1);
+ 		sprintf(t, "%d", rows);
+@@ -662,8 +665,8 @@ static void key(GR_EVENT_KEYSTROKE *k)
+ 	case MWKEY_DOWN: seq = "\033[B"; break;
+ 	case MWKEY_RIGHT: seq = "\033[C"; break;
+ 	case MWKEY_LEFT: seq = "\033[D"; break;
+-	case MWKEY_HOME: seq = "\033[H"; break;
+-	case MWKEY_END: seq = "\033[F"; break;
++	case MWKEY_HOME: seq = "\033[1~"; break;	/* as the Linux console (TERM=linux): nano and the shell both know it */
++	case MWKEY_END: seq = "\033[4~"; break;
+ 	case MWKEY_DELETE: seq = "\033[3~"; break;
+ 	}
+ 	if (seq) {
+-- 
+2.56.1
+
