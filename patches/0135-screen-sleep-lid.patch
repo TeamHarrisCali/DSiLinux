@@ -1,0 +1,257 @@
+From 0a2565bc7251a158dcf4ca7251a9c91106be73c6 Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 10:11:41 -0600
+Subject: [PATCH] Screen sleep and the lid: backlights off after idle or when
+ closed
+
+docs/SLEEP-LOCK-PLAN.md steps 2 and 3 (light sleep). screensleep.c: a
+1 s timer turns the backlights off after nds_sleep_secs (default 120)
+without local input, through the ARM7's FIFO_POWER_CMD_BACKLIGHT_POWER
+(the power chip's backlight bits, as DSLinuxs ndsbl). button.c and
+nds_ts.c report every new press with nds_screen_activity(); the press
+that wakes the screen is held back until released, so waking never
+clicks or types. The lid (the ARM7's hinge bit, button.c) turns the
+screen off at once when closed and on when opened. Programs keep
+running. /proc/dsisettings: "sleep N" (0 = never, max 3600), "screen
+off" / "screen on"; the read line gains sleep=, screen=, lid=.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ linux-2.6.x/arch/arm/mach-nds/Makefile        |  2 +-
+ linux-2.6.x/arch/arm/mach-nds/button.c        | 21 +++++
+ linux-2.6.x/arch/arm/mach-nds/screensleep.c   | 84 +++++++++++++++++++
+ linux-2.6.x/arch/arm/mach-nds/volume.c        | 17 +++-
+ .../drivers/input/touchscreen/nds_ts.c        | 13 +++
+ 5 files changed, 135 insertions(+), 2 deletions(-)
+ create mode 100644 linux-2.6.x/arch/arm/mach-nds/screensleep.c
+
+diff --git a/linux-2.6.x/arch/arm/mach-nds/Makefile b/linux-2.6.x/arch/arm/mach-nds/Makefile
+index 721a5dfd0..9798af6be 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/Makefile
++++ b/linux-2.6.x/arch/arm/mach-nds/Makefile
+@@ -4,7 +4,7 @@
+ 
+ # Object file lists.
+ 
+-obj-y                += arch.o irq.o time.o button.o fifo.o rtc.o volume.o dsiwifi.o dsiwpa.o disable-itcm-writes.o
++obj-y                += arch.o irq.o time.o button.o fifo.o rtc.o volume.o screensleep.o dsiwifi.o dsiwpa.o disable-itcm-writes.o
+ 
+ obj-$(CONFIG_NDS_TEXT_CONSOLE) += console.o
+ obj-$(CONFIG_NDS_SOUNDTEST) += soundtest.o
+diff --git a/linux-2.6.x/arch/arm/mach-nds/button.c b/linux-2.6.x/arch/arm/mach-nds/button.c
+index 2e1af4930..51fc4634e 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/button.c
++++ b/linux-2.6.x/arch/arm/mach-nds/button.c
+@@ -57,11 +57,22 @@ extern void ndspad_buttons(int left, int right);
+ static volatile u16 ndsbutton_raw;
+ static int ndsbutton_game;
+ 
++/* screen sleep (screensleep.c): every new press is activity; the press that woke the screen is held back until released */
++extern int nds_screen_activity(void);
++extern void nds_lid(int closed);
++static u16 eat_main, prev_main, eat_x, prev_x;
++
+ static irqreturn_t ndsbutton_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+ {
+ 	int i;
+ 	u16 state = readw(REG_KEYINPUT);
++	u16 pr = ~state & 0x3ff;
+ 
++	if ((pr & ~prev_main) && nds_screen_activity())
++		eat_main |= pr;			/* this press only woke the screen */
++	prev_main = pr;
++	eat_main &= pr;				/* released: forgotten */
++	state |= eat_main;			/* held back: reported as not pressed */
+ 	ndsbutton_raw = (ndsbutton_raw & 0xc00) | (~state & 0x3ff);
+ 	if (ndsbutton_game)
+ 		return IRQ_HANDLED;
+@@ -89,6 +100,16 @@ static void ndsbutton_xkeys(u32 state)
+ 		nds_volume_msg(state);
+ 		return;
+ 	}
++	{
++		u16 pr = ~state & 3;		/* X, Y */
++
++		if ((pr & ~prev_x) && nds_screen_activity())
++			eat_x |= pr;
++		prev_x = pr;
++		eat_x &= pr;
++		state |= eat_x;
++	}
++	nds_lid((state >> 7) & 1);		/* the hinge: 1 = closed */
+ 	ndsbutton_raw = (ndsbutton_raw & 0x3ff) | ((~state & 3) << 10);
+ 	for (i = 0 ; i < (sizeof(ndsbuttons2)/sizeof(ndsbuttons2[0])) ; i++)
+ 	{
+diff --git a/linux-2.6.x/arch/arm/mach-nds/screensleep.c b/linux-2.6.x/arch/arm/mach-nds/screensleep.c
+new file mode 100644
+index 000000000..3dd7caed4
+--- /dev/null
++++ b/linux-2.6.x/arch/arm/mach-nds/screensleep.c
+@@ -0,0 +1,84 @@
++/*
++ * Screen sleep and the lid (docs/SLEEP-LOCK-PLAN.md, steps 2 and 3): the backlights go off after a time without local input, and at
++ * once when the lid closes; any touch or button brings them back (the lid must be open). Programs keep running: Wi-Fi, SSH and
++ * downloads go on. The input drivers (button.c, nds_ts.c) report every new press with nds_screen_activity(), and drop the press that
++ * woke the screen, so waking never clicks or types. Input over SSH does not count: it is not someone in front of the DSi.
++ * The backlights are switched with the ARM7's FIFO_POWER_CMD_BACKLIGHT_POWER (the power chip's backlight bits, as DSLinux's ndsbl).
++ * /proc/dsisettings (volume.c): "sleep N" seconds without input before the screen goes off (0 = never; default 120), "screen off" /
++ * "screen on"; the read line gains sleep=N screen=on|off lid=open|closed.
++ */
++#include <linux/kernel.h>
++#include <linux/init.h>
++#include <linux/timer.h>
++#include <linux/jiffies.h>
++#include <asm/arch/fifo.h>
++
++int nds_sleep_secs = 120;
++int nds_screen_is_off;
++int nds_lid_closed;
++static unsigned long last_input;
++static struct timer_list ss_timer;
++
++static void backlights(int on)
++{
++	nds_fifo_send(FIFO_POWER_CMD(FIFO_POWER_CMD_BACKLIGHT_POWER, on ? 1 : 0));
++}
++
++void nds_screen_off(void)
++{
++	if (!nds_screen_is_off) {
++		nds_screen_is_off = 1;
++		backlights(0);
++	}
++}
++
++void nds_screen_on(void)
++{
++	last_input = jiffies;
++	if (nds_screen_is_off && !nds_lid_closed) {
++		nds_screen_is_off = 0;
++		backlights(1);
++	}
++}
++
++/* a new local press (touch or button): 1 if the screen was off, then the caller drops this press */
++int nds_screen_activity(void)
++{
++	last_input = jiffies;
++	if (nds_screen_is_off && !nds_lid_closed) {
++		nds_screen_on();
++		return 1;
++	}
++	return 0;
++}
++
++/* the lid switch (button.c, from the ARM7's hinge bit): closed = screen off at once, opened = on */
++void nds_lid(int closed)
++{
++	if (closed == nds_lid_closed)
++		return;
++	nds_lid_closed = closed;
++	if (closed)
++		nds_screen_off();
++	else
++		nds_screen_on();
++}
++
++static void ss_tick(unsigned long data)
++{
++	if (nds_sleep_secs > 0 && !nds_screen_is_off && time_after(jiffies, last_input + (unsigned long)nds_sleep_secs * HZ))
++		nds_screen_off();
++	mod_timer(&ss_timer, jiffies + HZ);
++}
++
++static int __init nds_screensleep_init(void)
++{
++	last_input = jiffies;
++	init_timer(&ss_timer);
++	ss_timer.function = ss_tick;
++	ss_timer.expires = jiffies + HZ;
++	add_timer(&ss_timer);
++	return 0;
++}
++
++module_init(nds_screensleep_init);
+diff --git a/linux-2.6.x/arch/arm/mach-nds/volume.c b/linux-2.6.x/arch/arm/mach-nds/volume.c
+index 111b1bb8b..6199cf56d 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/volume.c
++++ b/linux-2.6.x/arch/arm/mach-nds/volume.c
+@@ -88,6 +88,9 @@ static int mic_read_proc(char *page, char **start, off_t off, int count, int *eo
+ 
+ extern int dsisd_pm(unsigned int op, unsigned int val, unsigned int *out);
+ extern int dsisd_rtc(const unsigned char *v, unsigned char *out);
++extern int nds_sleep_secs, nds_screen_is_off, nds_lid_closed;	/* screensleep.c */
++extern void nds_screen_off(void);
++extern void nds_screen_on(void);
+ extern int ndspad_gain;
+ 
+ /*
+@@ -96,6 +99,8 @@ extern int ndspad_gain;
+  *   write: "backlight N" (1..5, never off) or "padgain N" (1..8)
+  *          or "rtc YYYY MM DD WD hh mm ss": the DSi's clock chip (local time, as the DSi's own menu shows it; WD = weekday 0..6, Sunday 0).
+  *          httpdate -w writes it after setting the clock from the network.
++ *          or "sleep N" (seconds without local input before the screen goes off, 0 = never) or "screen off" / "screen on"
++ *   the read line also has sleep=N screen=on|off lid=open|closed (screensleep.c)
+  */
+ static int settings_read_proc(char *page, char **start, off_t off, int count, int *eof, void *data)
+ {
+@@ -108,7 +113,8 @@ static int settings_read_proc(char *page, char **start, off_t off, int count, in
+ 	chg = o[0] == 0xffffffff ? 0 : (int)((o[0] >> 7) & 1);
+ 	vol = o[1] == 0xffffffff ? -1 : (int)(o[1] & 0x1f);
+ 	bl = o[2] == 0xffffffff ? -1 : (int)(o[2] & 7) + 1;
+-	len = sprintf(page, "battery=%d charger=%d volume=%d backlight=%d padgain=%d\n", bat, chg, vol, bl, ndspad_gain);
++	len = sprintf(page, "battery=%d charger=%d volume=%d backlight=%d padgain=%d sleep=%d screen=%s lid=%s\n", bat, chg, vol, bl,
++		      ndspad_gain, nds_sleep_secs, nds_screen_is_off ? "off" : "on", nds_lid_closed ? "closed" : "open");
+ 	*eof = 1;
+ 	if (off >= len)
+ 		return 0;
+@@ -147,6 +153,15 @@ static int settings_write_proc(struct file *file, const char __user *buffer, uns
+ 		v[6] = s;
+ 		if (dsisd_rtc(v, NULL) != 0)
+ 			return -EIO;
++	} else if (!strncmp(buf, "sleep ", 6)) {
++		n = simple_strtoul(buf + 6, NULL, 10);
++		if (n > 3600)
++			return -EINVAL;
++		nds_sleep_secs = n;
++	} else if (!strncmp(buf, "screen off", 10)) {
++		nds_screen_off();
++	} else if (!strncmp(buf, "screen on", 9)) {
++		nds_screen_on();
+ 	} else if (!strncmp(buf, "padgain ", 8)) {
+ 		n = simple_strtoul(buf + 8, NULL, 10);
+ 		if (n < 1 || n > 8)
+diff --git a/linux-2.6.x/drivers/input/touchscreen/nds_ts.c b/linux-2.6.x/drivers/input/touchscreen/nds_ts.c
+index 45ea7ebb7..eb9f0cab1 100644
+--- a/linux-2.6.x/drivers/input/touchscreen/nds_ts.c
++++ b/linux-2.6.x/drivers/input/touchscreen/nds_ts.c
+@@ -695,13 +695,26 @@ int ndstouch_output_event(struct input_dev *dev, unsigned int type, unsigned int
+ 	return -1;
+ }
+ 
++extern int nds_screen_activity(void);	/* screen sleep (arch/arm/mach-nds/screensleep.c) */
++
+ static void ndstouch_input_event(u8 touched, u8 x, u8 y)
+ {
+ 	struct input_dev* dev = &ndstouch_dev;
+ 	static int wasTouched = FALSE ;
+ 	static u16 currentKey = KEY_RESERVED ;
++	static int eat_touch, prev_touched;
+ 	u16 key ;
+ 
++	/* a touch that wakes the screen does nothing else, until the stylus is lifted */
++	if (touched && !prev_touched && nds_screen_activity())
++		eat_touch = 1;
++	prev_touched = touched;
++	if (eat_touch) {
++		if (!touched)
++			eat_touch = 0;
++		return;
++	}
++
+ 	switch(mode) {
+ 		case KEYBOARD_MODE:
+ 			/* a touch that starts on the trackpad only moves the pointer, one that starts on the keyboard only types */
+-- 
+2.56.1
+

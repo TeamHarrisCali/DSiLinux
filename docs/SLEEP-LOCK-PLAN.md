@@ -1,6 +1,14 @@
 # Plan: screen sleep, locking, and sleep when the lid closes
 
-Status: **plan only** (2026-11-17). Nothing is changed yet. Related: [TOUCHSCREEN-PLAN.md](TOUCHSCREEN-PLAN.md) (the lock screen
+Status (2026-11-18): **steps 2 and 3 built in w99e** (patch 0135), not yet tried on the console:
+- the backlights go off after **2 minutes** without a touch or button (the default; `echo "sleep 300" > /proc/dsisettings` sets
+  seconds, `sleep 0` never), and **at once when the lid closes**; a touch or button brings them back (the lid must be open), and
+  that first touch or press does nothing else;
+- programs keep running (Wi-Fi, SSH, downloads); SSH typing does not keep the screen on;
+- `echo "screen off" > /proc/dsisettings` / `screen on` by hand; `cat /proc/dsisettings` shows `sleep= screen= lid=`.
+Unknowns: whether the power chip's backlight bits (the DS way, which w99e uses) switch the DSi's backlights in DSi mode, and
+whether the ARM7's hinge bit reports the lid in DSi mode. Not yet: a "Screen off after" choice in Settings, switching the LCDs off
+too, the lock screen (step 4, waiting on questions 2-3), low battery shut down (5), deep sleep (6). Related: [TOUCHSCREEN-PLAN.md](TOUCHSCREEN-PLAN.md) (the lock screen
 can use the dashboard page), [FILES-CLEANUP-PLAN.md](FILES-CLEANUP-PLAN.md) (settings move to `/home/.config/dslinux`).
 
 ## Today (checked in the source)

@@ -1088,3 +1088,15 @@ inetd 52 KB. `nano notes.txt`: "Error opening terminal: xterm-256color", also af
 - w99d, patch 0134: ncurses_cfg.h defines USE_DATABASE and TERMINFO "/usr/share/terminfo"; libncurses rebuilt from clean objects; nano
   relinked (284400 bytes, grab_entry present) and installed by install-apps.sh (SYSAPPS "tar nano"; fix-stacks gave it 60 KB). mc and
   irssi still have the old ncurses. On the card: w99d checksum ok, image clean.
+
+### w99d on the console; screen sleep (w99e)
+
+w99d (user): nano works over SSH; the time is right and stays right after a restart (the DSi's clock chip, written by w99c's httpdate
+-w, read back at boot by httpdate -L). memreport: programs 2900 KB (995 KB slack), free 7396 KB, largest free block 4 MB.
+
+w99e, patch 0135 (sleep plan steps 2-3): screensleep.c with a 1 s kernel timer; backlights off through the ARM7's
+FIFO_POWER_CMD_BACKLIGHT_POWER (power chip register 0 bits 2/3, the path DSLinux's ndsbl driver already used; untested in DSi mode)
+after nds_sleep_secs (120) without local input; button.c (keys at vblank, X/Y and hinge from the ARM7's FIFO_BUTTONS, sent on change)
+and nds_ts.c call nds_screen_activity() on every new press and hold back the press that woke the screen until it is released; the
+hinge bit (1 = closed) turns the screen off at once and back on when opened. /proc/dsisettings: "sleep N", "screen off|on", and
+sleep=/screen=/lid= in the read line (dsdesk, dssettings and dsfetch read only the leading fields). On the card, image clean.

@@ -5,8 +5,9 @@ lists them, where each one stopped, and **every question still waiting for an an
 
 ## Where things stand
 
-- **On the card now: w99d** (2026-11-18): w98z plus the TODO fixes below. Verified on the DSi: tar `-z` (w99a), the memory reserve
-  and memreport (w99b), **the clock and time zone, and about 1.5 MB less memory in use (w99c)**. w99d's nano fix is not yet run.
+- **On the card now: w99e** (2026-11-18): screen sleep and the lid (sleep plan steps 2-3), not yet run on the DSi. Everything in the
+  TODO list below is **verified on the DSi** as of w99d: tar `-z`, the memory reserve and memreport, the clock and time zone (and
+  the DSi's clock chip keeps the time across a restart), about 1.5 MB less memory in use, **nano over SSH**.
 - **w98z** (2026-11-17) brought:
   - uptime fixed (it showed the date), dsfetch fixed and installed as `/usr/bin/dsfetch`;
   - the DSi asks DHCP for its last address again (`/home/wifi.lastip`), so `ssh dsi` keeps finding it;
@@ -27,17 +28,9 @@ lists them, where each one stopped, and **every question still waiting for an an
 
 ## Small fixes to do (TODO)
 
-**w99d (2026-11-18) is on the card, not yet run on the DSi.** Results on the DSi so far:
-- w99a: tar `xzf` works.
-- w99b: the 192 KB reserve and memreport work.
-- **w99c: `date` is right** (the time from HTTP, the Central time zone found automatically); **memory: 2.9 MB in use by programs
-  (was 4.4 MB), 7.4 MB free (was 5.8 MB)**, `autolog`/`sleep` gone (`dsautolog` takes 64 KB), one shell fewer.
-- Still failing in w99c: nano over SSH (`Error opening terminal: xterm-256color`, also with `TERMINFO` set). Fixed in w99d.
-
-To check with w99d:
-1. Over SSH and in the desktop's Terminal: `nano notes.txt` opens.
-2. Reboot without Wi-Fi: the time is still right (it now comes from the DSi's clock chip, which w99c writes after connecting). The
-   DSi's own menu should show the right time too.
+**All done and verified on the DSi (w99a-w99d, 2026-11-18)** except the download speed (Wi-Fi chip item 1). Last results: nano
+works over SSH (w99d); the time is right after Wi-Fi and stays right after a restart without Wi-Fi (w99c's clock-chip write);
+memreport: programs 2.9 MB, 7.4 MB free, largest free block 4 MB.
 
 - **Memory (the real cause of "tar: SIGSEGV").** The card log showed `tar: page allocation failure. order:8`: 2.1 MB free, tar needing
   868 KB in one piece. A free 1 MB block existed, but the kernel's reserve check refused it: the reserve (`min_free_kbytes`) was
@@ -121,7 +114,7 @@ To check with w99d:
 | A current BusyBox with the hush shell | [BUSYBOX-HUSH-PLAN.md](BUSYBOX-HUSH-PLAN.md) | Step 0: download BusyBox 1.36.1 | **Your OK for the download**, questions B |
 | File management, tidy layout, leaner system | [FILES-CLEANUP-PLAN.md](FILES-CLEANUP-PLAN.md) | Step 1: the Files program with Delete / Recycle Bin | Questions C |
 | Touch screen revamp (input page + dashboard) | [TOUCHSCREEN-PLAN.md](TOUCHSCREEN-PLAN.md) | Step 0: your feedback, then mock-ups | Questions D |
-| Screen sleep, locking, lid sleep | [SLEEP-LOCK-PLAN.md](SLEEP-LOCK-PLAN.md) | Step 1: check the lid event, backlight off/on | Questions E |
+| Screen sleep, locking, lid sleep | [SLEEP-LOCK-PLAN.md](SLEEP-LOCK-PLAN.md) | **Started:** steps 2-3 (screen off after 2 min idle, and when the lid closes) built in w99e, to test; then the lock (step 4) | Questions E (2-4) |
 | The DSi's Wi-Fi chip: faster, quicker to connect, WPA2 | (this page, below) | Speed: the 4-bit bus and block transfers | Questions F |
 | Later, bigger: a package manager (`dspkg`) | (no file yet) | After BusyBox: `wget` with HTTPS makes it possible | Your choice |
 | Later, much bigger: new kernel and modern compiler | (no file yet) | Needed for anything that a 2005 compiler cannot build | Months of work; your choice |
