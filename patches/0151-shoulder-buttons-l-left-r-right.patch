@@ -1,0 +1,52 @@
+From a9acfefffd6eaafd8042af615600ed3f01306e6c Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 12:22:58 -0600
+Subject: [PATCH] L shoulder = left click, R = right click (w99u)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ linux-2.6.x/arch/arm/mach-nds/button.c         | 5 +++--
+ linux-2.6.x/drivers/input/touchscreen/nds_ts.c | 4 ++--
+ 2 files changed, 5 insertions(+), 4 deletions(-)
+
+diff --git a/linux-2.6.x/arch/arm/mach-nds/button.c b/linux-2.6.x/arch/arm/mach-nds/button.c
+index dbb4797dc..5387737e3 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/button.c
++++ b/linux-2.6.x/arch/arm/mach-nds/button.c
+@@ -85,8 +85,9 @@ static irqreturn_t ndsbutton_interrupt(int irq, void *dev_id, struct pt_regs *re
+         input_sync(&ndsbutton_dev);
+ 
+ #ifdef CONFIG_TOUCHSCREEN_NDS
+-	/* R shoulder button = left click, L = right click of the touch screen trackpad */
+-	ndspad_buttons(!((state >> 8) & 1), !((state >> 9) & 1));
++	/* L shoulder button = left click, R = right click of the touch screen trackpad (KEYINPUT bit 9 = L, bit 8 = R; swapped back
++	 * 2026-11-19 at the user's request) */
++	ndspad_buttons(!((state >> 9) & 1), !((state >> 8) & 1));
+ #endif
+ 
+ 	return IRQ_HANDLED ;
+diff --git a/linux-2.6.x/drivers/input/touchscreen/nds_ts.c b/linux-2.6.x/drivers/input/touchscreen/nds_ts.c
+index 9b8c556fe..73c4e2558 100644
+--- a/linux-2.6.x/drivers/input/touchscreen/nds_ts.c
++++ b/linux-2.6.x/drivers/input/touchscreen/nds_ts.c
+@@ -148,7 +148,7 @@ static struct fifo_cb my_callback = {
+  * Trackpad: the upper 9 tile rows (72 pixel) of the touch screen, above the keyboard, move a relative pointer, like a
+  * laptop trackpad. A short tap is a left click. It is its own input device (the mouse code then offers it as
+  * /dev/input/mice) so the keyboard keys keep going to the console. The shoulder buttons are clicks too:
+- * R = left, L = right (see ndspad_buttons(), called from arch/arm/mach-nds/button.c).
++ * L = left, R = right (see ndspad_buttons(), called from arch/arm/mach-nds/button.c).
+  */
+ #define PAD_ROWS	9			/* tile rows 0..8 */
+ int ndspad_gain = 2;				/* pointer pixels per touch pixel (/proc/dsisettings: padgain) */
+@@ -214,7 +214,7 @@ static void pad_touch(int touched, u8 x, u8 y)
+ 	}
+ }
+ 
+-/* shoulder buttons: R = left click, L = right click */
++/* shoulder buttons: L = left click, R = right click */
+ void ndspad_buttons(int left, int right)
+ {
+ 	static int l, r;
+-- 
+2.56.1
+

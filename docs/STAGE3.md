@@ -1405,3 +1405,5 @@ menu: tapping to close it landed on Shut down. w99t, patch 0150:
   - the trackpad is Windows 95 teal;
   - the dead "Bench" quick button is "Mem" (memreport).
 - Test bed: the menu fits with the gap, and the box shows. The keyboard was checked as a rendered preview, not yet on the DSi.
+
+- **w99u (built, not yet on the card):** the user liked w99t; L is now left click and R right click (button.c), patch 0151.

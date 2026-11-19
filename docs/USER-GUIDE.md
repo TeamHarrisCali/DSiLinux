@@ -32,7 +32,7 @@ How to use DSLinux on the DSi XL: the buttons, the desktop, every program, Wi-Fi
 | A | Enter | A | fire (Enter in menus) |
 | B | Space | B | use / open |
 | X / Y | Page Up / Page Down | palette / fast forward (held) | next weapon ("y") / run (held, "n") |
-| R / L | left / right mouse button | L alone: sound on/off; L + R: quit | strafe right / left |
+| L / R | left / right mouse button | (removed) | strafe left / right |
 | Start / Select | | Start / Select | menu / automap; both together: quit |
 
 The **bottom screen**: its upper part is a trackpad (drag moves the pointer, a tap clicks), the lower part is a keyboard. The quick buttons
