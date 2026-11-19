@@ -5,8 +5,8 @@ lists them, where each one stopped, and **every question still waiting for an an
 
 ## Where things stand
 
-- **On the card now: w99v** (2026-11-19, not yet tried): BusyBox 1.36.1 in the ROM, hush as the interactive shell, 48 newer tools
-  (BUSYBOX-HUSH-PLAN.md). w99u: L = left click, R = right click. w99t (Windows 95 keyboard, safer Start menu): the user said it is good.
+- **On the card now: w99w** (built on w99v) (2026-11-19, not yet tried): BusyBox 1.36.1 in the ROM, hush as the interactive shell, 48 newer tools
+  (BUSYBOX-HUSH-PLAN.md): hush verified. **w99w** (on the card, not yet tried) chooses the nearer of two access points. w99u: L = left click, R = right click. w99t (Windows 95 keyboard, safer Start menu): the user said it is good.
 - **w99t** (2026-11-19, not yet tried): the bottom-screen keyboard in the Windows 95 look; Start menu shorter and
   off the Start button, Shut down asks first. w99s (optimization) verified: 3D gears, Wi-Fi, SSH.
 - **How work is done from here on: [DEV-PROCESS.md](DEV-PROCESS.md)**: scripts/precheck.sh before every build, scripts/cardlog.sh to

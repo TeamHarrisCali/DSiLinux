@@ -1419,3 +1419,11 @@ User: "new busybox with hush shell please". Details in BUSYBOX-HUSH-PLAN.md. The
 - **Left out:** stat (st_atim), touch (utimensat), date (clock_settime).
 - **The ROM:** 2,909,696 to 3,268,096 bytes (911 KB left below 4 MiB).
 - **The hand-over:** install-session.sh writes the hush block at the end of /etc/profile.
+
+### hush verified; Wi-Fi joined the far access point (w99w)
+
+User (w99v): hush works (`echo $(( 6 * 7 )); f() { echo "hi $1"; }; f there`), but joining GuestNet got no answer. The card log: two GuestNet
+access points on channel 1, one at -55 dBm and one at -79. The power-on scan was incomplete ("did not report completion: 3 networks")
+and heard only the far one; do_connect chose the AP before its channel scan, so every attempt (20) went to the -79 one, which
+never answered. w99w, patch 0153: the channel scan comes first, then the AP is chosen again (nets[] is kept per BSSID with the best
+signal, so the near one wins).

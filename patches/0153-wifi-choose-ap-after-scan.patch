@@ -1,0 +1,45 @@
+From 9febc331e6fe20450446deb3e90db59512729b6b Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 12:46:42 -0600
+Subject: [PATCH] DSi Wi-Fi: choose the access point after the channel scan
+ (w99w)
+
+w99v joined the far one of two access points (the only one the power-on scan
+heard) on every attempt.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ linux-2.6.x/arch/arm/mach-nds/dsiwifi.c | 10 ++++++++--
+ 1 file changed, 8 insertions(+), 2 deletions(-)
+
+diff --git a/linux-2.6.x/arch/arm/mach-nds/dsiwifi.c b/linux-2.6.x/arch/arm/mach-nds/dsiwifi.c
+index 132977470..fbe175511 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/dsiwifi.c
++++ b/linux-2.6.x/arch/arm/mach-nds/dsiwifi.c
+@@ -1055,6 +1055,14 @@ static noinline void do_connect(void)
+ 	n = find_net();
+ 	if (!n)
+ 		return;
++	/* scan the AP's channel first, then choose again: the scan heard at power-on can be incomplete. w99v joined the far one of two
++	 * GuestNet APs (-79 dBm, the only one that scan heard) at every attempt while a near one (-55) answered the later scans */
++	if (n->channel) {
++		scan_ap_channel(wifi_channel_to_mhz(n->channel), &bad);
++		n = find_net();
++		if (!n)
++			return;
++	}
+ 	wpa2 = !strcmp(n->sec, "wpa2");
+ 	keys_ok = 0;
+ 	if (wpa2) {
+@@ -1077,8 +1085,6 @@ static noinline void do_connect(void)
+ 			snprintf(line, sizeof(line), "connect: %s, any channel\n", n->ssid);
+ 		lgs(line);
+ 	}
+-	if (n->channel)						/* fresh beacons of the AP for the join */
+-		scan_ap_channel(wifi_channel_to_mhz(n->channel), &bad);
+ 	memset(b, 0, sizeof(b));				/* BSS filter: none (dswifi uses 4; w99q tried it: no difference) */
+ 	mbox_out(1, 1, WMI_SET_BSS_FILTER_CMD, b, 8, &bad);
+ 	memset(b, 0, sizeof(b));				/* scan params 5, 200, 200, 200 */
+-- 
+2.56.1
+
