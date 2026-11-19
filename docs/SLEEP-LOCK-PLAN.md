@@ -20,7 +20,12 @@ on-screen keypad; wrong PINs wait 1, 2, 4 ... 30 s. Stored hashed in `/home/.loc
   charger, and "Critical: off soon" at 1 (the clean shut down follows about 20 s later). Once per level; plugging in resets it.
 - `/proc/uptime` counts from boot (it showed the year-2000 date before).
 
-**w99l** (on the card, not yet tried on the DSi): **deep sleep (step 6)**, as the user asked ("deep sleep please", 2026-11-18,
+**w99m** (on the card, not yet tried): w99l's attempt right after boot froze the desktop (pointer still moving) without sleeping.
+Two waits had no limit: the clock-chip read under the SD lock, and the Wi-Fi shut down under the network lock while the boot's Wi-Fi
+Auto was still connecting. Both are bounded now, Wi-Fi Auto is stopped first, and every step is written to `/home/sleep.trace` on
+the card (plus "deep sleep: ..." lines in the kernel log, and the card log saved just before sleeping).
+
+**w99l**: **deep sleep (step 6)**, as the user asked ("deep sleep please", 2026-11-18,
 which answers question E4). w99k ran the sequence from a script, `/boot/sleep`; on the DSi it printed "Killed" at once. Starting
 another shell with the desktop and Wi-Fi up most likely found no block of memory big enough. w99l does it inside `dsautolog`,
 which is always running, so no program has to start before the sleep.

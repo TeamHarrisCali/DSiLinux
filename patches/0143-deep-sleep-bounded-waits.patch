@@ -1,0 +1,292 @@
+From da6e049a5a7d498f54523984ccff405cc067a19f Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 00:10:31 -0600
+Subject: [PATCH] Deep sleep: bounded waits, safe clock read, step trace (w99m)
+
+w99l's first try froze the desktop (pointer still moving): an endless wait under
+the SD lock or the network lock.
+- screensleep.c: clock chip read through the SD request it holds the lock for
+  (dsisd_rtc_locked, busy-loop ARM7 path); stage messages in the kernel log.
+- rtc.c: FIFO_TIME answer waited for at most 2 s.
+- dsiwifi.c: w_stop waits at most 10 s for the packet thread (it runs under
+  rtnl, which the taskbar's SIOCGIFADDR takes too).
+- dsautolog: stops 'dssettings wifi auto' first, writes each step to
+  /home/sleep.trace (fsync), saves the card log before and after the sleep.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ linux-2.6.x/arch/arm/mach-nds/dsiwifi.c     |  5 +-
+ linux-2.6.x/arch/arm/mach-nds/rtc.c         | 10 +---
+ linux-2.6.x/arch/arm/mach-nds/screensleep.c | 37 +++++++++---
+ linux-2.6.x/drivers/block/dldi_c.c          | 15 +++++
+ vendors/Nintendo/DSI/dsautolog.c            | 65 ++++++++++++++++++++-
+ 5 files changed, 116 insertions(+), 16 deletions(-)
+
+diff --git a/linux-2.6.x/arch/arm/mach-nds/dsiwifi.c b/linux-2.6.x/arch/arm/mach-nds/dsiwifi.c
+index 8a82c4dbc..d0368ad03 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/dsiwifi.c
++++ b/linux-2.6.x/arch/arm/mach-nds/dsiwifi.c
+@@ -1253,7 +1253,10 @@ static int w_stop(struct net_device *dev)
+ 	if (thr_run) {
+ 		thr_run = 0;
+ 		wake_up(&thr_wait);
+-		wait_for_completion(&thr_done);
++		/* bounded: this runs under the network lock (rtnl), which the taskbar's address check also takes; an endless wait here
++		 * froze the desktop */
++		if (!wait_for_completion_timeout(&thr_done, 10 * HZ))
++			lg("wlan0 down: the packet thread did not stop within 10 s\n", 0, 0, 0);
+ 	}
+ 	skb_queue_purge(&txq);
+ 	if (session) {
+diff --git a/linux-2.6.x/arch/arm/mach-nds/rtc.c b/linux-2.6.x/arch/arm/mach-nds/rtc.c
+index f78d981c0..6a9f3976b 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/rtc.c
++++ b/linux-2.6.x/arch/arm/mach-nds/rtc.c
+@@ -33,17 +33,13 @@ static u32 getTimeFromArm7(void) {
+     
+     nds_fifo_send(FIFO_TIME);
+ 
+-    wait_event_interruptible(ndstime_wait, timeavail != 0);
++    /* bounded: an answer that never comes must not hang the caller (w99l's deep sleep froze the desktop at a wait like this) */
++    if (!wait_event_interruptible_timeout(ndstime_wait, timeavail != 0, 2 * HZ))
++        printk(KERN_WARNING "rtc: no answer from the ARM7 in 2 s\n");
+ 
+     return ndshwtime;
+ }
+ 
+-/* the clock chip's seconds (screensleep.c measures a deep sleep with it) */
+-u32 nds_rtc_seconds(void)
+-{
+-	return getTimeFromArm7();
+-}
+-
+ static void ndsupdate_time(u32 seconds)
+ {
+         if(seconds & FIFO_HIGH_BITS) {
+diff --git a/linux-2.6.x/arch/arm/mach-nds/screensleep.c b/linux-2.6.x/arch/arm/mach-nds/screensleep.c
+index 07b70230e..fe2aba6aa 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/screensleep.c
++++ b/linux-2.6.x/arch/arm/mach-nds/screensleep.c
+@@ -128,11 +128,30 @@ void nds_lid(int closed)
+ #define ARM9_IF		(*(volatile u32*)0x04000214)
+ #define ARM9_IME	(*(volatile u32*)0x04000208)
+ extern void dsisd_lock(void), dsisd_unlock(void);	/* drivers/block/dldi_c.c */
+-extern u32 nds_rtc_seconds(void);			/* rtc.c */
++extern int dsisd_rtc_locked(unsigned char *out);	/* drivers/block/dldi_c.c: the clock chip, with the lock held */
+ extern void getnstimeofday(struct timespec *tv);	/* kernel/time.c (no header declares it in 2.6.14) */
+ static volatile int sleep_state;			/* from the ARM7: 1 asleep now, 2 awake, 3 refused */
+ unsigned int nds_sleeps;				/* deep sleeps since boot (/proc/dslid) */
+ 
++static unsigned int bcd(unsigned char v)
++{
++	return (v >> 4) * 10 + (v & 15);
++}
++
++/* the clock chip's time as seconds (only differences matter here); -1 if it could not be read. Hours as arm7/time.c reads them. */
++static long rtc_secs(void)
++{
++	unsigned char t[8];
++	unsigned int h;
++
++	if (dsisd_rtc_locked(t) != 0)
++		return -1;
++	h = bcd(t[5] & 0x3f);
++	if ((t[5] & 0x40) && h < 12)
++		h += 12;
++	return (long)mktime(2000 + bcd(t[1]), bcd(t[2]), bcd(t[3]), h, bcd(t[6]), bcd(t[7]));
++}
++
+ static void sleep_power_cb(u8 cmd, u32 data)
+ {
+ 	if (cmd == FIFO_POWER_CMD_SLEEP)
+@@ -148,15 +167,19 @@ int nds_deep_sleep(void)
+ {
+ 	struct timespec t0, t1;
+ 	unsigned long flags;
+-	u32 r0, r1, ie, ime;
++	long r0, r1;
++	u32 ie, ime;
+ 	long slept;
+ 	int i, res;
+ 
+ 	if (!nds_lid_closed)
+ 		return -EAGAIN;
++	printk(KERN_INFO "deep sleep: waiting for the SD lock\n");
+ 	dsisd_lock();
+-	r0 = nds_rtc_seconds();
++	printk(KERN_INFO "deep sleep: reading the clock chip\n");
++	r0 = rtc_secs();
+ 	getnstimeofday(&t0);
++	printk(KERN_INFO "deep sleep: screens off, asking the ARM7\n");
+ 	nds_screen_off();
+ 	msleep(100);				/* the LCDs go off LCD_OFF_GAP after the backlights */
+ 	sleep_state = 0;
+@@ -182,16 +205,16 @@ int nds_deep_sleep(void)
+ 	local_irq_restore(flags);
+ 	if (res == 2) {
+ 		nds_sleeps++;
+-		r1 = nds_rtc_seconds();
++		r1 = rtc_secs();
+ 		getnstimeofday(&t1);
+-		slept = (long)(r1 - r0) - (long)(t1.tv_sec - t0.tv_sec);	/* what the kernel's clock missed */
+-		if (r1 > r0 && slept > 0 && slept < 400L * 86400) {
++		slept = r1 - r0 - (long)(t1.tv_sec - t0.tv_sec);	/* what the kernel's clock missed */
++		if (r0 >= 0 && r1 > r0 && slept > 0 && slept < 400L * 86400) {
+ 			t1.tv_sec += slept;
+ 			do_settimeofday(&t1);
+ 		}
+ 		printk(KERN_INFO "deep sleep: %ld s\n", slept > 0 ? slept : 0);
+ 	} else {
+-		printk(KERN_WARNING "deep sleep: %s\n", res == 3 ? "the lid was open" : "the ARM7 did not answer");
++		printk(KERN_WARNING "deep sleep: %s\n", res == 3 ? "refused: the lid was open" : "the ARM7 did not answer in 1 s");
+ 	}
+ 	dsisd_unlock();
+ 	nds_screen_on();			/* only with the lid open; otherwise the lid's opening does it */
+diff --git a/linux-2.6.x/drivers/block/dldi_c.c b/linux-2.6.x/drivers/block/dldi_c.c
+index 1622d597b..ef0c195ec 100644
+--- a/linux-2.6.x/drivers/block/dldi_c.c
++++ b/linux-2.6.x/drivers/block/dldi_c.c
+@@ -344,6 +344,21 @@ int dsisd_twlop_rx(unsigned int op, unsigned int addr, unsigned int arg, const u
+ 
+ /* The RTC: with v (7 numbers: year 0..99, month, day, weekday 0..6, hour 0..23, minute, second) set it; out[0..7] = status register 1
+  * and the chip's 7 date/time bytes (BCD) as read afterwards. 0 = ok. */
++/* deep sleep (screensleep.c): read the clock chip while the caller already holds the request lock; out[8] = status, then BCD year,
++ * month, day, weekday, hour (bit 6 = afternoon), minute, second. The ARM7 side (rtc_request) uses busy loops, bounded by sd_timeout. */
++int dsisd_rtc_locked(unsigned char *out)
++{
++	int ret, i;
++
++	for (i = 0; i < 8; i++)
++		sd_block.data[i] = 0;
++	ret = sd_request_locked(NDS_SD_CMD_RTC, 0, 0);
++	if (ret == NDS_SD_OK)
++		for (i = 0; i < 8; i++)
++			out[i] = sd_block.data[i];
++	return ret;
++}
++
+ int dsisd_rtc(const unsigned char *v, unsigned char *out)
+ {
+ 	int ret, i;
+diff --git a/vendors/Nintendo/DSI/dsautolog.c b/vendors/Nintendo/DSI/dsautolog.c
+index 8c5b812e0..78257c4c9 100644
+--- a/vendors/Nintendo/DSI/dsautolog.c
++++ b/vendors/Nintendo/DSI/dsautolog.c
+@@ -12,6 +12,9 @@
+  * a shell built-in, then close the lid within 30 s), it puts the DSi to sleep itself (deep_sleep below). Desktop or text console alike.
+  * Done here, not in a script: with the desktop and Wi-Fi up, starting another shell (plus ifconfig, grep, killall, date) found no
+  * block of memory big enough and the kernel killed it (w99k's /boot/sleep: "Killed").
++ * Each step goes to /home/sleep.trace on the card (written through at once), and the card log is saved just before the sleep, so a
++ * freeze shows where it stopped (w99l froze the desktop right after boot, with nothing in the log). The boot's Wi-Fi Auto
++ * ("dssettings wifi auto") is stopped first, so it does not fight the shut down of the Wi-Fi chip.
+  * Started by /boot/rc in the background; prints nothing (text from a background program would be drawn over the desktop).
+  * Built by scripts/build-tools.sh.
+  */
+@@ -102,6 +105,23 @@ static void logline(const char *what)
+ 	fclose(f);
+ }
+ 
++/* one step of the sleep, on the card at once: /home/sleep.trace (first = start a new file) */
++static void trace(const char *what, int first)
++{
++	int fd = open("/home/sleep.trace", O_WRONLY | O_CREAT | O_APPEND | (first ? O_TRUNC : 0), 0644);
++	char b[96];
++	time_t now = time(NULL);
++	int n;
++
++	if (fd < 0)
++		return;
++	n = strftime(b, 16, "%H:%M:%S ", localtime(&now));
++	n += snprintf(b + n, sizeof(b) - n, "%s\n", what);
++	write(fd, b, n);
++	fsync(fd);
++	close(fd);
++}
++
+ /* wlan0's up flag: get (up < 0) or set it; returns 1 if it was up */
+ static int wlan0_up(int up)
+ {
+@@ -126,6 +146,38 @@ static int wlan0_up(int up)
+ 	return was;
+ }
+ 
++/* SIGTERM to "dssettings wifi auto" (the boot's Wi-Fi Auto, if it still runs): its command line is NUL separated */
++static void kill_wifi_auto(void)
++{
++	DIR *d = opendir("/proc");
++	struct dirent *e;
++	char path[40], buf[96];
++
++	if (!d)
++		return;
++	while ((e = readdir(d))) {
++		int fd, n, pid = atoi(e->d_name);
++		char *a1, *a2;
++
++		if (pid <= 0)
++			continue;
++		snprintf(path, sizeof(path), "/proc/%d/cmdline", pid);
++		fd = open(path, O_RDONLY);
++		if (fd < 0)
++			continue;
++		n = read(fd, buf, sizeof(buf) - 1);
++		close(fd);
++		if (n <= 0)
++			continue;
++		buf[n] = 0;
++		a1 = buf + strlen(buf) + 1;
++		a2 = a1 < buf + n ? a1 + strlen(a1) + 1 : buf + n;
++		if (strstr(buf, "dssettings") && a1 < buf + n && !strcmp(a1, "wifi") && a2 < buf + n && !strcmp(a2, "auto"))
++			kill(pid, SIGTERM);
++	}
++	closedir(d);
++}
++
+ /* SIGTERM to every process with this name (the DHCP client) */
+ static void kill_named(const char *name)
+ {
+@@ -158,22 +210,32 @@ static void kill_named(const char *name)
+ 	closedir(d);
+ }
+ 
++static void save(void);
++
+ /* Wi-Fi off, everything to the card, sleep until the lid opens, Wi-Fi Auto again (in the background) */
+ static void deep_sleep(void)
+ {
+-	int wifi = wlan0_up(-1), fd, ok = 0;
++	int wifi, fd, ok = 0;
+ 
++	trace("start", 1);
++	kill_wifi_auto();
++	wifi = wlan0_up(-1);
+ 	if (wifi) {
+ 		kill_named("udhcpc");
++		trace("Wi-Fi going down", 0);
+ 		wlan0_up(0);
++		trace("Wi-Fi down", 0);
+ 	}
+ 	logline(wifi ? "going to sleep (Wi-Fi was on)" : "going to sleep");
+ 	sync();
++	save();					/* the card log as it is now */
++	trace("log saved, writing deepsleep", 0);
+ 	fd = open("/proc/dsisettings", O_WRONLY);
+ 	if (fd >= 0) {
+ 		ok = write(fd, "deepsleep\n", 10) == 10;	/* returns after the lid opens */
+ 		close(fd);
+ 	}
++	trace(ok ? "awake" : "deepsleep refused or failed", 0);
+ 	logline(ok ? "awake" : "refused (lid open?) or failed");
+ 	if (wifi && access("/home/wifi.auto", F_OK) == 0) {
+ 		pid_t pid = vfork();
+@@ -189,6 +251,7 @@ static void deep_sleep(void)
+ 			_exit(127);
+ 		}				/* not waited for: reaped in the main loop */
+ 	}
++	save();
+ }
+ 
+ static void run(const char *path, const char *arg)
+-- 
+2.56.1
+

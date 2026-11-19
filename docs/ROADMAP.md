@@ -5,7 +5,8 @@ lists them, where each one stopped, and **every question still waiting for an an
 
 ## Where things stand
 
-- **On the card now: w99l** (2026-11-18): **deep sleep** (Settings > "Lid: sleep", or `echo now > /tmp/sleep.request` and close the
+- **On the card now: w99m** (2026-11-19): w99l's first try froze the desktop (two waits without a limit, now bounded; steps traced
+  to `/home/sleep.trace`). **Deep sleep** (Settings > "Lid: sleep", or `echo now > /tmp/sleep.request` and close the
   lid within 30 s), not yet tried on the DSi. (w99k's `/boot/sleep` script was "Killed" at once: no memory for another shell; w99l
   does the sleep inside dsautolog.) It includes w99j, also not yet tried:
   - the LCDs go off with the backlights (System Menu order, from the dump), with a guard that turns them back on if the display's

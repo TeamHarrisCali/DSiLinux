@@ -1214,3 +1214,29 @@ w99l, patch 0142: no script. dsautolog does it in C:
 
 A test without lid sleep: `echo now > /tmp/sleep.request` (a shell built-in), then close the lid within 30 s (older requests are
 deleted). /boot/sleep removed from the ROM.
+
+### w99l's sleep froze the desktop; bounded waits and a step trace (w99m)
+
+User (w99l, test right after boot while Wi-Fi Auto was still connecting): it did not sleep; the desktop froze but the pointer still
+moved. The card log was last saved 87 s after boot (Wi-Fi at DHCP) with nothing after.
+- **What the symptoms say:**
+  - The pointer moving means the ARM9 still had interrupts, so it never reached the halted wait.
+  - The desktop freezing means the taskbar was blocked. Its battery poll takes the SD request lock, and its address check
+    (SIOCGIFADDR) takes the network lock (rtnl).
+- **Two unbounded waits fit:**
+  1. nds_deep_sleep holds the SD lock, then waits forever for the ARM7's FIFO_TIME answer (rtc.c, wait_event_interruptible).
+  2. wlan0 down (w_stop, under rtnl) waits forever for the packet thread while the boot's Wi-Fi Auto is still busy.
+- **The user's bios7i, checked as asked:**
+  - IRQ vector 0x6C: it stays in IRQ mode and calls the handler at [0x03FFFFFC].
+  - SWI dispatcher 0x8C: it switches to SYS mode with the caller's I bit (still masked from the IRQ handler) and saves lr_sys.
+  - SWI 3 (WaitByLoop, 0x170): a bare subs/bgt loop.
+  - So swiDelay in the ARM7 interrupt handler is safe in itself. The w98g "context lost" explanation was a guess; the w99e hang was
+    the unbounded SPI wait.
+- **w99m, patch 0143:**
+  - Deep sleep reads the clock chip through the SD request it already holds the lock for (dsisd_rtc_locked, NDS_SD_CMD_RTC:
+    busy loops, bounded by the SD timeout).
+  - rtc.c's FIFO_TIME wait is limited to 2 s.
+  - w_stop waits at most 10 s for the thread.
+  - Stage messages in the kernel log ("deep sleep: ...").
+  - dsautolog: stops "dssettings wifi auto" first; writes each step to /home/sleep.trace (fsync); saves the card log right before
+    the sleep and after waking.
