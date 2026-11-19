@@ -5,8 +5,9 @@ lists them, where each one stopped, and **every question still waiting for an an
 
 ## Where things stand
 
-- **On the card now: w99o** (2026-11-19): w99n slept for real but the DSi then switched itself off; w99o no longer writes the LED-blink
-  bit before sleeping (the System Menu never does). Before that, w99n: w99m's sleep ran every step and recovered cleanly but slept "0 s"; w99n sleeps through
+- **On the card now: w99p** (2026-11-19): **deep sleep pinned** (the user's call): the ARM7 does sleep, but the DSi's power micro
+  then switches the console off (w99n, w99o); w99p hides the Settings button and refuses it, details and next steps in
+  SLEEP-LOCK-PLAN.md. Light sleep (screens off) is unchanged. History: w99n: w99m's sleep ran every step and recovered cleanly but slept "0 s"; w99n sleeps through
   BIOS SWI 7 and logs the wake reason. Before that, w99m: w99l's first try froze the desktop (two waits without a limit, now bounded; steps traced
   to `/home/sleep.trace`). **Deep sleep** (Settings > "Lid: sleep", or `echo now > /tmp/sleep.request` and close the
   lid within 30 s), not yet tried on the DSi. (w99k's `/boot/sleep` script was "Killed" at once: no memory for another shell; w99l
@@ -126,7 +127,7 @@ memreport: programs 2.9 MB, 7.4 MB free, largest free block 4 MB.
 | A current BusyBox with the hush shell | [BUSYBOX-HUSH-PLAN.md](BUSYBOX-HUSH-PLAN.md) | Step 0: download BusyBox 1.36.1 | **Your OK for the download**, questions B |
 | File management, tidy layout, leaner system | [FILES-CLEANUP-PLAN.md](FILES-CLEANUP-PLAN.md) | Step 1: the Files program with Delete / Recycle Bin | Questions C |
 | Touch screen revamp (input page + dashboard) | [TOUCHSCREEN-PLAN.md](TOUCHSCREEN-PLAN.md) | Step 0: your feedback, then mock-ups | Questions D |
-| Screen sleep, locking, lid sleep | [SLEEP-LOCK-PLAN.md](SLEEP-LOCK-PLAN.md) | **Steps 2-4 verified** (screen off when idle and on lid close, the Settings choice, the PIN lock); step 5 (critical battery) built; w99j: LCDs off too and the battery warning (untested); **w99k: deep sleep** with Settings > "Lid: sleep" (untested); left: text console lock | E3 (Wi-Fi with the lid closed) |
+| Screen sleep, locking, lid sleep | [SLEEP-LOCK-PLAN.md](SLEEP-LOCK-PLAN.md) | **Steps 2-4 verified** (screen off when idle and on lid close, the Settings choice, the PIN lock); step 5 (critical battery) built; w99j: LCDs off too and the battery warning (untested); deep sleep **pinned** (sleeps, but the power micro then switches the DSi off; w99p); left: text console lock, deep sleep's power-micro handshake | E3 (Wi-Fi with the lid closed) |
 | The DSi's Wi-Fi chip: faster, quicker to connect, WPA2 | (this page, below) | Speed: the 4-bit bus and block transfers | Questions F |
 | Later, bigger: a package manager (`dspkg`) | (no file yet) | After BusyBox: `wget` with HTTPS makes it possible | Your choice |
 | Later, much bigger: new kernel and modern compiler | (no file yet) | Needed for anything that a 2005 compiler cannot build | Months of work; your choice |

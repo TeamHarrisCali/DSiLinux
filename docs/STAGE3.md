@@ -1284,3 +1284,13 @@ really was ignored). The fade is the power micro switching the DSi off.
   - Its sleep path is still not found.
 - **w99o, patch 0145:** before sleeping the ARM7 only clears the amp bit (if set) and leaves register 0 otherwise as it is, then
   restores it. One change at a time: if it now wakes on opening the lid, the LED-blink write was what made the power micro switch off.
+
+### w99o switched off too; deep sleep pinned (w99p)
+
+User (w99o): "the console turned off again. Lets just pin this for now and move on." The trace stopped at "writing deepsleep" again:
+without the LED-blink write the power micro still switches the DSi off once the ARM7 sleeps. w99p, patch 0146:
+- the kernel refuses "deepsleep" unless "deepsleep enable" was written first;
+- dsautolog DEEP_SLEEP 0;
+- dssettings LID_BUTTON 0.
+
+The code stays for a later attempt (next steps in SLEEP-LOCK-PLAN.md).

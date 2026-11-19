@@ -20,7 +20,28 @@ on-screen keypad; wrong PINs wait 1, 2, 4 ... 30 s. Stored hashed in `/home/.loc
   charger, and "Critical: off soon" at 1 (the clean shut down follows about 20 s later). Once per level; plugging in resets it.
 - `/proc/uptime` counts from boot (it showed the year-2000 date before).
 
-**w99o** (on the card, not yet tried): w99n really slept (the trace stopped at "writing deepsleep"), but the LEDs faded and the DSi
+**Deep sleep is pinned (2026-11-19, the user: "lets just pin this for now and move on"). w99p switches it off:**
+- the Settings "Lid" button is hidden (`LID_BUTTON 0` in dssettings.c; apply always sets lidsleep 0);
+- dsautolog never starts a sleep (`DEEP_SLEEP 0`);
+- the kernel refuses `deepsleep` (ENOSYS) unless `deepsleep enable` was written first.
+
+Light sleep is unchanged: screens and LCDs off on lid close or idle, everything keeps running.
+
+**Where it stands, for picking it up again:**
+- **What works:**
+  - the preparation (Wi-Fi down, sync, log, SD lock, screens off);
+  - the ARM9/ARM7 handshake;
+  - the recovery (Wi-Fi reconnects, lock screen, clock catches up; w99m);
+  - the ARM7 really sleeping through BIOS SWI 7 (our own HALTCNT write was ignored, w99m).
+- **What fails:** once asleep, the DSi's power micro fades the LEDs and switches the console off (w99n with libnds's register-0
+  write, w99o without it). It most likely needs to be told about the sleep first.
+- **Next:** find the System Menu's sleep path in the user's dump. It is not a direct BIOS-Sleep call or HALTCNT write in any of its
+  three binaries. Map its power-management thread (PM commands at 0x2f132e4 and the state block 0x37c0c00) and its power micro
+  writes (I2C device 4: write 0x2f5884c, read 0x2f58b1c). Candidates: register 0x21 bit 0, 0x12, or something not yet seen.
+- **To experiment:** set `DEEP_SLEEP 1` in dsautolog.c (or write the request by hand), and write `deepsleep enable` to
+  /proc/dsisettings before `echo now > /tmp/sleep.request`.
+
+**w99o**: (tried: the console switched off again; trace stopped at "writing deepsleep") w99n really slept (the trace stopped at "writing deepsleep"), but the LEDs faded and the DSi
 switched itself off. w99o drops the one thing the DSi System Menu never does (writing the old "LED blink" bit 0x10 of power-chip
 register 0); it only turns the speaker amp off. If it still switches off, the power micro needs a handshake still to be found in the dump.
 
@@ -60,7 +81,7 @@ which is always running, so no program has to start before the sleep.
     restarted anyway);
   - whether the System Menu does more in DSi mode (its sleep caller is still unmapped, see below).
 
-Not yet: the text console lock.
+Not yet: the text console lock; deep sleep (pinned, above).
 
 ## What the System Menu does (the user's dump, `title/00030017/484e4145`, 2026-11-18)
 

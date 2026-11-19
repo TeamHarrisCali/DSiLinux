@@ -1,0 +1,144 @@
+From fa577429be3d86c6efdb305257e63bed880952af Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 00:45:02 -0600
+Subject: [PATCH] Pin deep sleep: off by default (w99p)
+
+The ARM7 sleeps through BIOS SWI 7, but the DSi's power micro then switches
+the console off (w99n, w99o). Kernel refuses 'deepsleep' unless 'deepsleep
+enable' was written; dsautolog DEEP_SLEEP 0; Settings Lid button hidden.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ linux-2.6.x/arch/arm/mach-nds/screensleep.c |  5 +++++
+ linux-2.6.x/arch/arm/mach-nds/volume.c      |  8 ++++++--
+ user/microwin/src/demos/nanox/dssettings.c  | 12 ++++++++----
+ vendors/Nintendo/DSI/dsautolog.c            | 10 ++++++++++
+ 4 files changed, 29 insertions(+), 6 deletions(-)
+
+diff --git a/linux-2.6.x/arch/arm/mach-nds/screensleep.c b/linux-2.6.x/arch/arm/mach-nds/screensleep.c
+index 0e82fa967..56ec62129 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/screensleep.c
++++ b/linux-2.6.x/arch/arm/mach-nds/screensleep.c
+@@ -133,6 +133,9 @@ extern void getnstimeofday(struct timespec *tv);	/* kernel/time.c (no header dec
+ static volatile int sleep_state;			/* from the ARM7: 1 asleep now, 2 awake, 3 refused */
+ static unsigned int wake_if[4];				/* from the ARM7 just after waking: IF low/high, IF2 low/high */
+ unsigned int nds_sleeps;				/* deep sleeps since boot (/proc/dslid) */
++/* Pinned (2026-11-19): the ARM7 does sleep through BIOS SWI 7, but the DSi's power micro then switches the console off (w99n, w99o):
++ * a handshake with it is still missing (docs/SLEEP-LOCK-PLAN.md). Off unless "deepsleep enable" is written first, for experiments. */
++int nds_deep_sleep_ok;
+ 
+ static unsigned int bcd(unsigned char v)
+ {
+@@ -177,6 +180,8 @@ int nds_deep_sleep(void)
+ 	long slept;
+ 	int i, res;
+ 
++	if (!nds_deep_sleep_ok)
++		return -ENOSYS;
+ 	if (!nds_lid_closed)
+ 		return -EAGAIN;
+ 	printk(KERN_INFO "deep sleep: waiting for the SD lock\n");
+diff --git a/linux-2.6.x/arch/arm/mach-nds/volume.c b/linux-2.6.x/arch/arm/mach-nds/volume.c
+index d16f0dccb..e088562c8 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/volume.c
++++ b/linux-2.6.x/arch/arm/mach-nds/volume.c
+@@ -93,6 +93,7 @@ extern void nds_screen_off(void);
+ extern void nds_screen_on(void);
+ extern int nds_lid_sleep;			/* screensleep.c */
+ extern int nds_deep_sleep(void);
++extern int nds_deep_sleep_ok;
+ extern int ndspad_gain;
+ 
+ /*
+@@ -102,8 +103,9 @@ extern int ndspad_gain;
+  *          or "rtc YYYY MM DD WD hh mm ss": the DSi's clock chip (local time, as the DSi's own menu shows it; WD = weekday 0..6, Sunday 0).
+  *          httpdate -w writes it after setting the clock from the network.
+  *          or "sleep N" (seconds without local input before the screen goes off, 0 = never) or "screen off" / "screen on"
+- *          or "lidsleep 0|1" (deep sleep when the lid stays closed; dsautolog acts on it) or "deepsleep" (now, lid closed only:
+- *          the write returns after the lid opens; /boot/sleep does it with the preparations)
++ *          or "lidsleep 0|1" (deep sleep when the lid stays closed) or "deepsleep" (now, lid closed only; returns after the lid opens).
++ *          Deep sleep is pinned: refused (ENOSYS) unless "deepsleep enable" was written first, because the DSi's power micro
++ *          switches the console off during it (docs/SLEEP-LOCK-PLAN.md).
+  *   the read line also has sleep=N screen=on|off lid=open|closed (screensleep.c)
+  */
+ static int settings_read_proc(char *page, char **start, off_t off, int count, int *eof, void *data)
+@@ -164,6 +166,8 @@ static int settings_write_proc(struct file *file, const char __user *buffer, uns
+ 		nds_sleep_secs = n;
+ 	} else if (!strncmp(buf, "lidsleep ", 9)) {
+ 		nds_lid_sleep = simple_strtoul(buf + 9, NULL, 10) ? 1 : 0;
++	} else if (!strncmp(buf, "deepsleep enable", 16)) {
++		nds_deep_sleep_ok = 1;		/* experiments only: the DSi switches itself off in sleep so far */
+ 	} else if (!strncmp(buf, "deepsleep", 9)) {
+ 		int r = nds_deep_sleep();
+ 
+diff --git a/user/microwin/src/demos/nanox/dssettings.c b/user/microwin/src/demos/nanox/dssettings.c
+index c93bbc9bc..dd4579bfe 100644
+--- a/user/microwin/src/demos/nanox/dssettings.c
++++ b/user/microwin/src/demos/nanox/dssettings.c
+@@ -52,7 +52,9 @@ static const char *sleep_name[] = { "never", "after 30 s", "after 1 min", "after
+ static int sleep_i = 3, have_sleep;		/* 2 minutes unless chosen */
+ static int lid_sleep;				/* Lid: 0 screen off, 1 deep sleep */
+ static int focus, applying;			/* applying: only write the hardware, do not rewrite the saved file */
+-#define FIXED_BTNS	11			/* the four spin rows (8 buttons), the Sound test, Lock PIN and Lid buttons */
++/* the Lid: off / sleep button: hidden while deep sleep is pinned (the DSi switches itself off in sleep, docs/SLEEP-LOCK-PLAN.md) */
++#define LID_BUTTON	0
++#define FIXED_BTNS	(10 + LID_BUTTON)	/* the four spin rows (8 buttons), the Sound test, Lock PIN (and Lid) buttons */
+ static GR_WINDOW_ID win;
+ static GR_GC_ID gc;
+ static int th;
+@@ -460,8 +462,10 @@ static void draw_all(void)
+ 	add_btn(RX0, WIN_H - BTNH - 4, 70, BTNH, B_SOUND);
+ 	w95_button(win, gc, RX0 + 76, WIN_H - BTNH - 4, 70, BTNH, "Lock PIN", 0);
+ 	add_btn(RX0 + 76, WIN_H - BTNH - 4, 70, BTNH, B_PIN);
+-	draw_lid_btn();
+-	add_btn(RX0 + 152, WIN_H - BTNH - 4, 64, BTNH, B_LID);
++	if (LID_BUTTON) {
++		draw_lid_btn();
++		add_btn(RX0 + 152, WIN_H - BTNH - 4, 64, BTNH, B_LID);
++	}
+ 	draw_clock();
+ 	draw_info();
+ }
+@@ -529,7 +533,7 @@ static int apply(void)
+ 	if (have_padgain)
+ 		set_padgain(padgain);
+ 	set_sleep(sleep_i);			/* the saved choice, or 2 minutes */
+-	set_lid_sleep(lid_sleep);		/* the saved choice, or off */
++	set_lid_sleep(LID_BUTTON ? lid_sleep : 0);	/* the saved choice, or off (always off while pinned) */
+ 	return 0;
+ }
+ 
+diff --git a/vendors/Nintendo/DSI/dsautolog.c b/vendors/Nintendo/DSI/dsautolog.c
+index 78257c4c9..32b703a56 100644
+--- a/vendors/Nintendo/DSI/dsautolog.c
++++ b/vendors/Nintendo/DSI/dsautolog.c
+@@ -72,9 +72,18 @@ static int battery_critical(void)
+ 	return b >= 0 && b <= 1 && !c;
+ }
+ 
++/*
++ * Deep sleep is pinned (2026-11-19): the DSi switches itself off in sleep (w99n, w99o), so this never starts one. 1 to try again,
++ * together with "deepsleep enable" in /proc/dsisettings (the kernel refuses otherwise).
++ */
++#define DEEP_SLEEP	0
++
+ /* 1 when the lid is closed and lid sleep is on; 2 when the lid is closed and a test sleep was asked for (/tmp/sleep.request) */
+ static int lid_sleep_wanted(void)
+ {
++	if (!DEEP_SLEEP)
++		return 0;
++	{
+ 	char b[96];
+ 	int fd = open("/proc/dslid", O_RDONLY), n;
+ 
+@@ -90,6 +99,7 @@ static int lid_sleep_wanted(void)
+ 	if (access("/tmp/sleep.request", F_OK) == 0)
+ 		return 2;
+ 	return strstr(b, "lidsleep=1") ? 1 : 0;
++	}
+ }
+ 
+ static void logline(const char *what)
+-- 
+2.56.1
+
