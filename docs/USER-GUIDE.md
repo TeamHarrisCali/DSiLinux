@@ -16,6 +16,10 @@ How to use DSLinux on the DSi XL: the buttons, the desktop, every program, Wi-Fi
 - **Screen off:** after 2 minutes without a touch or button the screens go dark, and at once when the lid closes; a touch or button
   (with the lid open) brings them back, without clicking or typing anything. Programs keep running. Settings > Screen off sets the time
   (or never). The backlights and the LCDs both go off.
+- **Sleep with the lid closed:** Settings > the "Lid: off" button switches to "Lid: sleep". Then, 5 seconds after the lid closes, the
+  whole DSi goes to sleep (programs, SSH and the clock stop) until you open the lid. Wi-Fi is switched off
+  first and reconnects by itself afterwards if a network is set to Auto, and the clock catches up. "Lid: off" (the default) only turns
+  the screens off, so downloads and SSH carry on. If the DSi ever does not wake, hold the power button to switch it off.
 - **Low battery:** a popup under the taskbar says "Battery low: plug in" when the battery gets low, and "Critical: off soon" when it is
   nearly empty; about 20 s later, without a charger, the DSi shuts down cleanly by itself.
 - **Lock:** Settings > Lock PIN sets a PIN (4-8 digits). With a PIN, closing the lid locks the desktop, and Start > Lock locks it now;

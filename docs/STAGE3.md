@@ -1166,3 +1166,36 @@ User (w99i): "it works". w99j, patch 0140 (sleep plan, what is left):
   charging; battery polled every 10 s once low. Test bed (DSDESK_BATTERY=file with "battery=N charger=C"): both messages fit, the
   popup closes after 8 s.
 - **Uptime:** time.c sets wall_to_monotonic after xtime at boot, so /proc/uptime counts from boot instead of from 2000-01-01.
+
+### Deep sleep (w99k)
+
+User: "deep sleep please". w99k, patch 0141:
+- **References.**
+  - libnds (BlocksDS, zlib, fetched into DSLinuxDSi-third-party): ARM7 lid poll, then FIFO_SYSTEM to the ARM9, then the ARM9 sends
+    PM_REQ_SLEEP and spins 100 ms in swiDelay.
+  - The ARM7 power handler (in the FIFO interrupt):
+    - before: speaker bias down, PM reg0 = LED blink only, IE = lid;
+    - swiSleep;
+    - after: 100 ms, restore IE and PM, bias up.
+  - Its SD driver does nothing around sleep (SD cards have no sleep mode).
+  - The user's bios7i dump: the SWI table at 0xEC; SWI 6 Halt and SWI 7 Sleep (0xE94) are "strb 0x80/0xC0 to 0x4000301", nothing else.
+  - The System Menu's ARM7 sleep caller is still unmapped (WRAM copies).
+- **ARM7** (arm7/main.c arm7_sleep, FIFO_POWER_CMD_SLEEP = 3):
+  1. refuse (3) with the lid open;
+  2. read PM reg0, answer 1, write reg0 = LED blink, wait about 10 ms;
+  3. IE = lid open (bit 22), IE2 = 0, ack, HALTCNT = 0xC0 if the lid is still closed;
+  4. after waking: ack, about 100 ms of delay loop, restore IE/IE2/PM, answer 2.
+
+  No BIOS calls (the handler rule).
+- **ARM9** (screensleep.c nds_deep_sleep, "deepsleep" in /proc/dsisettings, lid closed only):
+  1. dsisd_lock() (the SD request mutex: no SD/Wi-Fi request in flight), RTC seconds and xtime noted, screen off, msleep(100);
+  2. irqs off, IE = FIFO receive only, IME 1, send the command;
+  3. wait up to 1 s for the answer (udelay + drain), then CP15 wait-for-interrupt until "awake";
+  4. restore IE/IME, move the clock on by (RTC delta - xtime delta), unlock, screen on.
+- **Trigger:** "lidsleep 0|1" (/proc/dsisettings; shown in /proc/dslid with sleeps=N). dsautolog now ticks every second, reading
+  /proc/dslid: lid closed with lidsleep=1 for 5 s runs /boot/sleep (new). /boot/sleep:
+  - Wi-Fi down if up;
+  - sync, log, "echo deepsleep";
+  - log again, and "dssettings wifi auto" if Wi-Fi was up and /home/wifi.auto exists.
+- **Settings:** a "Lid: off / sleep" button on the bottom row (lidsleep=1 in settings.conf, applied by `dssettings apply`). Test bed:
+  fits, toggles.

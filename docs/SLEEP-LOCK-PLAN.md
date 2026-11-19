@@ -20,7 +20,30 @@ on-screen keypad; wrong PINs wait 1, 2, 4 ... 30 s. Stored hashed in `/home/.loc
   charger, and "Critical: off soon" at 1 (the clean shut down follows about 20 s later). Once per level; plugging in resets it.
 - `/proc/uptime` counts from boot (it showed the year-2000 date before).
 
-Not yet: the text console lock, deep sleep (step 6, findings below).
+**w99k** (built, on the card, not yet tried on the DSi): **deep sleep (step 6)**, as the user asked ("deep sleep please",
+2026-11-18, which answers question E4):
+- **Settings > "Lid: off / sleep"** (bottom row; default off). With "sleep", once the lid has stayed closed for 5 s, `dsautolog`
+  runs `/boot/sleep`: Wi-Fi down if it was up, `sync`, then `echo deepsleep > /proc/dsisettings`, which returns when the lid opens.
+  Afterwards the clock moves on by the time slept, and Wi-Fi reconnects by itself if it was on and a network is on Auto. Works from
+  the desktop and the text console alike. With a PIN, the lock screen is already up (it starts 1 s after the lid closes).
+- **How:**
+  - The ARM9 holds the SD request lock (no card or Wi-Fi request in flight), turns the screens off, and waits halted with only the
+    FIFO interrupt enabled.
+  - The ARM7 sleeps inside its message handler, as libnds does, but without BIOS calls (they must not run in that handler).
+  - The DSi BIOS's Sleep (SWI 7) is only "HALTCNT = 0xC0" (read in the user's bios7i dump), so the ARM7 writes that register itself.
+  - Before: it refuses with the lid open, switches the speaker amp and backlights off and makes the LED blink (as libnds), and allows
+    only "lid opened" to wake it.
+  - After: about 100 ms to settle, then it restores everything and sends "awake".
+- **Test by hand over SSH** (lid sleep off): `sleep 5; /boot/sleep`, close the lid within 5 s, wait, open it. `cat /proc/dslid`
+  shows `sleeps=N`; the kernel log has `deep sleep: N s`; `/tmp/desktop.log` has the two "sleep:" lines.
+- **If it does not wake:** hold the power button (the power micro cuts the power by itself), then check the image on the PC
+  (`scripts/rootfs-check.sh`). Nothing was being written: the disks were synced and the SD lock was held.
+- **Unknowns:**
+  - whether the DSi's Wi-Fi chip, SD card and touch chip all come back without a re-init (libnds does nothing for them; Wi-Fi is
+    restarted anyway);
+  - whether the System Menu does more in DSi mode (its sleep caller is still unmapped, see below).
+
+Not yet: the text console lock.
 
 ## What the System Menu does (the user's dump, `title/00030017/484e4145`, 2026-11-18)
 

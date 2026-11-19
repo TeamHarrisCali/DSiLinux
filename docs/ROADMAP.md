@@ -5,7 +5,8 @@ lists them, where each one stopped, and **every question still waiting for an an
 
 ## Where things stand
 
-- **On the card now: w99j** (2026-11-18), not yet tried on the DSi:
+- **On the card now: w99k** (2026-11-18): **deep sleep** (Settings > "Lid: sleep", or `sleep 5; /boot/sleep` over SSH and close the
+  lid), not yet tried on the DSi. It includes w99j, also not yet tried:
   - the LCDs go off with the backlights (System Menu order, from the dump), with a guard that turns them back on if the display's
     frame interrupt stops;
   - a low-battery warning in the taskbar popup (level 3: "Battery low: plug in"; 1: "Critical: off soon");
@@ -121,7 +122,7 @@ memreport: programs 2.9 MB, 7.4 MB free, largest free block 4 MB.
 | A current BusyBox with the hush shell | [BUSYBOX-HUSH-PLAN.md](BUSYBOX-HUSH-PLAN.md) | Step 0: download BusyBox 1.36.1 | **Your OK for the download**, questions B |
 | File management, tidy layout, leaner system | [FILES-CLEANUP-PLAN.md](FILES-CLEANUP-PLAN.md) | Step 1: the Files program with Delete / Recycle Bin | Questions C |
 | Touch screen revamp (input page + dashboard) | [TOUCHSCREEN-PLAN.md](TOUCHSCREEN-PLAN.md) | Step 0: your feedback, then mock-ups | Questions D |
-| Screen sleep, locking, lid sleep | [SLEEP-LOCK-PLAN.md](SLEEP-LOCK-PLAN.md) | **Steps 2-4 verified** (screen off when idle and on lid close, the Settings choice, the PIN lock); step 5 (critical battery) built; w99j: LCDs off too and the battery warning (untested); left: deep sleep (System Menu findings in the plan), text console lock | E3 (Wi-Fi with the lid closed), E4 (deep sleep) |
+| Screen sleep, locking, lid sleep | [SLEEP-LOCK-PLAN.md](SLEEP-LOCK-PLAN.md) | **Steps 2-4 verified** (screen off when idle and on lid close, the Settings choice, the PIN lock); step 5 (critical battery) built; w99j: LCDs off too and the battery warning (untested); **w99k: deep sleep** with Settings > "Lid: sleep" (untested); left: text console lock | E3 (Wi-Fi with the lid closed) |
 | The DSi's Wi-Fi chip: faster, quicker to connect, WPA2 | (this page, below) | Speed: the 4-bit bus and block transfers | Questions F |
 | Later, bigger: a package manager (`dspkg`) | (no file yet) | After BusyBox: `wget` with HTTPS makes it possible | Your choice |
 | Later, much bigger: new kernel and modern compiler | (no file yet) | Needed for anything that a 2005 compiler cannot build | Months of work; your choice |
@@ -176,7 +177,7 @@ Which plan goes first is your choice. A suggestion:
 1. "Screen off after": 2 minutes by default?
 2. ~~Lock with a PIN or a password?~~ **A PIN, and log in automatically at boot** (user, 2026-11-18): it locks when the lid closes.
 3. Lid closed: Wi-Fi stays on (SSH keeps working) or goes off (more battery)?
-4. Deep sleep worth the risk, or is light sleep enough?
+4. ~~Deep sleep worth the risk, or is light sleep enough?~~ Answered 2026-11-18: "deep sleep please" (built in w99k).
 
 **F. The DSi's Wi-Fi chip**
 1. Speed first (item 1), or the quicker connect (item 2)?

@@ -1,0 +1,533 @@
+From 32431573002e7fd56f34c5008ad4f905d344ea22 Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 23:50:46 -0600
+Subject: [PATCH] Deep sleep with the lid closed (w99k)
+
+- ARM7: FIFO_POWER_CMD_SLEEP: refuses with the lid open; LED blink, IE = lid
+  open only, HALTCNT = 0xC0 (what the DSi BIOS's SWI 7 does; no BIOS calls in
+  the interrupt handler); restores and answers 'awake'.
+- ARM9: nds_deep_sleep() holds the SD request lock, halts (CP15 WFI) with only
+  the FIFO interrupt until 'awake', then moves the clock on by the RTC delta.
+  /proc/dsisettings 'deepsleep' and 'lidsleep 0|1'; /proc/dslid shows both.
+- /boot/sleep: Wi-Fi down, sync, sleep, Wi-Fi Auto again after.
+- dsautolog: checks /proc/dslid every second; lid closed 5 s with lidsleep=1
+  runs /boot/sleep.
+- Settings: 'Lid: off / sleep' button.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ linux-2.6.x/arch/arm/mach-nds/arm7/main.c   | 53 ++++++++++++
+ linux-2.6.x/arch/arm/mach-nds/rtc.c         |  6 ++
+ linux-2.6.x/arch/arm/mach-nds/screensleep.c | 95 ++++++++++++++++++++-
+ linux-2.6.x/arch/arm/mach-nds/volume.c      | 11 +++
+ linux-2.6.x/drivers/block/dldi_c.c          | 11 +++
+ linux-2.6.x/include/asm-arm/arch-nds/fifo.h |  3 +-
+ user/microwin/src/demos/nanox/dssettings.c  | 29 ++++++-
+ vendors/Nintendo/DSI/Makefile               |  1 +
+ vendors/Nintendo/DSI/dsautolog.c            | 33 ++++++-
+ vendors/Nintendo/DSI/sleep                  | 26 ++++++
+ 10 files changed, 261 insertions(+), 7 deletions(-)
+ create mode 100755 vendors/Nintendo/DSI/sleep
+
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/main.c b/linux-2.6.x/arch/arm/mach-nds/arm7/main.c
+index 373337dce..574cc36c5 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/arm7/main.c
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/main.c
+@@ -90,6 +90,56 @@ int isDSPhat(void)
+ 	return !((power_read(POWER_BACKLIGHT)) & (1<<6));
+ }
+ 	
++/*
++ * Deep sleep (docs/SLEEP-LOCK-PLAN.md step 6) until the lid opens: libnds's sequence (its ARM7 power handler sleeps from the FIFO
++ * interrupt too), but without BIOS calls, which must not run in this handler (STAGE3: w98g, w99e). The DSi BIOS's Sleep (SWI 7) is only
++ * "HALTCNT = 0xC0" (read in the user's bios7i dump), so it is written here directly. Sleep stops the whole system, the ARM9 too; the ARM9
++ * waits halted (screensleep.c) for the "awake" message, holding the SD lock, so no card or Wi-Fi request is in flight.
++ */
++#define HALTCNT		(*(volatile u8*)0x04000301)
++#define NDS_IE2		(*(volatile u32*)0x04000218)	/* DSi: the second interrupt mask */
++#define IRQ_LID_OPEN	(1 << 22)			/* the hinge unfolding */
++#define LID_CLOSED()	(XKEYS & (1 << 7))
++
++static void sleep_delay(u32 n)
++{
++	volatile u32 i;
++
++	for (i = 0; i < n; i++)
++		;
++}
++
++static void arm7_sleep(void)
++{
++	u32 ie = NDS_IE, ie2 = NDS_IE2;
++	u8 pm = 0;
++	int pm_ok;
++
++	if (!LID_CLOSED()) {			/* opening the lid is the only way out: never sleep with it open */
++		nds_fifo_send(FIFO_POWER_CMD(FIFO_POWER_CMD_SLEEP, 3));
++		return;
++	}
++	pm_ok = pm_xfer(0x80 | POWER_CONTROL, 0, &pm) && !(pm & POWER0_SYSTEM_POWER);
++	nds_fifo_send(FIFO_POWER_CMD(FIFO_POWER_CMD_SLEEP, 1));	/* the ARM9 halts now */
++	if (pm_ok)
++		pm_xfer(POWER_CONTROL, POWER0_LED_BLINK, 0);	/* speaker amp and backlights off, the power LED blinks (as libnds) */
++	sleep_delay(40000);			/* about 10 ms: the ARM9 is halted */
++	NDS_IE = IRQ_LID_OPEN;
++	NDS_IE2 = 0;
++	NDS_IF = IRQ_LID_OPEN;
++	if (LID_CLOSED()) {
++		HALTCNT = 0xC0;			/* sleep until IE & IF: the lid opens */
++		asm volatile("nop\n\tnop" ::: "memory");
++	}
++	NDS_IF = IRQ_LID_OPEN;
++	sleep_delay(400000);			/* about 100 ms to settle, as libnds */
++	NDS_IE = ie;
++	NDS_IE2 = ie2;
++	if (pm_ok)
++		pm_xfer(POWER_CONTROL, pm, 0);
++	nds_fifo_send(FIFO_POWER_CMD(FIFO_POWER_CMD_SLEEP, 2));
++}
++
+ /* recieve outstanding FIFO commands from ARM9 */
+ static void recieveFIFOCommand(void)
+ {
+@@ -168,6 +218,9 @@ static void recieveFIFOCommand(void)
+ 			case FIFO_POWER_CMD_SYSTEM_POWER:
+ 					pm_xfer(POWER_CONTROL, POWER0_SYSTEM_POWER, 0);
+ 				break;
++			case FIFO_POWER_CMD_SLEEP:
++				arm7_sleep();
++				break;
+ 				}
+ 	 		break;
+ 		case FIFO_TIME:
+diff --git a/linux-2.6.x/arch/arm/mach-nds/rtc.c b/linux-2.6.x/arch/arm/mach-nds/rtc.c
+index b2e629351..f78d981c0 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/rtc.c
++++ b/linux-2.6.x/arch/arm/mach-nds/rtc.c
+@@ -38,6 +38,12 @@ static u32 getTimeFromArm7(void) {
+     return ndshwtime;
+ }
+ 
++/* the clock chip's seconds (screensleep.c measures a deep sleep with it) */
++u32 nds_rtc_seconds(void)
++{
++	return getTimeFromArm7();
++}
++
+ static void ndsupdate_time(u32 seconds)
+ {
+         if(seconds & FIFO_HIGH_BITS) {
+diff --git a/linux-2.6.x/arch/arm/mach-nds/screensleep.c b/linux-2.6.x/arch/arm/mach-nds/screensleep.c
+index 0a4e180bc..07b70230e 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/screensleep.c
++++ b/linux-2.6.x/arch/arm/mach-nds/screensleep.c
+@@ -11,6 +11,8 @@
+  * backlights. The System Menu counts frames while the LCDs are off, so the display (and its vblank interrupt, which button.c reads
+  * the keys on) keeps running; in case it does not here, ss_tick turns the LCDs back on when no vblank came for a second and stops
+  * switching them for this boot ("lcdoff=0" in the kernel log).
++ * Deep sleep (step 6): "deepsleep" written to /proc/dsisettings, with the lid closed, stops the whole system until the lid opens
++ * (nds_deep_sleep below; /boot/sleep runs it, started by dsautolog when "lidsleep 1" is set and the lid stays closed).
+  */
+ #include <linux/kernel.h>
+ #include <linux/init.h>
+@@ -20,10 +22,15 @@
+ #include <asm/arch/fifo.h>
+ #include <asm/arch/power.h>
+ #include <asm/system.h>
++#include <linux/delay.h>
++#include <linux/time.h>
++#include <linux/errno.h>
++#include <asm/irq.h>
+ 
+ int nds_sleep_secs = 120;	/* 0 = never; the Settings app sets the saved choice at every desktop start */
+ int nds_screen_is_off;
+ int nds_lid_closed;
++int nds_lid_sleep;		/* 1: deep sleep when the lid stays closed (dsautolog reads it from /proc/dslid; Settings sets it) */
+ static unsigned int lid_closes;	/* how often the lid was closed since boot: /proc/dslid, for the lock screen (dsdesk polls it) */
+ static unsigned long last_input;
+ static struct timer_list ss_timer;
+@@ -110,10 +117,93 @@ void nds_lid(int closed)
+ 		nds_screen_on();
+ }
+ 
+-/* /proc/dslid: "lid=open|closed closes=N", cheap to read (no ARM7 request): the taskbar starts the lock screen when N goes up */
++/*
++ * Deep sleep (docs/SLEEP-LOCK-PLAN.md step 6). The ARM7 (arm7/main.c arm7_sleep) puts the whole system to sleep until the lid opens;
++ * the ARM9 waits here halted with only the FIFO interrupt enabled, holding the SD request lock (no card or Wi-Fi request in flight).
++ * The kernel's clock stands still meanwhile; afterwards it moves on by the time the clock chip saw pass. The caller (/boot/sleep) has
++ * synced the disks and taken Wi-Fi down (the Wi-Fi chip is restarted after wake). Returns 0 after a sleep, -EAGAIN with the lid open,
++ * -EIO when the ARM7 did not answer.
++ */
++#define ARM9_IE		(*(volatile u32*)0x04000210)
++#define ARM9_IF		(*(volatile u32*)0x04000214)
++#define ARM9_IME	(*(volatile u32*)0x04000208)
++extern void dsisd_lock(void), dsisd_unlock(void);	/* drivers/block/dldi_c.c */
++extern u32 nds_rtc_seconds(void);			/* rtc.c */
++extern void getnstimeofday(struct timespec *tv);	/* kernel/time.c (no header declares it in 2.6.14) */
++static volatile int sleep_state;			/* from the ARM7: 1 asleep now, 2 awake, 3 refused */
++unsigned int nds_sleeps;				/* deep sleeps since boot (/proc/dslid) */
++
++static void sleep_power_cb(u8 cmd, u32 data)
++{
++	if (cmd == FIFO_POWER_CMD_SLEEP)
++		sleep_state = data;
++}
++
++static struct fifo_cb sleep_fifocb = {
++	.type = FIFO_POWER,
++	.handler.power_handler = sleep_power_cb
++};
++
++int nds_deep_sleep(void)
++{
++	struct timespec t0, t1;
++	unsigned long flags;
++	u32 r0, r1, ie, ime;
++	long slept;
++	int i, res;
++
++	if (!nds_lid_closed)
++		return -EAGAIN;
++	dsisd_lock();
++	r0 = nds_rtc_seconds();
++	getnstimeofday(&t0);
++	nds_screen_off();
++	msleep(100);				/* the LCDs go off LCD_OFF_GAP after the backlights */
++	sleep_state = 0;
++	local_irq_save(flags);
++	ie = ARM9_IE;
++	ime = ARM9_IME;
++	ARM9_IE = 1 << IRQ_RECV;		/* only the ARM7's messages end the halt below */
++	ARM9_IME = 1;
++	nds_fifo_send(FIFO_POWER_CMD(FIFO_POWER_CMD_SLEEP, 0));
++	for (i = 0; sleep_state == 0 && i < 100000; i++) {	/* its answer within a second */
++		udelay(10);
++		nds_fifo_drain();
++	}
++	while (sleep_state == 1) {		/* asleep: wait for "awake", however long the lid stays closed */
++		ARM9_IF = 1 << IRQ_RECV;
++		if (NDS_REG_IPCFIFOCNT & FIFO_EMPTY)
++			asm volatile("mcr p15, 0, %0, c7, c0, 4" : : "r" (0) : "memory");	/* halt until an interrupt */
++		nds_fifo_drain();
++	}
++	res = sleep_state;
++	ARM9_IE = ie;
++	ARM9_IME = ime;
++	local_irq_restore(flags);
++	if (res == 2) {
++		nds_sleeps++;
++		r1 = nds_rtc_seconds();
++		getnstimeofday(&t1);
++		slept = (long)(r1 - r0) - (long)(t1.tv_sec - t0.tv_sec);	/* what the kernel's clock missed */
++		if (r1 > r0 && slept > 0 && slept < 400L * 86400) {
++			t1.tv_sec += slept;
++			do_settimeofday(&t1);
++		}
++		printk(KERN_INFO "deep sleep: %ld s\n", slept > 0 ? slept : 0);
++	} else {
++		printk(KERN_WARNING "deep sleep: %s\n", res == 3 ? "the lid was open" : "the ARM7 did not answer");
++	}
++	dsisd_unlock();
++	nds_screen_on();			/* only with the lid open; otherwise the lid's opening does it */
++	return res == 2 ? 0 : res == 3 ? -EAGAIN : -EIO;
++}
++
++/* /proc/dslid: "lid=open|closed closes=N lidsleep=0|1 sleeps=N", cheap to read (no ARM7 request): the taskbar starts the lock screen
++ * when closes goes up; dsautolog starts /boot/sleep when lidsleep is 1 and the lid stays closed */
+ static int dslid_read_proc(char *page, char **start, off_t off, int count, int *eof, void *data)
+ {
+-	int len = sprintf(page, "lid=%s closes=%u\n", nds_lid_closed ? "closed" : "open", lid_closes);
++	int len = sprintf(page, "lid=%s closes=%u lidsleep=%d sleeps=%u\n", nds_lid_closed ? "closed" : "open", lid_closes,
++			  nds_lid_sleep, nds_sleeps);
+ 
+ 	*eof = 1;
+ 	if (off >= len)
+@@ -147,6 +237,7 @@ static int __init nds_screensleep_init(void)
+ 	ss_timer.expires = jiffies + HZ;
+ 	add_timer(&ss_timer);
+ 	create_proc_read_entry("dslid", 0444, NULL, dslid_read_proc, NULL);
++	register_fifocb(&sleep_fifocb);
+ 	return 0;
+ }
+ 
+diff --git a/linux-2.6.x/arch/arm/mach-nds/volume.c b/linux-2.6.x/arch/arm/mach-nds/volume.c
+index 6199cf56d..d16f0dccb 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/volume.c
++++ b/linux-2.6.x/arch/arm/mach-nds/volume.c
+@@ -91,6 +91,8 @@ extern int dsisd_rtc(const unsigned char *v, unsigned char *out);
+ extern int nds_sleep_secs, nds_screen_is_off, nds_lid_closed;	/* screensleep.c */
+ extern void nds_screen_off(void);
+ extern void nds_screen_on(void);
++extern int nds_lid_sleep;			/* screensleep.c */
++extern int nds_deep_sleep(void);
+ extern int ndspad_gain;
+ 
+ /*
+@@ -100,6 +102,8 @@ extern int ndspad_gain;
+  *          or "rtc YYYY MM DD WD hh mm ss": the DSi's clock chip (local time, as the DSi's own menu shows it; WD = weekday 0..6, Sunday 0).
+  *          httpdate -w writes it after setting the clock from the network.
+  *          or "sleep N" (seconds without local input before the screen goes off, 0 = never) or "screen off" / "screen on"
++ *          or "lidsleep 0|1" (deep sleep when the lid stays closed; dsautolog acts on it) or "deepsleep" (now, lid closed only:
++ *          the write returns after the lid opens; /boot/sleep does it with the preparations)
+  *   the read line also has sleep=N screen=on|off lid=open|closed (screensleep.c)
+  */
+ static int settings_read_proc(char *page, char **start, off_t off, int count, int *eof, void *data)
+@@ -158,6 +162,13 @@ static int settings_write_proc(struct file *file, const char __user *buffer, uns
+ 		if (n > 3600)
+ 			return -EINVAL;
+ 		nds_sleep_secs = n;
++	} else if (!strncmp(buf, "lidsleep ", 9)) {
++		nds_lid_sleep = simple_strtoul(buf + 9, NULL, 10) ? 1 : 0;
++	} else if (!strncmp(buf, "deepsleep", 9)) {
++		int r = nds_deep_sleep();
++
++		if (r)
++			return r;
+ 	} else if (!strncmp(buf, "screen off", 10)) {
+ 		nds_screen_off();
+ 	} else if (!strncmp(buf, "screen on", 9)) {
+diff --git a/linux-2.6.x/drivers/block/dldi_c.c b/linux-2.6.x/drivers/block/dldi_c.c
+index 106f62610..1622d597b 100644
+--- a/linux-2.6.x/drivers/block/dldi_c.c
++++ b/linux-2.6.x/drivers/block/dldi_c.c
+@@ -168,6 +168,17 @@ static int sd_request(unsigned int cmd, unsigned int sector, unsigned int count)
+ 	return ret;
+ }
+ 
++/* deep sleep (screensleep.c): holding the request lock means no SD or Wi-Fi request is in flight while the system sleeps */
++void dsisd_lock(void)
++{
++	down(&sd_mutex);
++}
++
++void dsisd_unlock(void)
++{
++	up(&sd_mutex);
++}
++
+ #ifdef CONFIG_NDS_DSI
+ /*
+  * Power off through the power chip's SPI control register (the ARM7 does it). If the console is still on afterwards the ARM7
+diff --git a/linux-2.6.x/include/asm-arm/arch-nds/fifo.h b/linux-2.6.x/include/asm-arm/arch-nds/fifo.h
+index b528e0074..55d82c78f 100644
+--- a/linux-2.6.x/include/asm-arm/arch-nds/fifo.h
++++ b/linux-2.6.x/include/asm-arm/arch-nds/fifo.h
+@@ -56,7 +56,8 @@
+ enum FIFO_POWER_CMDS {
+ 		FIFO_POWER_CMD_BACKLIGHT_POWER,
+ 		FIFO_POWER_CMD_BACKLIGHT_BRIGHTNESS,
+-		FIFO_POWER_CMD_SYSTEM_POWER
++		FIFO_POWER_CMD_SYSTEM_POWER,
++		FIFO_POWER_CMD_SLEEP	/* ARM9 -> ARM7: deep sleep until the lid opens; ARM7 -> ARM9: data 1 asleep now, 2 awake, 3 refused (lid open) */
+ };
+ 
+ /* 
+diff --git a/user/microwin/src/demos/nanox/dssettings.c b/user/microwin/src/demos/nanox/dssettings.c
+index 4b27389e5..c93bbc9bc 100644
+--- a/user/microwin/src/demos/nanox/dssettings.c
++++ b/user/microwin/src/demos/nanox/dssettings.c
+@@ -10,6 +10,9 @@
+  *   Clock          sets the system clock (hours, minutes, day, month, year). It is kept by the kernel until power off.
+  *   Info           battery level, volume level of the DSi's volume buttons, free memory.
+  *   Lock PIN       sets, changes or removes the lock screen's PIN (dslock set); with a PIN, closing the lid locks the desktop.
++ *   Lid: off/sleep what closing the lid does: "off" turns the screens off (programs, Wi-Fi and SSH go on); "sleep" also puts the whole
++ *                  DSi to sleep after 5 s, until the lid opens (Wi-Fi reconnects by itself afterwards). /proc/dsisettings "lidsleep N",
++ *                  acted on by dsautolog (docs/SLEEP-LOCK-PLAN.md step 6). Default off.
+  * Choices are saved at once in /home/settings.conf and applied again at every desktop start (dssettings apply).
+  * Keys: up/down choose a row, left/right change it, q or Esc closes. Buttons and the trackpad pointer work too.
+  */
+@@ -47,8 +50,9 @@ static const int sleep_secs[] = { 0, 30, 60, 120, 300, 600, 1800 };
+ static const char *sleep_name[] = { "never", "after 30 s", "after 1 min", "after 2 min", "after 5 min", "after 10 min", "after 30 min" };
+ #define NSLEEP	7
+ static int sleep_i = 3, have_sleep;		/* 2 minutes unless chosen */
++static int lid_sleep;				/* Lid: 0 screen off, 1 deep sleep */
+ static int focus, applying;			/* applying: only write the hardware, do not rewrite the saved file */
+-#define FIXED_BTNS	10			/* the four spin rows (8 buttons), the Sound test and Lock PIN buttons */
++#define FIXED_BTNS	11			/* the four spin rows (8 buttons), the Sound test, Lock PIN and Lid buttons */
+ static GR_WINDOW_ID win;
+ static GR_GC_ID gc;
+ static int th;
+@@ -149,6 +153,8 @@ static void save_conf(void)
+ 		fprintf(f, "padgain=%d\n", padgain);
+ 	if (have_sleep)
+ 		fprintf(f, "screenoff=%d\n", sleep_secs[sleep_i]);
++	if (lid_sleep)
++		fprintf(f, "lidsleep=1\n");
+ 	if (desk < NCOLOURS)
+ 		sprintf(line, "desktop=C:%d", desk);
+ 	else if (desk < NCOLOURS + NPATTERNS)
+@@ -188,6 +194,8 @@ static void load_conf(char *kind, char *path, int *n)
+ 				if (sleep_secs[k] == v)
+ 					sleep_i = k;
+ 			have_sleep = 1;
++		} else if (!strncmp(line, "lidsleep=", 9)) {
++			lid_sleep = atoi(line + 9) ? 1 : 0;
+ 		} else if (!strncmp(line, "desktop=", 8) && line[8] && line[9] == ':') {
+ 			*kind = line[8];
+ 			if (*kind == 'F')
+@@ -262,6 +270,14 @@ static void set_sleep(int i)
+ 	}
+ }
+ 
++static void set_lid_sleep(int on)
++{
++	lid_sleep = on ? 1 : 0;
++	proc_set(lid_sleep ? "lidsleep 1\n" : "lidsleep 0\n");
++	if (!applying)
++		save_conf();
++}
++
+ static void set_desk(int d)
+ {
+ 	int n = nchoices();
+@@ -320,7 +336,12 @@ static void add_btn(int x, int y, int w, int h, int id)
+ 	btns[nbtn++].id = id;
+ }
+ 
+-enum { B_BR_M = 1, B_BR_P, B_PD_M, B_PD_P, B_DK_M, B_DK_P, B_TH, B_TM, B_DD, B_DMO, B_DY, B_SOUND, B_SO_M, B_SO_P, B_PIN };
++enum { B_BR_M = 1, B_BR_P, B_PD_M, B_PD_P, B_DK_M, B_DK_P, B_TH, B_TM, B_DD, B_DMO, B_DY, B_SOUND, B_SO_M, B_SO_P, B_PIN, B_LID };
++
++static void draw_lid_btn(void)
++{
++	w95_button(win, gc, RX0 + 152, WIN_H - BTNH - 4, 64, BTNH, lid_sleep ? "Lid: sleep" : "Lid: off", 0);
++}
+ 
+ static void draw_spin(int row, const char *label, int minus_id, int plus_id)
+ {
+@@ -439,6 +460,8 @@ static void draw_all(void)
+ 	add_btn(RX0, WIN_H - BTNH - 4, 70, BTNH, B_SOUND);
+ 	w95_button(win, gc, RX0 + 76, WIN_H - BTNH - 4, 70, BTNH, "Lock PIN", 0);
+ 	add_btn(RX0 + 76, WIN_H - BTNH - 4, 70, BTNH, B_PIN);
++	draw_lid_btn();
++	add_btn(RX0 + 152, WIN_H - BTNH - 4, 64, BTNH, B_LID);
+ 	draw_clock();
+ 	draw_info();
+ }
+@@ -477,6 +500,7 @@ static void act(int id)
+ 	case B_DD: adjust_time(86400, 0); draw_clock(); break;
+ 	case B_DMO: adjust_time(0, 1); draw_clock(); break;
+ 	case B_DY: adjust_time(0, 2); draw_clock(); break;
++	case B_LID: set_lid_sleep(!lid_sleep); draw_lid_btn(); break;
+ 	case B_PIN:					/* set, change or remove the lock screen's PIN */
+ 		if (vfork() == 0) {
+ 			execl("/usr/bin/dslock", "/usr/bin/dslock", "set", (char *)NULL);
+@@ -505,6 +529,7 @@ static int apply(void)
+ 	if (have_padgain)
+ 		set_padgain(padgain);
+ 	set_sleep(sleep_i);			/* the saved choice, or 2 minutes */
++	set_lid_sleep(lid_sleep);		/* the saved choice, or off */
+ 	return 0;
+ }
+ 
+diff --git a/vendors/Nintendo/DSI/Makefile b/vendors/Nintendo/DSI/Makefile
+index f9ce1f9da..d0dc60047 100644
+--- a/vendors/Nintendo/DSI/Makefile
++++ b/vendors/Nintendo/DSI/Makefile
+@@ -118,6 +118,7 @@ romfs:
+ 	$(ROMFSINST) -p +x /boot/desktop-apps
+ 	$(ROMFSINST) -p +x /boot/session
+ 	$(ROMFSINST) -p +x /boot/shutdown
++	$(ROMFSINST) -p +x /boot/sleep
+ 	$(ROMFSINST) -p +x /boot/gl
+ 	$(ROMFSINST) /$(FATFS)/linux/etc/issue
+ 	# copy some Nintendo specific files to romfs
+diff --git a/vendors/Nintendo/DSI/dsautolog.c b/vendors/Nintendo/DSI/dsautolog.c
+index 3b1d413ed..e56dbab98 100644
+--- a/vendors/Nintendo/DSI/dsautolog.c
++++ b/vendors/Nintendo/DSI/dsautolog.c
+@@ -7,6 +7,8 @@
+  * Low battery (docs/SLEEP-LOCK-PLAN.md step 5): the DSi's power micro reports 15 (full), 11, 7, 3 (low), 1 (critical) and 0. At 1 or
+  * below, not charging, on two checks in a row (20 s), it runs /boot/shutdown (save the log, sync, power off) instead of letting the DSi
+  * lose power in the middle of a card write.
++ * Deep sleep (step 6): it reads /proc/dslid every second (cheap: no ARM7 request); when "lidsleep=1" (Settings > Lid closed: sleep)
++ * and the lid has stayed closed for 5 s, it runs /boot/sleep, which returns after the lid opens. Desktop or text console alike.
+  * Started by /boot/rc in the background; prints nothing (text from a background program would be drawn over the desktop).
+  * Built by scripts/build-tools.sh.
+  */
+@@ -59,6 +61,22 @@ static int battery_critical(void)
+ 	return b >= 0 && b <= 1 && !c;
+ }
+ 
++/* 1 when the lid is closed and lid sleep is on */
++static int lid_sleep_wanted(void)
++{
++	char b[96];
++	int fd = open("/proc/dslid", O_RDONLY), n;
++
++	if (fd < 0)
++		return 0;
++	n = read(fd, b, sizeof(b) - 1);
++	close(fd);
++	if (n <= 0)
++		return 0;
++	b[n] = 0;
++	return strstr(b, "lid=closed") && strstr(b, "lidsleep=1");
++}
++
+ static void run(const char *path, const char *arg)
+ {
+ 	pid_t pid = vfork();
+@@ -81,7 +99,7 @@ static void save(void)
+ int main(void)
+ {
+ 	unsigned long last = 0, sig;
+-	int low = 0;
++	int low = 0, tick = 0, closed = 0;
+ 	time_t saved = time(NULL);
+ 	int fd = open("/dev/null", O_RDWR);
+ 
+@@ -94,7 +112,18 @@ int main(void)
+ 	}
+ 	last = signature();
+ 	for (;;) {
+-		sleep(10);
++		sleep(1);
++		if (lid_sleep_wanted()) {
++			if (++closed == 5) {
++				run("/boot/sleep", (char *)0);	/* returns once the lid opens */
++				closed = 0;
++			}
++		} else {
++			closed = 0;
++		}
++		if (++tick < 10)
++			continue;
++		tick = 0;
+ 		if (battery_critical()) {
+ 			if (++low == 2) {
+ 				FILE *f = fopen("/tmp/desktop.log", "a");
+diff --git a/vendors/Nintendo/DSI/sleep b/vendors/Nintendo/DSI/sleep
+new file mode 100755
+index 000000000..781103008
+--- /dev/null
++++ b/vendors/Nintendo/DSI/sleep
+@@ -0,0 +1,26 @@
++#!/bin/sh
++# Deep sleep while the lid is closed (docs/SLEEP-LOCK-PLAN.md step 6). dsautolog runs this when Settings > "Lid closed" is "sleep"
++# (/proc/dslid lidsleep=1) and the lid has stayed closed for 5 seconds. By hand (over SSH): "sleep 5; /boot/sleep", then close the
++# lid; it refuses with the lid open.
++# The whole DSi stops (programs, the clock, SSH) until the lid opens. Before: Wi-Fi off (the chip may lose its firmware in sleep;
++# a fresh start afterwards is the safe way) and everything written to the card. After: the clock moves on by the time slept (the kernel asks the clock chip), and Wi-Fi reconnects
++# by itself if it was on and a network is set to Auto.
++L=/tmp/desktop.log
++[ -f /tmp/sleeping ] && exit 0
++: > /tmp/sleeping
++wifi=0
++if ifconfig wlan0 2>/dev/null | grep -q " UP "; then
++	wifi=1
++	killall udhcpc 2>/dev/null
++	ifconfig wlan0 down
++fi
++sync
++echo "sleep: $(date '+%H:%M:%S') going to sleep (wifi was $wifi)" >> $L
++sync
++if echo deepsleep > /proc/dsisettings 2>/dev/null; then r=ok; else r=refused; fi
++echo "sleep: $(date '+%H:%M:%S') awake ($r)" >> $L
++rm -f /tmp/sleeping
++if [ $wifi = 1 ] && [ -f /home/wifi.auto ] && [ -x /boot/dssettings ]; then
++	/boot/dssettings wifi auto > /tmp/wifi-auto.log 2>&1 &
++fi
++exit 0
+-- 
+2.56.1
+
