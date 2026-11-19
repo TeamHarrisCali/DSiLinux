@@ -1384,3 +1384,5 @@ User: "go through the entire project and optimize everything... devise a better 
   - release.sh ends with "SAFE TO REMOVE the card".
   - precheck found patches/0018-DSI-skip-fwver-firmware-timeout.patch, never committed because its name contains "firmware";
     renamed 0018-DSI-skip-fwver-fw-timeout.patch.
+
+- **w99r result (2026-11-19):** connected on the first attempt, 25 s after it ("channel 1 scanned before joining"): never cancelling made joining reliable; the scan first did not make it faster. Next for speed: the scan parameters (foreground scan off). w99s installed on the card the same night.
