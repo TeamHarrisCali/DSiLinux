@@ -13,7 +13,7 @@ It starts from TWiLight Menu++ (through Unlaunch). **Nothing is ever written to 
 outside two files in `sd:/linux/` (enforced by the ARM7, see below).
 
 This repository holds the patches, build scripts and notes. The source tree is a separate clone of
-[ipwndev/DSLinux](https://github.com/ipwndev/DSLinux) in `work/dslinux` (git-ignored); the changes are in `patches/` (160 patches, in order).
+[ipwndev/DSLinux](https://github.com/ipwndev/DSLinux) in `work/dslinux` (git-ignored); the changes are in `patches/` (161 patches, in order).
 
 - **Using it:** [docs/USER-GUIDE.md](docs/USER-GUIDE.md): buttons, the desktop, every app, Wi-Fi and SSH, the card scripts, what to do after a freeze.
 - **How the DSi itself works** (boot chain, NAND, installed titles, firmware chip, BIOS, which driver talks to what): [docs/DSI-INTERNALS.md](docs/DSI-INTERNALS.md).
@@ -92,10 +92,28 @@ On a PC, `dsgb_host.c` (Game Boy core: ms per frame, a frame as PPM, `GB_WAV=x.w
 (game rules) in `work/dslinux/user/microwin/src/demos/nanox/` test code without the console. The Game Boy harness writes the ROM's `.sav`
 next to it: delete it between runs you want to compare.
 
+## The Wi-Fi firmware (not included: you supply your own)
+
+The DSi's Wi-Fi chip needs Nintendo's firmware file, which is copyrighted and therefore **not** in this repository or the ROM. It comes
+from your own console:
+1. **Make a NAND backup of your DSi.** With Unlaunch or hiyaCFW, use dumpTool (or the hiyaCFW SDNAND setup, which copies the system
+   titles onto the SD card). Keep it private.
+2. **Find the Wi-Fi firmware title:** `title/0003000f/484e4341/content/0000000x.app` (title HNCA, "WLFIRM", about 98 KB) in that backup
+   or on a hiyaCFW SDNAND card.
+3. **Copy it into the card's Linux image** (card in the PC, after the first `scripts/release.sh` install):
+
+       scripts/add-dsi-wifi-fw.sh path/to/title/0003000f/484e4341/content/0000000x.app
+
+   It checks the file (its blob table and SHA-1 sums) and writes it to `/usr/lib/firmware/dsi-wifi.bin` inside `sd:/linux/ROOTFS.IMG`.
+   Without it, Wi-Fi stays off; everything else works.
+
 ## Licences and sources
 
 - DSLinux and the Linux 2.6.14 kernel: GPL-2.0; the patches here are GPL-2.0.
 - `arm7/sdmmc.c`: derived from profi200's `dsi_sdmmc` (MIT). `arm7/dsitouch.c` and the DSi microphone/camera sequences: from BlocksDS libnds (zlib).
 - Game Boy core `peanut_gb.h`: Peanut-GB by Mahyar Koshkouei (MIT), with marked DSLinuxDSi changes. DOOM: doomgeneric (GPL-2.0) with the shareware `doom1.wad` (freely distributable).
-- The Wi-Fi bring-up on the DSi follows what BlocksDS dswifi and libnds document (MIT/zlib); the driver itself is DSLinux's original DS Wi-Fi code.
-- Console dumps, NAND and firmware were never read, copied, uploaded or committed by this work.
+- The DSi Wi-Fi driver (`arch/arm/mach-nds/dsiwifi.c` and `arm7/twlwifi.c`) is new code written for this port, following what BlocksDS
+  dswifi and libnds document (MIT/zlib) and checked against the DSi's own system software in the owner's dumps.
+- **No Nintendo code or data is in this repository or in the ROM it builds.** The owner's own BIOS and NAND dumps were read, with their
+  authorization, to learn how the hardware behaves; only findings (register meanings, addresses, values) are written down, in
+  [docs/DSI-INTERNALS.md](docs/DSI-INTERNALS.md). `.gitignore` blocks file names that look like dumps.

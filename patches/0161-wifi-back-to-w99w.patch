@@ -1,0 +1,91 @@
+From 94a8b7fb2a3b1aae5535ddbca3db916210264a69 Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 14:02:26 -0600
+Subject: [PATCH] DSi Wi-Fi: back to w99w's driver plus the review fixes (x05)
+
+x01-x04's scan and join changes did not help; w99w was the last build that
+joined. Kept: disconnect ends retries, one packet thread, 30 s stop wait, the
+scan-complete status line.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ linux-2.6.x/arch/arm/mach-nds/dsiwifi.c | 30 +++++--------------------
+ 1 file changed, 6 insertions(+), 24 deletions(-)
+
+diff --git a/linux-2.6.x/arch/arm/mach-nds/dsiwifi.c b/linux-2.6.x/arch/arm/mach-nds/dsiwifi.c
+index 9521fdfa0..fe5c99ac9 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/dsiwifi.c
++++ b/linux-2.6.x/arch/arm/mach-nds/dsiwifi.c
+@@ -570,7 +570,7 @@ static void handle_pkt(unsigned int hdr, int *ev_scan_done)
+ 		bss_reports++;
+ 		bss_info(rx + 8, len - 2);
+ 		break;
+-	case WMI_SCAN_COMPLETE_EVENT:			/* u32 status: 0 ok */
++	case WMI_SCAN_COMPLETE_EVENT:			/* u32 status: 0 ok, 16 cancelled */
+ 		if (rx[8] | rx[9] | rx[10] | rx[11])
+ 			lg("  scan complete with status %u (16: cancelled)\n", rx[8] | (rx[9] << 8), 0, 0);
+ 		scan_done = 1;
+@@ -683,16 +683,12 @@ static noinline void scan_channels(int *bad)
+ 		b[6] = 20;
+ 		b[8] = 50;
+ 		b[10] = 3;
+-		b[11] = 0;	/* scan flags 0, as the DSi's own System Menu sets them (its WMI code, 0x2f41134 in the user's dump: periods 0xFFFF,
+-				 * dwell 20 / 50 ms, ratio 3, flags 0). dswifi's 1 ("connect scan") had the firmware cancel every scan, status 16 (x04) */
++		b[11] = 1;
+ 		mbox_out(1, 1, WMI_SET_SCAN_PARAMS_CMD, b, 20, bad);
+ 		memset(b, 0, sizeof(b));
+ 		b[0] = 1;					/* all BSSs */
+ 		mbox_out(1, 1, WMI_SET_BSS_FILTER_CMD, b, 8, bad);
+ 		memset(b, 0, sizeof(b));
+-		/* force a foreground scan (x03): without it (dswifi's 0) the firmware cancelled every scan at once, "scan complete" with
+-		 * status 16 (A_ECANCELED) on every channel, and only what the radio heard passively on channel 1 was ever listed */
+-		b[0] = 1;
+ 		b[8] = 20;					/* home dwell time */
+ 		mbox_out(1, 1, WMI_START_SCAN_CMD, b, 20, bad);
+ 		scan_done = 0;
+@@ -717,11 +713,6 @@ static noinline void wmi_scan(int *bad)
+ 	unsigned int v;
+ 
+ 	nnets = 0;
+-	/* power mode: maximum performance before every scan (x02). Only the connect set it, so a scan from the Wi-Fi window some time
+-	 * after power-on found nothing on any channel (x01: every later scan "0 networks"), the firmware's default power save having
+-	 * put the radio to sleep */
+-	b[0] = 2;
+-	mbox_out(1, 1, WMI_SET_POWER_MODE_CMD, b, 1, bad);
+ 	v = 0x7F;
+ 	mbox_out(1, 1, WMI_TARGET_ERROR_REPORT_BITMASK_CMD, &v, 4, bad);
+ 	v = 0;
+@@ -1039,7 +1030,7 @@ static noinline void scan_ap_channel(unsigned int mhz, int *bad)
+ 	b[6] = 20;					/* as scan_channels: 20 / 50 ms dwell, all BSS reports */
+ 	b[8] = 50;
+ 	b[10] = 3;
+-	b[11] = 0;					/* flags 0, as the System Menu (x04) */
++	b[11] = 1;
+ 	mbox_out(1, 1, WMI_SET_SCAN_PARAMS_CMD, b, 20, bad);
+ 	memset(b, 0, sizeof(b));
+ 	b[0] = 1;
+@@ -1098,18 +1089,9 @@ static noinline void do_connect(void)
+ 	}
+ 	memset(b, 0, sizeof(b));				/* BSS filter: none (dswifi uses 4; w99q tried it: no difference) */
+ 	mbox_out(1, 1, WMI_SET_BSS_FILTER_CMD, b, 8, &bad);
+-	/*
+-	 * Scan params while joining: u16 fg_start_period, fg_end_period, bg_period (seconds), maxact / pas channel dwell (ms), short scan
+-	 * ratio, flags 5 (connect scan + active), minact dwell. dswifi sets all three periods to 0xFFFF (off): the firmware then looks for
+-	 * the AP only when an internal timer fires, and every join today landed about 25-30 s (or a multiple) after the connect, slower
+-	 * still with a weak signal (2026-11-19). Now: a foreground scan every 1 s at first, backing off to every 5 s, until joined; the
+-	 * background scan while connected stays off (0xFFFF).
+-	 */
+-	memset(b, 0, sizeof(b));
+-	b[0] = 1;						/* fg_start_period 1 s */
+-	b[2] = 5;						/* fg_end_period 5 s */
+-	for (i = 4; i < 6; i++)
+-		b[i] = 0xFF;					/* bg_period: off */
++	memset(b, 0, sizeof(b));				/* scan params 5, 200, 200, 200 */
++	for (i = 0; i < 6; i++)
++		b[i] = 0xFF;
+ 	b[6] = 200;
+ 	b[8] = 200;
+ 	b[10] = 3;
+-- 
+2.56.1
+

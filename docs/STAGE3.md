@@ -1511,3 +1511,16 @@ changed nothing, every channel but 1 still "scan complete" status 16. The user's
   no connect.
 
 x04, patch 0160: scan_channels and the pre-join scan use flags 0; the connect keeps its own parameters.
+
+### x04 did not join either; back to w99w's Wi-Fi driver (x05)
+
+User (x04), two runs, farthest from and closest to the access point: no join. Log: scans still "cancelled" (status 16) on every
+channel but 1 with flags 0, so the flags were not the cause. Since x02 is the first build that logged this status, the cancelled
+scans were probably always there and are not what broke joining. The best GuestNet signal was -79 dBm even "closest" (joins worked at
+-55 to -72). x01-x04 (foreground scans while joining, full power before scans, forced scans, flags 0) did not help. x05, patch 0161:
+dsiwifi.c is w99w's again (the last build that joined), plus the review fixes (disconnect ends the retries, one packet thread, 30 s
+stop wait) and the scan status line. If it still does not join: the signal, or a change outside dsiwifi.c (w99y's FIFO drain with
+interrupts off is the candidate).
+The user suspected the Wi-Fi code was not used and authorized using it, with instructions for GitHub as long as it stays out of the
+repo. The firmware is used: the console's own HNCA (WLFIRM, 97,888 bytes) is /usr/lib/firmware/dsi-wifi.bin and uploads at every
+start. README now explains how to supply it (scripts/add-dsi-wifi-fw.sh); its old line "dumps were never read" is corrected.
