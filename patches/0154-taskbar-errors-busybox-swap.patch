@@ -1,0 +1,77 @@
+From 155e70f8a3930089b5824f3e56a474cb3f701920 Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 12:59:46 -0600
+Subject: [PATCH] Taskbar survives server errors; old BusyBox names switched to
+ 1.36.1 (w99x)
+
+dsdesk: own Nano-X error handler (a focus change to an unmapped window after
+DOOM closed ended the taskbar). BB_REPLACE: grep, ls, find, echo, test and the
+other old BusyBox names now link to /bin/bb; shell and boot-critical ones stay.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ user/microwin/src/demos/nanox/dsdesk.c | 11 +++++++++++
+ vendors/Nintendo/DSI/Makefile          |  8 +++++++-
+ 2 files changed, 18 insertions(+), 1 deletion(-)
+
+diff --git a/user/microwin/src/demos/nanox/dsdesk.c b/user/microwin/src/demos/nanox/dsdesk.c
+index 47e3bf726..a0d374ec2 100644
+--- a/user/microwin/src/demos/nanox/dsdesk.c
++++ b/user/microwin/src/demos/nanox/dsdesk.c
+@@ -181,6 +181,16 @@ static volatile int exec_errno;
+ /* the result goes to the log (/tmp/desktop.log, which Save log puts on the card): a program that does not start says why */
+ static void launch(const char *prog, const char *arg);
+ 
++/*
++ * A server error must not end the taskbar (2026-11-19): Nano-X's default handler exits the client, so after DOOM closed, a focus change
++ * to a window that was already unmapped ("GrSetFocus: Unmapped focus window") took the taskbar and its menu away while the server
++ * kept running. Log it and go on.
++ */
++static void desk_error(GR_EVENT *ep)
++{
++	fprintf(stderr, "dsdesk: server error %d in %s (ignored)\n", ep->error.code, ep->error.name);
++}
++
+ /*
+  * Shut down asks first (2026-11-19): the Start menu sits right above the Start button, and a tap meant to close the menu could land on
+  * its last item. A small Windows 95 style box: "Shut down the DSi?" with Shut down and Cancel; a tap anywhere else, or 15 s, cancels.
+@@ -1102,6 +1112,7 @@ int main(int argc, char **argv)
+ 		fprintf(stderr, "dsdesk: cannot connect to Nano-X\n");
+ 		return 1;
+ 	}
++	GrSetErrorHandler(desk_error);
+ 	GrGetScreenInfo(&si);
+ 	gc = GrNewGC();
+ 	font = GrCreateFont("Tiny", 0, NULL);
+diff --git a/vendors/Nintendo/DSI/Makefile b/vendors/Nintendo/DSI/Makefile
+index bd4b1d194..e7e580777 100644
+--- a/vendors/Nintendo/DSI/Makefile
++++ b/vendors/Nintendo/DSI/Makefile
+@@ -131,6 +131,9 @@ endif
+ 	# make sure that empty directories are not removed
+ 	for i in `find $(ROMFSDIR)/$(FATFS)/linux -type d -empty` ; do touch $$i/.keep; done
+ 
++BB_REPLACE = [ [[ test echo true false sleep grep egrep fgrep ls find du df dmesg env expr hostname whoami kill killall pidof \
++	chmod chown chgrp clear uname which mknod head
++
+ .PHONY: finishrom
+ 	# This target is called as first step to create an image.
+ 	# The romfs is populated and has to be finished.
+@@ -152,10 +155,13 @@ finishrom:
+ 	# BusyBox 1.36.1 (scripts/build-busybox.sh, built outside this tree into /out/bb): /bin/bb, with hush and the tools as links in /bin
+ 	# where nothing of that name is there yet. The old BusyBox (msh, the boot scripts' tools) stays; /bin comes before /usr/bin in PATH,
+ 	# so the new tools run in place from the ROM instead of being copied into RAM from the card.
++	# The names in BB_REPLACE (the old BusyBox's) are switched to the new one too (2026-11-19); msh/sh, udhcpc, ifconfig, route, mount,
++	# umount, poweroff, fbset, id and the login programs stay on the old one.
+ 	-if [ -f /out/bb/busybox ] && [ -f /out/bb/applets.txt ]; then \
+ 		cp /out/bb/busybox $(ROMFSDIR)/bin/bb; \
+ 		for a in `cat /out/bb/applets.txt`; do \
+-			[ -e $(ROMFSDIR)/bin/$$a ] || [ -L $(ROMFSDIR)/bin/$$a ] || ln -s bb $(ROMFSDIR)/bin/$$a; \
++			case " $(BB_REPLACE) " in *" $$a "*) rm -f "$(ROMFSDIR)/bin/$$a" ;; esac; \
++			[ -e "$(ROMFSDIR)/bin/$$a" ] || [ -L "$(ROMFSDIR)/bin/$$a" ] || ln -s bb "$(ROMFSDIR)/bin/$$a"; \
+ 		done; \
+ 	fi
+ 	# Compress the data area of these programs
+-- 
+2.56.1
+

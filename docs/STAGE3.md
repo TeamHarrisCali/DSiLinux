@@ -1429,3 +1429,14 @@ never answered. w99w, patch 0153: the channel scan comes first, then the AP is c
 signal, so the near one wins).
 
 - **w99w verified (2026-11-19):** Wi-Fi joined, SSH in. Over SSH from the PC: hush (arithmetic, functions, local, $(), subshells, loops, case, jobs) and the new tools (awk, sed, sort/uniq, sha256sum, tar czf/tzf) work; free: 7.6 MB free of 12.8 MB with the desktop, Wi-Fi and SSH up. Found: head -N / -c needs FEATURE_FANCY_HEAD; grep, ls and the other names the old BusyBox 1.00 provides are still its versions (no -a for grep).
+
+### DOOM took the taskbar down; the old BusyBox names switched over (w99x, built, not yet on the card)
+
+User (w99w): after closing DOOM the taskbar was gone (wallpaper and pointer still there); also "swap them". desktop.log:
+"nxclient 230: Error (GrSetFocus) Unmapped focus window: 8": dsdesk gave the focus to a window already unmapped, and Nano-X's
+default error handler ends the client. w99x, patch 0154:
+- dsdesk sets its own error handler (logs "dsdesk: server error N in F (ignored)" and carries on).
+- BusyBox 1.36.1 now also provides grep/egrep/fgrep, ls (colour), find, du, df, dmesg, env, expr, hostname, whoami, kill, killall,
+  pidof, chmod/chown/chgrp, clear, uname, which, mknod, sleep, true, false, test/[/[[, echo, and head with -N/-c (FEATURE_FANCY_HEAD).
+  The vendor Makefile's BB_REPLACE relinks those names to /bin/bb. On BusyBox 1.00: msh/sh, udhcpc, ifconfig, route, mount, umount,
+  poweroff, fbset, id (1.36.1's needs uClibc 0.9.30) and the login programs. 77 applets, 400 KB; ROM 3,294,720 bytes.
