@@ -25,7 +25,7 @@ echo "== problems"
 grep -a -n -i "oops\|panic\|killed\|out of memory\|not enough memory\|segfault\|unable to\|no answer\|did not\|refused\|timed out\|failed\|error" "$L" |
 	grep -v -i "errors:0\|error detail 00000000\|unknown error 101" | head -25
 echo "== Wi-Fi joining"
-W=$(grep -a "connect:\|CONNECTED\|disconnected\|wifi auto:\|No answer\|chip up\|connect attempt" "$L" | grep -v "Joining GuestNet: [0-9]*[1-9] s")
+W=$(grep -a "connect:\|CONNECTED\|disconnected\|wifi auto:\|No answer\|chip up\|connect attempt" "$L" | grep -v "Joining .*: [0-9]*[1-9] s")
 n=$(echo "$W" | grep -c .)
 if [ "$n" -gt 24 ]; then echo "$W" | head -8; echo "   ... ($n lines; attempts: $(echo "$W" | grep -c 'commands sent'))"; echo "$W" | tail -12; else echo "$W"; fi
 echo "== sleep / screen"
