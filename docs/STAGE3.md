@@ -1440,3 +1440,26 @@ default error handler ends the client. w99x, patch 0154:
   pidof, chmod/chown/chgrp, clear, uname, which, mknod, sleep, true, false, test/[/[[, echo, and head with -N/-c (FEATURE_FANCY_HEAD).
   The vendor Makefile's BB_REPLACE relinks those names to /bin/bb. On BusyBox 1.00: msh/sh, udhcpc, ifconfig, route, mount, umount,
   poweroff, fbset, id (1.36.1's needs uClibc 0.9.30) and the login programs. 77 applets, 400 KB; ROM 3,294,720 bytes.
+
+### A bug review of w99e-w99x (w99y, built, not yet on the card)
+
+The user asked for a bug hunt. A reviewer read the diff from the screen-sleep work to w99x. Each finding was checked against the
+code before fixing. w99y, patch 0155:
+- **dsiwifi.c:** "disconnect" now ends the join retries (conn_at = 0). Since w99q they went on every 30 s after the Wi-Fi window
+  gave up.
+- **fifo.c:** nds_fifo_drain runs with interrupts off. The FIFO interrupt has no SA_INTERRUPT, so a vblank could nest inside the
+  drain and spin in nds_fifo_send (screen on, queue full) while the preempted drain never resumed: the w99i deadlock by another way.
+- **dsiwifi.c:** w_stop waits up to 30 s for the packet thread (a full scan is about 13 s), and w_open refuses while an old thread
+  still runs (thr_alive), so there are never two threads.
+- **arm7/main.c:** the brightness command's DS Phat check was inverted against isDSPhat() (bit 6 clear = Phat).
+- **rtc.c:** a timed-out clock read returns 0 and the boot keeps its time, instead of setting a half-received value.
+- **dsautolog:** the critical-battery shutdown is tried at every check from the second on (it was tried once, then never again
+  if it failed).
+- **dsautolog, dsdesk, dslock:** the timers restart when the clock is set back (httpdate, Settings), instead of pausing for that
+  long. The PIN lock's wait is never more than 30 s.
+- **Not changed:**
+  - deep sleep's late-answer case (pinned);
+  - dssettings' unreaped Lock PIN / Sound test children (zombies until Settings closes);
+  - the unprefixed flthdr in finishrom (a missing /boot file should fail the build loudly).
+- **Measured, no problem:** BusyBox 1.36.1 per run costs data 29 KB + bss 4.5 KB + stack 32 KB, about 66 KB, against 1.00's
+  23 + 83 + 30 KB, about 136 KB. So the boot scripts' `[`, `echo` etc. now use about half the RAM each.

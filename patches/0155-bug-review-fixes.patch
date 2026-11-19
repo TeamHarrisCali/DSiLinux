@@ -1,0 +1,201 @@
+From 7332ab2bee904f13a2e2b9515054d80a0d77aee1 Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 13:11:58 -0600
+Subject: [PATCH] Fixes from a bug review (w99y)
+
+disconnect ends the Wi-Fi join retries; the FIFO drain runs with interrupts
+off (a nested vblank could deadlock it); one packet thread at a time (30 s
+stop wait, open refuses while the old one runs); ARM7 brightness Phat check
+was inverted; a timed-out RTC read keeps the time; critical-battery shutdown
+retried; timers survive the clock being set back.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ linux-2.6.x/arch/arm/mach-nds/arm7/main.c |  4 ++--
+ linux-2.6.x/arch/arm/mach-nds/dsiwifi.c   | 12 ++++++++++--
+ linux-2.6.x/arch/arm/mach-nds/fifo.c      |  9 ++++++++-
+ linux-2.6.x/arch/arm/mach-nds/rtc.c       |  8 +++++---
+ user/microwin/src/demos/nanox/dsdesk.c    |  5 +++++
+ user/microwin/src/demos/nanox/dslock.c    |  2 ++
+ vendors/Nintendo/DSI/dsautolog.c          |  4 +++-
+ 7 files changed, 35 insertions(+), 9 deletions(-)
+
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/main.c b/linux-2.6.x/arch/arm/mach-nds/arm7/main.c
+index b9c5472b7..8e3f2b7c9 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/arm7/main.c
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/main.c
+@@ -207,8 +207,8 @@ static void recieveFIFOCommand(void)
+ 			case FIFO_POWER_CMD_BACKLIGHT_BRIGHTNESS: {
+ 					u8 v;
+ 
+-					if (!pm_xfer(0x80 | POWER_BACKLIGHT, 0, &v) || (v & (1 << 6)))
+-						break;		/* unreadable, or a DS Phat (no brightness levels) */
++					if (!pm_xfer(0x80 | POWER_BACKLIGHT, 0, &v) || !(v & (1 << 6)))
++						break;		/* unreadable, or no levels here (bit 6 clear: a DS Phat, as isDSPhat()) */
+ 					v &= ~3;
+ 					v |= cmddata & 3;	/* 0 low .. 3 max (POWER4_BRIGHTNESS_*) */
+ 					pm_xfer(POWER_BACKLIGHT, v, 0);
+diff --git a/linux-2.6.x/arch/arm/mach-nds/dsiwifi.c b/linux-2.6.x/arch/arm/mach-nds/dsiwifi.c
+index fbe175511..8974ef734 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/dsiwifi.c
++++ b/linux-2.6.x/arch/arm/mach-nds/dsiwifi.c
+@@ -1194,9 +1194,12 @@ static void tx_one(struct sk_buff *skb)
+ 	}
+ }
+ 
++static volatile int thr_alive;		/* the packet thread runs (it may outlive a timed-out w_stop) */
++
+ static int wthread(void *arg)
+ {
+ 	daemonize("dsiwifi");
++	thr_alive = 1;
+ 	health_at = jiffies;
+ 	while (thr_run) {
+ 		struct sk_buff *skb;
+@@ -1239,6 +1242,8 @@ static int wthread(void *arg)
+ 		}
+ 		if (disc_pending) {
+ 			disc_pending = 0;
++			conn_at = 0;			/* no more retries: the Wi-Fi window gave up (the review of 2026-11-19) */
++			conn_pending = 0;
+ 			mbox_out(1, 1, WMI_DISCONNECT_CMD, 0, 0, &bad);
+ 		}
+ 		if (scan_pending) {				/* a new scan (not while connected: the list stays as it was) */
+@@ -1265,6 +1270,7 @@ static int wthread(void *arg)
+ 			continue;
+ 		wait_event_interruptible_timeout(thr_wait, !thr_run || skb_queue_len(&txq) || conn_pending || disc_pending || scan_pending, 2);
+ 	}
++	thr_alive = 0;
+ 	complete_and_exit(&thr_done, 0);
+ 	return 0;
+ }
+@@ -1291,6 +1297,8 @@ static int w_open(struct net_device *dev)
+ 		return -ENOENT;				/* cat /usr/lib/firmware/dsi-wifi.bin > /proc/dsiwifi2fw first */
+ 	if (session)
+ 		return 0;
++	if (thr_alive)
++		return -EBUSY;				/* the old packet thread has not ended yet: try again in a moment */
+ 	connected = 0;
+ 	unknown_logged = 0;
+ 	rx_count = 0;
+@@ -1327,8 +1335,8 @@ static int w_stop(struct net_device *dev)
+ 		wake_up(&thr_wait);
+ 		/* bounded: this runs under the network lock (rtnl), which the taskbar's address check also takes; an endless wait here
+ 		 * froze the desktop */
+-		if (!wait_for_completion_timeout(&thr_done, 10 * HZ))
+-			lg("wlan0 down: the packet thread did not stop within 10 s\n", 0, 0, 0);
++		if (!wait_for_completion_timeout(&thr_done, 30 * HZ))	/* a full scan takes about 13 s */
++			lg("wlan0 down: the packet thread did not stop within 30 s\n", 0, 0, 0);
+ 	}
+ 	skb_queue_purge(&txq);
+ 	if (session) {
+diff --git a/linux-2.6.x/arch/arm/mach-nds/fifo.c b/linux-2.6.x/arch/arm/mach-nds/fifo.c
+index 64739c58a..b3c1bdd26 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/fifo.c
++++ b/linux-2.6.x/arch/arm/mach-nds/fifo.c
+@@ -40,9 +40,15 @@ void nds_fifo_drain(void)
+ 	u32 data;
+ 	struct list_head *p;
+ 	struct fifo_cb *cb;
++	unsigned long flags;
+ 
+-	if (draining)
++	/* interrupts off for the whole drain (the review of 2026-11-19): the FIFO interrupt is registered without SA_INTERRUPT, so a
++	 * vblank could nest in here and send (screen on); with the queue full it would spin while this drain, preempted, never resumes */
++	local_irq_save(flags);
++	if (draining) {
++		local_irq_restore(flags);
+ 		return;
++	}
+ 	draining = 1;
+ 	while (!(NDS_REG_IPCFIFOCNT & FIFO_EMPTY)) {
+ 		fifo_recv = NDS_REG_IPCFIFORECV;
+@@ -88,6 +94,7 @@ void nds_fifo_drain(void)
+ 		}
+ 	}
+ 	draining = 0;
++	local_irq_restore(flags);
+ }
+ EXPORT_SYMBOL(nds_fifo_drain);
+ 
+diff --git a/linux-2.6.x/arch/arm/mach-nds/rtc.c b/linux-2.6.x/arch/arm/mach-nds/rtc.c
+index 6a9f3976b..b36a69266 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/rtc.c
++++ b/linux-2.6.x/arch/arm/mach-nds/rtc.c
+@@ -34,9 +34,10 @@ static u32 getTimeFromArm7(void) {
+     nds_fifo_send(FIFO_TIME);
+ 
+     /* bounded: an answer that never comes must not hang the caller (w99l's deep sleep froze the desktop at a wait like this) */
+-    if (!wait_event_interruptible_timeout(ndstime_wait, timeavail != 0, 2 * HZ))
++    if (!wait_event_interruptible_timeout(ndstime_wait, timeavail != 0, 2 * HZ) || !timeavail) {
+         printk(KERN_WARNING "rtc: no answer from the ARM7 in 2 s\n");
+-
++        return 0;			/* not a half-received value */
++    }
+     return ndshwtime;
+ }
+ 
+@@ -59,7 +60,8 @@ extern void setTimeFromRTC (void) {
+ 
+     ts.tv_sec = getTimeFromArm7();
+     ts.tv_nsec = 0;
+-    do_settimeofday(&ts);
++    if (ts.tv_sec)			/* 0: no answer, keep the time we have */
++        do_settimeofday(&ts);
+ }
+ 
+ static struct fifo_cb ndstime_fifocb = {
+diff --git a/user/microwin/src/demos/nanox/dsdesk.c b/user/microwin/src/demos/nanox/dsdesk.c
+index a0d374ec2..edf74dbf5 100644
+--- a/user/microwin/src/demos/nanox/dsdesk.c
++++ b/user/microwin/src/demos/nanox/dsdesk.c
+@@ -1261,6 +1261,11 @@ int main(int argc, char **argv)
+ 				static time_t last_bat, last_wifi;
+ 				time_t t = time(NULL);
+ 
++				if (t < last_bat)	/* the clock was set back (httpdate, Settings): count from now */
++					last_bat = 0;
++				if (t < last_wifi)
++					last_wifi = 0;
++
+ 				if (!last_bat || t - last_bat >= ((bat_level >= 0 && bat_level <= 3) ? 10 : 30)) {
+ 					last_bat = t;
+ 					poll_battery();	/* every 30 s, every 10 s once low */
+diff --git a/user/microwin/src/demos/nanox/dslock.c b/user/microwin/src/demos/nanox/dslock.c
+index e1fa4be81..4eb62ae63 100644
+--- a/user/microwin/src/demos/nanox/dslock.c
++++ b/user/microwin/src/demos/nanox/dslock.c
+@@ -312,6 +312,8 @@ int main(int argc, char **argv)
+ 				time_t now = time(NULL);
+ 				int redraw = 0;
+ 
++				if (wait_until > now + 60)	/* the clock was set back: the wait is at most 30 s */
++					wait_until = now;
+ 				if (wait_until && now >= wait_until && msg[0]) {
+ 					wait_until = 0;
+ 					msg[0] = 0;
+diff --git a/vendors/Nintendo/DSI/dsautolog.c b/vendors/Nintendo/DSI/dsautolog.c
+index 530b2fb1b..1546a4957 100644
+--- a/vendors/Nintendo/DSI/dsautolog.c
++++ b/vendors/Nintendo/DSI/dsautolog.c
+@@ -331,7 +331,7 @@ int main(void)
+ 			goto log;
+ 		slow = 0;
+ 		if (battery_critical()) {
+-			if (++low == 2) {
++			if (++low >= 2) {		/* every check until it works (a failed start, e.g. no memory, is tried again) */
+ 				FILE *f = fopen("/tmp/desktop.log", "a");
+ 
+ 				if (f) {
+@@ -344,6 +344,8 @@ int main(void)
+ 			low = 0;
+ 		}
+ 	log:
++		if (time(NULL) < saved)		/* the clock was set back: start counting again */
++			saved = time(NULL);
+ 		sig = signature();
+ 		if ((sig != last && time(NULL) - saved >= 60) || time(NULL) - saved >= 1800) {
+ 			save();
+-- 
+2.56.1
+
