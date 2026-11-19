@@ -1463,3 +1463,10 @@ code before fixing. w99y, patch 0155:
   - the unprefixed flthdr in finishrom (a missing /boot file should fail the build loudly).
 - **Measured, no problem:** BusyBox 1.36.1 per run costs data 29 KB + bss 4.5 KB + stack 32 KB, about 66 KB, against 1.00's
   23 + 83 + 30 KB, about 136 KB. So the boot scripts' `[`, `echo` etc. now use about half the RAM each.
+
+### w99x: Wi-Fi could not join a weak access point in time (w99z)
+
+User (w99x): Wi-Fi did not connect. The log: only the two far GuestNet APs were heard (-75, -76 dBm; the near -55 one was not), 4
+attempts at 0/30/60/90 s, no connect event; the Wi-Fi window gave up at 100 s (w99w had joined a -72 dBm AP only at attempt 3, 87 s).
+w99z, patch 0156: the Wi-Fi window (and Auto at boot) waits up to 3 minutes. Installed with w99y's review fixes. If weak-signal joins
+stay slow, the next experiment is the scan parameters during the connect (foreground scan period, now 0xFFFF = off, as dswifi).

@@ -1,0 +1,31 @@
+From b962a2c9d98b34e0655e12b5043b06769027d3d2 Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 13:15:04 -0600
+Subject: [PATCH] Wi-Fi window: wait up to 3 minutes for a join (w99z)
+
+With a weak signal the firmware has joined only after up to 87 s; the window
+gave up at 100 s.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ user/microwin/src/demos/nanox/dsnet.c | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/user/microwin/src/demos/nanox/dsnet.c b/user/microwin/src/demos/nanox/dsnet.c
+index e1d63ebf7..dbbb8d46e 100644
+--- a/user/microwin/src/demos/nanox/dsnet.c
++++ b/user/microwin/src/demos/nanox/dsnet.c
+@@ -773,7 +773,9 @@ static void connect_dsi(struct net *n, const char *pass)
+ 		draw_all();
+ 		return;
+ 	}
+-	for (s = 0; s <= 100; s += 2) {
++	/* up to 3 minutes (was 100 s): with a weak signal (-72..-78 dBm) the chip's firmware has joined only after up to 87 s, and a
++	 * retry starts at 30 s, 60 s, 90 s (2026-11-19) */
++	for (s = 0; s <= 180; s += 2) {
+ 		dsi_state(&st);
+ 		if (st.connected && (!st.wpa2 || st.keys))
+ 			break;
+-- 
+2.56.1
+
