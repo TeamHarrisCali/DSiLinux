@@ -1,0 +1,37 @@
+From 0ccd1e035885a94d31792ed074ef5320b3faa493 Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 12:37:17 -0600
+Subject: [PATCH] BusyBox 1.36.1 in the ROM as /bin/bb with hush and 48 tools
+ (w99v)
+
+Built outside the tree by scripts/build-busybox.sh into /out/bb; finishrom
+copies it in and links the applets in /bin where nothing of that name exists.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ vendors/Nintendo/DSI/Makefile | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/vendors/Nintendo/DSI/Makefile b/vendors/Nintendo/DSI/Makefile
+index 80c586caf..bd4b1d194 100644
+--- a/vendors/Nintendo/DSI/Makefile
++++ b/vendors/Nintendo/DSI/Makefile
+@@ -149,6 +149,15 @@ finishrom:
+ 	-mv $(ROMFSDIR)/$(FATFS)/linux/usr/bin/login $(ROMFSDIR)/bin
+ 	-mv $(ROMFSDIR)/$(FATFS)/linux/usr/bin/init $(ROMFSDIR)/bin
+ 	-mv $(ROMFSDIR)/$(FATFS)/linux/usr/bin/autologin $(ROMFSDIR)/bin
++	# BusyBox 1.36.1 (scripts/build-busybox.sh, built outside this tree into /out/bb): /bin/bb, with hush and the tools as links in /bin
++	# where nothing of that name is there yet. The old BusyBox (msh, the boot scripts' tools) stays; /bin comes before /usr/bin in PATH,
++	# so the new tools run in place from the ROM instead of being copied into RAM from the card.
++	-if [ -f /out/bb/busybox ] && [ -f /out/bb/applets.txt ]; then \
++		cp /out/bb/busybox $(ROMFSDIR)/bin/bb; \
++		for a in `cat /out/bb/applets.txt`; do \
++			[ -e $(ROMFSDIR)/bin/$$a ] || [ -L $(ROMFSDIR)/bin/$$a ] || ln -s bb $(ROMFSDIR)/bin/$$a; \
++		done; \
++	fi
+ 	# Compress the data area of these programs
+ 	$(CROSS)flthdr -d $(ROMFSDIR)/bin/*
+ 	# If we have external RAM, we can spend some of our precious internal RAM
+-- 
+2.56.1
+

@@ -11,13 +11,14 @@ cd "$(dirname "$0")/.."
 scripts/rootfs-check.sh "$IMG" > /dev/null || { echo "image has errors: scripts/rootfs-check.sh -y first"; exit 1; }
 mkdir -p out/session
 OLD=$(debugfs -R "cat /etc/profile" "$IMG" 2>/dev/null)
-if printf '%s\n' "$OLD" | grep -q "DSLinuxDSi: terminal types (3)" && printf '%s\n' "$OLD" | grep -q "/boot/session"; then
-	echo "/etc/profile already has the terminal types and /boot/session"
+if printf '%s\n' "$OLD" | grep -q "DSLinuxDSi: terminal types (3)" && printf '%s\n' "$OLD" | grep -q "/boot/session" &&
+   printf '%s\n' "$OLD" | grep -q "DSLinuxDSi: hush (1)"; then
+	echo "/etc/profile already has the terminal types, /boot/session and the hush hand-over"
 	exit 0
 fi
 {
 	# what is there, without an older terminal-types block and the session lines (both are written again below)
-	printf '%s\n' "$OLD" | sed '/DSLinuxDSi: terminal types/,/^esac$/d' | grep -v "boot/session" | grep -v '^$'
+	printf '%s\n' "$OLD" | sed '/DSLinuxDSi: terminal types/,/^esac$/d;/DSLinuxDSi: hush/,/^fi$/d' | grep -v "boot/session" | grep -v '^$'
 	echo '# DSLinuxDSi: terminal types (3). The DSi'"'"'s ncurses has no default directory: TERMINFO says where the descriptions are'
 	echo '# (scripts/install-terminfo.sh). Those types stay as they are; anything else becomes xterm.'
 	echo 'TERMINFO=/usr/share/terminfo'
@@ -28,9 +29,25 @@ fi
 	echo 'esac'
 	echo '# DSLinuxDSi: the desktop at boot (the ROM'"'"'s /boot/session; scripts/install-session.sh)'
 	echo '[ -f /boot/session ] && . /boot/session'
+	# the hand-over to hush comes last: the desktop session above starts first at boot (docs/BUSYBOX-HUSH-PLAN.md, step 4)
+	echo '# DSLinuxDSi: hush (1). The interactive shell is BusyBox 1.36.1'"'"'s hush (/bin/hush in the ROM): this login shell (msh)'
+	echo '# hands over to it (Terminal, SSH, the text console). The boot scripts stay with msh. A ROM without hush keeps msh.'
+	echo 'if [ -x /bin/hush ]'
+	echo 'then'
+	echo '	if [ -z "$HUSH_LOGIN" ]'
+	echo '	then'
+	echo '		HUSH_LOGIN=1'
+	echo '		HISTFILE=/home/.hush_history'
+	echo "		PS1='\\u@\\h:\\w\\$ '"
+	echo '		export HUSH_LOGIN HISTFILE PS1'
+	echo '		exec /bin/hush'
+	echo '	fi'
+	echo 'fi'
 } > out/session/profile
 printf 'rm /etc/profile\nwrite out/session/profile /etc/profile\nsif /etc/profile mode 0100644\n' > out/session/cmds
 debugfs -w -f out/session/cmds "$IMG" > /dev/null 2>&1
 sync
 P=$(debugfs -R "cat /etc/profile" "$IMG" 2>/dev/null)
-printf '%s\n' "$P" | grep -q "/boot/session" && printf '%s\n' "$P" | grep -q "DSLinuxDSi: terminal types (3)" && echo "/etc/profile: terminal types, starts /boot/session" || { echo "/etc/profile NOT written"; exit 1; }
+printf '%s\n' "$P" | grep -q "/boot/session" && printf '%s\n' "$P" | grep -q "DSLinuxDSi: terminal types (3)" &&
+	printf '%s\n' "$P" | grep -q "DSLinuxDSi: hush (1)" && echo "/etc/profile: terminal types, starts /boot/session, hands over to hush" ||
+	{ echo "/etc/profile NOT written"; exit 1; }

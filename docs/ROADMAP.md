@@ -5,7 +5,9 @@ lists them, where each one stopped, and **every question still waiting for an an
 
 ## Where things stand
 
-- **On the card now: w99t** (2026-11-19, not yet tried): the bottom-screen keyboard in the Windows 95 look; Start menu shorter and
+- **On the card now: w99v** (2026-11-19, not yet tried): BusyBox 1.36.1 in the ROM, hush as the interactive shell, 48 newer tools
+  (BUSYBOX-HUSH-PLAN.md). w99u: L = left click, R = right click. w99t (Windows 95 keyboard, safer Start menu): the user said it is good.
+- **w99t** (2026-11-19, not yet tried): the bottom-screen keyboard in the Windows 95 look; Start menu shorter and
   off the Start button, Shut down asks first. w99s (optimization) verified: 3D gears, Wi-Fi, SSH.
 - **How work is done from here on: [DEV-PROCESS.md](DEV-PROCESS.md)**: scripts/precheck.sh before every build, scripts/cardlog.sh to
   read what the DSi recorded, one build per test cycle, risky features off by default.
@@ -171,7 +173,7 @@ Which plan goes first is your choice. A suggestion:
 2. The bottom-screen buttons 1-4: replace Bench, or a second row of buttons?
 
 **B. BusyBox + hush**
-1. OK to download BusyBox 1.36.1 from busybox.net (with its published checksum)?
+1. ~~OK to download BusyBox 1.36.1?~~ Yes (2026-11-19: "new busybox with hush shell please"); built in w99v.
 2. Which tools matter most to you? (Proposed: awk, sed, less, top, free, sort, diff, tar/xz, sha256sum, wget with HTTPS, ntpd.)
 3. hush also for the boot scripts (replacing msh everywhere), or only as the shell you type in?
 

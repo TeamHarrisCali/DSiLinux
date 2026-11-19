@@ -1407,3 +1407,15 @@ menu: tapping to close it landed on Shut down. w99t, patch 0150:
 - Test bed: the menu fits with the gap, and the box shows. The keyboard was checked as a rendered preview, not yet on the DSi.
 
 - **w99u (built, not yet on the card):** the user liked w99t; L is now left click and R right click (button.c), patch 0151.
+
+### BusyBox 1.36.1 with hush (w99v)
+
+User: "new busybox with hush shell please". Details in BUSYBOX-HUSH-PLAN.md. The 2005 toolchain needed these changes:
+- **The build:**
+  - no CONFIG_LFS (uClibc without large files);
+  - -Dre_exec=bb_re_exec (clashes with uClibc's BSD regex re_exec);
+  - the final link through scripts/bb-cc.sh (-Wl,-elf2flt; --gc-sections dropped, since elf2flt links with -r);
+  - the stack set to 32 KB with flthdr.
+- **Left out:** stat (st_atim), touch (utimensat), date (clock_settime).
+- **The ROM:** 2,909,696 to 3,268,096 bytes (911 KB left below 4 MiB).
+- **The hand-over:** install-session.sh writes the hush block at the end of /etc/profile.

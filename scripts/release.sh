@@ -29,6 +29,8 @@ OUT=out/dsi-mode
 PREV=$(ls $OUT/dslinux-dsimode-*-uc3.nds 2>/dev/null | sed 's/.*dslinux-dsimode-\(.*\)-uc3.nds/\1/' | grep -v "^$TAG$" | head -1)
 
 echo "== 1. build ($TAG)"
+# BusyBox 1.36.1 with hush first: the ROM step (finishrom) copies /out/bb/busybox in as /bin/bb (docs/BUSYBOX-HUSH-PLAN.md)
+scripts/build-busybox.sh > out/logs/$TAG-busybox.log 2>&1 || { echo "BUSYBOX BUILD FAILED, see out/logs/$TAG-busybox.log"; exit 1; }
 T=""
 for f in $TOUCH; do T="$T $f"; done
 scripts/in-container.sh "cd /work && ${T:+touch$T &&} make > /out/logs/$TAG-build.log 2>&1" || { echo "BUILD FAILED, see out/logs/$TAG-build.log"; grep -n "error" out/logs/$TAG-build.log | grep -v "ignored\|roach" | tail -5; exit 1; }
