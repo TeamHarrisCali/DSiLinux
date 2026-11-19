@@ -36,7 +36,7 @@ How to use DSLinux on the DSi XL: the buttons, the desktop, every program, Wi-Fi
 | Start / Select | | Start / Select | menu / automap; both together: quit |
 
 The **bottom screen**: its upper part is a trackpad (drag moves the pointer, a tap clicks), the lower part is a keyboard. The quick buttons
-across its top: Desk, Test (self-test), Log (save the log now), Bench.
+across its top: Desk, Test (self-test), Log (save the log now), Mem (memory report).
 
 ## The desktop
 

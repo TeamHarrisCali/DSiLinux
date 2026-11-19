@@ -1386,3 +1386,22 @@ User: "go through the entire project and optimize everything... devise a better 
     renamed 0018-DSI-skip-fwver-fw-timeout.patch.
 
 - **w99r result (2026-11-19):** connected on the first attempt, 25 s after it ("channel 1 scanned before joining"): never cancelling made joining reliable; the scan first did not make it faster. Next for speed: the scan parameters (foreground scan off). w99s installed on the card the same night.
+
+### w99s verified; the Windows 95 keyboard and a safer Start menu (w99t)
+
+User: w99s works (3D gears, Wi-Fi, SSH). Asked for the bottom-screen keyboard reworked in the desktop's style, and a fix for the Start
+menu: tapping to close it landed on Shut down. w99t, patch 0150:
+- **Start menu:** with 11 rows it was taller than the space above the taskbar, so it began at the top and ran down over the Start
+  button, with Shut down right where the tap to close it lands. Now:
+  - the puzzles join Games and Exit desktop moves into System (9 rows);
+  - the menu ends 5 px above the taskbar (MENU_GAP);
+  - Shut down asks first, Windows 95 style ("Shut down the DSi?", Shut down / Cancel; any other tap or 15 s cancels).
+- **Keyboard:** new art from scripts/make-keyboard-art.py (preview docs/keyboard-w99t.png):
+  - grey keys with the desktop buttons' white / light / dark / black bevel, sunken when pressed, black legends from the kernel's
+    8x8 and mini 4x6 fonts, upper case and symbols with Shift, a Caps light (palette 5, as before);
+  - the key positions are untouched (qwertyKeyMap), so typing works as before;
+  - 314 tiles, so the tile maps moved from blocks 4/5 to 30/31 of VRAM C, and the quick-button and arrow tiles now follow the
+    keyboard's;
+  - the trackpad is Windows 95 teal;
+  - the dead "Bench" quick button is "Mem" (memreport).
+- Test bed: the menu fits with the gap, and the box shows. The keyboard was checked as a rendered preview, not yet on the DSi.

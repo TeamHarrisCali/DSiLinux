@@ -5,6 +5,8 @@ lists them, where each one stopped, and **every question still waiting for an an
 
 ## Where things stand
 
+- **On the card now: w99t** (2026-11-19, not yet tried): the bottom-screen keyboard in the Windows 95 look; Start menu shorter and
+  off the Start button, Shut down asks first. w99s (optimization) verified: 3D gears, Wi-Fi, SSH.
 - **How work is done from here on: [DEV-PROCESS.md](DEV-PROCESS.md)**: scripts/precheck.sh before every build, scripts/cardlog.sh to
   read what the DSi recorded, one build per test cycle, risky features off by default.
 - **Optimization pass (w99s, 2026-11-19, built, not yet on the card):** about 477 KB more free RAM (smaller kernel and ROM, camera
@@ -135,7 +137,7 @@ memreport: programs 2.9 MB, 7.4 MB free, largest free block 4 MB.
 | Virtual desktops | [VIRTUAL-DESKTOPS-PLAN.md](VIRTUAL-DESKTOPS-PLAN.md) | Step 1: the desktop table and switching in dsdesk | Questions A |
 | A current BusyBox with the hush shell | [BUSYBOX-HUSH-PLAN.md](BUSYBOX-HUSH-PLAN.md) | Step 0: download BusyBox 1.36.1 | **Your OK for the download**, questions B |
 | File management, tidy layout, leaner system | [FILES-CLEANUP-PLAN.md](FILES-CLEANUP-PLAN.md) | Step 1: the Files program with Delete / Recycle Bin | Questions C |
-| Touch screen revamp (input page + dashboard) | [TOUCHSCREEN-PLAN.md](TOUCHSCREEN-PLAN.md) | Step 0: your feedback, then mock-ups | Questions D |
+| Touch screen revamp (input page + dashboard) | [TOUCHSCREEN-PLAN.md](TOUCHSCREEN-PLAN.md) | Keyboard restyled in the Windows 95 look (w99t, same layout); pages, layers and the dashboard still to come | Questions D |
 | Screen sleep, locking, lid sleep | [SLEEP-LOCK-PLAN.md](SLEEP-LOCK-PLAN.md) | **Steps 2-4 verified** (screen off when idle and on lid close, the Settings choice, the PIN lock); step 5 (critical battery) built; w99j: LCDs off too and the battery warning (untested); deep sleep **pinned** (sleeps, but the power micro then switches the DSi off; w99p); left: text console lock, deep sleep's power-micro handshake | E3 (Wi-Fi with the lid closed) |
 | The DSi's Wi-Fi chip: faster, quicker to connect, WPA2 | (this page, below) | Speed: the 4-bit bus and block transfers | Questions F |
 | Later, bigger: a package manager (`dspkg`) | (no file yet) | After BusyBox: `wget` with HTTPS makes it possible | Your choice |
