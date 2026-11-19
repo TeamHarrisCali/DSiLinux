@@ -1470,3 +1470,10 @@ User (w99x): Wi-Fi did not connect. The log: only the two far GuestNet APs were 
 attempts at 0/30/60/90 s, no connect event; the Wi-Fi window gave up at 100 s (w99w had joined a -72 dBm AP only at attempt 3, 87 s).
 w99z, patch 0156: the Wi-Fi window (and Auto at boot) waits up to 3 minutes. Installed with w99y's review fixes. If weak-signal joins
 stay slow, the next experiment is the scan parameters during the connect (foreground scan period, now 0xFFFF = off, as dswifi).
+
+### w99z: no join in 3 minutes; the firmware's own scan switched on while joining (x01)
+
+User (w99z): the rest works, Wi-Fi does not. Log: 7 attempts over 180 s (APs at -76 and -65 dBm), no connect event, so the longer wait
+was not the answer: the firmware does not join at all. Every join today came 25-30 s (or a multiple) after the connect, and nothing is
+heard while waiting: with the scan periods at 0xFFFF (dswifi's values) the firmware scans only on an internal timer. x01, patch 0157,
+one change: while joining, fg_start_period 1 s and fg_end_period 5 s (the background period stays 0xFFFF).

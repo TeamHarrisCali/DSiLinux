@@ -1,0 +1,43 @@
+From 32cbf0992ddabe64c60df5c01b54f20fc2819b30 Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 13:25:04 -0600
+Subject: [PATCH] DSi Wi-Fi: the firmware scans by itself while joining (x01)
+
+fg_start_period 1 s, fg_end_period 5 s in the connect-time scan params (dswifi's
+0xFFFF left the firmware scanning only on an internal timer: joins took 25-30 s
+or never). Background scan while connected stays off.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ linux-2.6.x/arch/arm/mach-nds/dsiwifi.c | 15 ++++++++++++---
+ 1 file changed, 12 insertions(+), 3 deletions(-)
+
+diff --git a/linux-2.6.x/arch/arm/mach-nds/dsiwifi.c b/linux-2.6.x/arch/arm/mach-nds/dsiwifi.c
+index 8974ef734..8aeaaac0e 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/dsiwifi.c
++++ b/linux-2.6.x/arch/arm/mach-nds/dsiwifi.c
+@@ -1087,9 +1087,18 @@ static noinline void do_connect(void)
+ 	}
+ 	memset(b, 0, sizeof(b));				/* BSS filter: none (dswifi uses 4; w99q tried it: no difference) */
+ 	mbox_out(1, 1, WMI_SET_BSS_FILTER_CMD, b, 8, &bad);
+-	memset(b, 0, sizeof(b));				/* scan params 5, 200, 200, 200 */
+-	for (i = 0; i < 6; i++)
+-		b[i] = 0xFF;
++	/*
++	 * Scan params while joining: u16 fg_start_period, fg_end_period, bg_period (seconds), maxact / pas channel dwell (ms), short scan
++	 * ratio, flags 5 (connect scan + active), minact dwell. dswifi sets all three periods to 0xFFFF (off): the firmware then looks for
++	 * the AP only when an internal timer fires, and every join today landed about 25-30 s (or a multiple) after the connect, slower
++	 * still with a weak signal (2026-11-19). Now: a foreground scan every 1 s at first, backing off to every 5 s, until joined; the
++	 * background scan while connected stays off (0xFFFF).
++	 */
++	memset(b, 0, sizeof(b));
++	b[0] = 1;						/* fg_start_period 1 s */
++	b[2] = 5;						/* fg_end_period 5 s */
++	for (i = 4; i < 6; i++)
++		b[i] = 0xFF;					/* bg_period: off */
+ 	b[6] = 200;
+ 	b[8] = 200;
+ 	b[10] = 3;
+-- 
+2.56.1
+
