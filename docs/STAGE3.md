@@ -1148,3 +1148,21 @@ own sends to the ARM9 then filled its queue and the ARM7 spun in its nds_fifo_se
 each other. w99i, patch 0139: fifo.c's receive loop is nds_fifo_drain() (the IRQ handler calls it) and the ARM9's nds_fifo_send() calls
 it with interrupts off while the queue to the ARM7 is full (a guard against re-entry from a callback that sends). On the card, image
 clean; not yet tried.
+
+### Sound test fix verified; LCDs off, battery warning, uptime (w99j)
+
+User (w99i): "it works". w99j, patch 0140 (sleep plan, what is left):
+- **LCDs off with the backlights.** The System Menu (user's dump, `title/00030017/484e4145/content/00000002.app`, ARM9 not
+  compressed, not modcrypted) has the SDK LCD power routine at 0x26c7610. Off: PM command 16 (backlights) to the ARM7, at least 2 frames
+  after the last change, then POWCNT1 bit 0 cleared and the frame counter saved. On: refused before 8 frames, then bit 0 set, then the
+  saved backlight state sent. screensleep.c does the same with lcd_timer (4 and 14 jiffies at HZ 100). Keys (ARM9) and probably the
+  lid (ARM7) are read on vblank, and the System Menu counts frames while off, so vblank should keep running. A guard covers it if not:
+  button.c counts vblanks (nds_vblanks), ss_tick turns the LCDs back on when none came for a second, logs it, and stops switching
+  them for that boot. The timer is statically initialised (a lid event may come before screensleep's init).
+- **Deep sleep, research:** the ARM7i has a BIOS SWI 7 (Sleep) wrapper (0x2f0085a) and no direct branch to it at its load address.
+  Its code is copied into WRAM at run time (literals at 0x037xxxxx), so the caller needs those copies mapped. 0x2f4c828 (IE/IF, DMA
+  waits, I/O resets, jump) is a reset routine. Ghidra was not running; arm-none-eabi-objdump on scratch copies (outside the repo).
+- **Low battery warning** (dsdesk): popup "Battery low: plug in" (level 3) / "Critical: off soon" (1), 8 s, once per level, reset when
+  charging; battery polled every 10 s once low. Test bed (DSDESK_BATTERY=file with "battery=N charger=C"): both messages fit, the
+  popup closes after 8 s.
+- **Uptime:** time.c sets wall_to_monotonic after xtime at boot, so /proc/uptime counts from boot instead of from 2000-01-01.

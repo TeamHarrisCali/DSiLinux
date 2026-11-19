@@ -1,0 +1,266 @@
+From f0de9ce4aa97de2088d185b614a949c71da80fdd Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 23:35:29 -0600
+Subject: [PATCH] LCDs off with the backlights, low-battery warning, uptime
+ from boot (w99j)
+
+- screensleep.c: POWCNT1 bit 0 off 2+ frames after the backlights, on 8+ frames
+  later and before them (the DSi System Menu's order); vblank guard (button.c
+  counts vblanks) turns the LCDs back on if the display stops.
+- dsdesk: 'Battery low: plug in' (level 3) / 'Critical: off soon' (1) popup,
+  8 s, once per level; battery polled every 10 s once low.
+- time.c: wall_to_monotonic set at boot, so /proc/uptime counts from boot.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ linux-2.6.x/arch/arm/mach-nds/button.c      |  2 +
+ linux-2.6.x/arch/arm/mach-nds/screensleep.c | 55 ++++++++++++++++++++-
+ linux-2.6.x/arch/arm/mach-nds/time.c        |  3 ++
+ user/microwin/src/demos/nanox/dsdesk.c      | 45 +++++++++++++++--
+ 4 files changed, 101 insertions(+), 4 deletions(-)
+
+diff --git a/linux-2.6.x/arch/arm/mach-nds/button.c b/linux-2.6.x/arch/arm/mach-nds/button.c
+index 51fc4634e..dbb4797dc 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/button.c
++++ b/linux-2.6.x/arch/arm/mach-nds/button.c
+@@ -60,6 +60,7 @@ static int ndsbutton_game;
+ /* screen sleep (screensleep.c): every new press is activity; the press that woke the screen is held back until released */
+ extern int nds_screen_activity(void);
+ extern void nds_lid(int closed);
++extern unsigned long nds_vblanks;		/* screensleep.c: proof the display still runs while the LCDs are off */
+ static u16 eat_main, prev_main, eat_x, prev_x;
+ 
+ static irqreturn_t ndsbutton_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+@@ -68,6 +69,7 @@ static irqreturn_t ndsbutton_interrupt(int irq, void *dev_id, struct pt_regs *re
+ 	u16 state = readw(REG_KEYINPUT);
+ 	u16 pr = ~state & 0x3ff;
+ 
++	nds_vblanks++;
+ 	if ((pr & ~prev_main) && nds_screen_activity())
+ 		eat_main |= pr;			/* this press only woke the screen */
+ 	prev_main = pr;
+diff --git a/linux-2.6.x/arch/arm/mach-nds/screensleep.c b/linux-2.6.x/arch/arm/mach-nds/screensleep.c
+index d1e9ae5b7..0a4e180bc 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/screensleep.c
++++ b/linux-2.6.x/arch/arm/mach-nds/screensleep.c
+@@ -6,6 +6,11 @@
+  * The backlights are switched with the ARM7's FIFO_POWER_CMD_BACKLIGHT_POWER (the power chip's backlight bits, as DSLinux's ndsbl).
+  * /proc/dsisettings (volume.c): "sleep N" seconds without input before the screen goes off (0 = never; default 120), "screen off" /
+  * "screen on"; the read line gains sleep=N screen=on|off lid=open|closed.
++ * The LCDs go off too (POWCNT1 bit 0), in the order the DSi's own System Menu uses (its SDK LCD power routine, read in the user's
++ * dump): off = backlights first, the LCDs at least 2 frames later; on = the LCDs at least 8 frames after they went off, then the
++ * backlights. The System Menu counts frames while the LCDs are off, so the display (and its vblank interrupt, which button.c reads
++ * the keys on) keeps running; in case it does not here, ss_tick turns the LCDs back on when no vblank came for a second and stops
++ * switching them for this boot ("lcdoff=0" in the kernel log).
+  */
+ #include <linux/kernel.h>
+ #include <linux/init.h>
+@@ -13,6 +18,8 @@
+ #include <linux/jiffies.h>
+ #include <linux/proc_fs.h>
+ #include <asm/arch/fifo.h>
++#include <asm/arch/power.h>
++#include <asm/system.h>
+ 
+ int nds_sleep_secs = 120;	/* 0 = never; the Settings app sets the saved choice at every desktop start */
+ int nds_screen_is_off;
+@@ -21,16 +28,49 @@ static unsigned int lid_closes;	/* how often the lid was closed since boot: /pro
+ static unsigned long last_input;
+ static struct timer_list ss_timer;
+ 
++#define LCD_OFF_GAP	4		/* jiffies (HZ 100) after the backlights: over 2 frames */
++#define LCD_ON_GAP	14		/* jiffies after the LCDs went off before they may come on: over 8 frames */
++unsigned long nds_vblanks;		/* button.c counts the vblank interrupts */
++static int lcd_off_ok = 1, lcd_is_on = 1;
++static unsigned long lcd_changed, vblanks_seen;
++static void lcd_step(unsigned long data);
++static struct timer_list lcd_timer = TIMER_INITIALIZER(lcd_step, 0, 0);	/* ready before any init: the lid may close early */
++
+ static void backlights(int on)
+ {
+ 	nds_fifo_send(FIFO_POWER_CMD(FIFO_POWER_CMD_BACKLIGHT_POWER, on ? 1 : 0));
+ }
+ 
++/* brings the LCDs to what nds_screen_is_off asks, keeping the System Menu's gaps (lcd_timer, and directly from nds_screen_on) */
++static void lcd_step(unsigned long data)
++{
++	unsigned long flags;
++
++	local_irq_save(flags);
++	if (nds_screen_is_off && lcd_is_on && lcd_off_ok) {
++		POWER_CR &= ~POWER_LCD;
++		lcd_is_on = 0;
++		lcd_changed = jiffies;
++		vblanks_seen = nds_vblanks;
++	} else if (!nds_screen_is_off && !lcd_is_on) {
++		if (time_before(jiffies, lcd_changed + LCD_ON_GAP)) {
++			mod_timer(&lcd_timer, lcd_changed + LCD_ON_GAP);
++		} else {
++			POWER_CR |= POWER_LCD;
++			lcd_is_on = 1;
++			lcd_changed = jiffies;
++			backlights(1);		/* after the LCDs, as the System Menu */
++		}
++	}
++	local_irq_restore(flags);
++}
++
+ void nds_screen_off(void)
+ {
+ 	if (!nds_screen_is_off) {
+ 		nds_screen_is_off = 1;
+ 		backlights(0);
++		mod_timer(&lcd_timer, jiffies + LCD_OFF_GAP);
+ 	}
+ }
+ 
+@@ -39,7 +79,10 @@ void nds_screen_on(void)
+ 	last_input = jiffies;
+ 	if (nds_screen_is_off && !nds_lid_closed) {
+ 		nds_screen_is_off = 0;
+-		backlights(1);
++		if (lcd_is_on)
++			backlights(1);		/* the LCDs had not gone off yet */
++		else
++			lcd_step(0);		/* the LCDs, then the backlights (perhaps a few frames later) */
+ 	}
+ }
+ 
+@@ -81,6 +124,16 @@ static int dslid_read_proc(char *page, char **start, off_t off, int count, int *
+ 
+ static void ss_tick(unsigned long data)
+ {
++	if (!lcd_is_on && time_after(jiffies, lcd_changed + HZ)) {
++		if (nds_vblanks == vblanks_seen) {	/* no vblank with the LCDs off: keys and lid would never be read */
++			printk(KERN_WARNING "screensleep: no vblank with the LCDs off: LCDs back on, lcdoff=0 until reboot\n");
++			lcd_off_ok = 0;
++			POWER_CR |= POWER_LCD;
++			lcd_is_on = 1;
++			lcd_changed = jiffies;
++		}
++		vblanks_seen = nds_vblanks;
++	}
+ 	if (nds_sleep_secs > 0 && !nds_screen_is_off && time_after(jiffies, last_input + (unsigned long)nds_sleep_secs * HZ))
+ 		nds_screen_off();
+ 	mod_timer(&ss_timer, jiffies + HZ);
+diff --git a/linux-2.6.x/arch/arm/mach-nds/time.c b/linux-2.6.x/arch/arm/mach-nds/time.c
+index 5cbe07c86..ff0dac60d 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/time.c
++++ b/linux-2.6.x/arch/arm/mach-nds/time.c
+@@ -84,6 +84,9 @@ void nds_time_init(void)
+ 
+ 	setup_irq(KERNEL_TIMER_IRQ_NUM, &nds_timer_irq);
+ 	xtime.tv_sec = setup_timer();
++	/* uptime = xtime + wall_to_monotonic: without this, /proc/uptime started at 2000-01-01 (946684800 s; the card log's header showed it)
++	 * and stayed a date even after rtc.c set the clock properly */
++	set_normalized_timespec(&wall_to_monotonic, -xtime.tv_sec, -xtime.tv_nsec);
+ }
+ 
+ /* Used in arch.c - ignore 'defined but not used' warning! (stsp) */
+diff --git a/user/microwin/src/demos/nanox/dsdesk.c b/user/microwin/src/demos/nanox/dsdesk.c
+index 7888b0c00..5dfb427e7 100644
+--- a/user/microwin/src/demos/nanox/dsdesk.c
++++ b/user/microwin/src/demos/nanox/dsdesk.c
+@@ -411,6 +411,7 @@ static void poll_lid(void)
+ }
+ 
+ static int bat_level = -1, bat_chg;
++static void battery_warning(int level);		/* below: the popup */
+ 
+ static void poll_battery(void)
+ {
+@@ -421,6 +422,8 @@ static void poll_battery(void)
+ 		return;
+ 	f = fopen("/proc/dsisettings", "r");
+ #ifdef NANOX_TESTBED
++	if (getenv("DSDESK_BATTERY"))		/* a file with "battery=N charger=C": the low-battery popup */
++		f = fopen(getenv("DSDESK_BATTERY"), "r");
+ 	if (!f && bat_level < 0) {		/* PC test bed: a battery at 73 % */
+ 		bat_level = 11;
+ 		bar_dirty = 1;
+@@ -433,6 +436,7 @@ static void poll_battery(void)
+ 		bat_level = b;
+ 		bat_chg = c;
+ 		bar_dirty = 1;
++		battery_warning(c ? 99 : b);
+ 	}
+ 	fclose(f);
+ }
+@@ -442,6 +446,8 @@ static int vol_cur = -1;		/* volume percent shown in the taskbar tray (-1 unknow
+ static time_t vol_since;
+ static int vol_last = -2, vol_pct, vol_status;
+ static char vol_msg[40];
++static char bat_msg[48];		/* a battery warning in the same popup (it wins over the volume while shown) */
++static int bat_pct, vol_secs = VOL_SECONDS;
+ 
+ static int read_volume(int *level, int *pct, int *status)
+ {
+@@ -471,6 +477,14 @@ static void draw_vol(void)
+ 	if (!volwin)
+ 		return;
+ 	w95_box(volwin, gc, 0, 0, VOLW, th + 20, 0, W95_FACEFILL);
++	if (bat_msg[0]) {
++		w95_text(volwin, gc, W95_DARK, 6, 4, bat_msg);
++		w95_box(volwin, gc, 6, th + 7, VOLW - 12, 8, 1, W95_WHITEFILL);
++		bw = (VOLW - 12 - 4) * bat_pct / 100;
++		if (bw > 0)
++			w95_fill(volwin, gc, GR_RGB(200, 0, 0), 8, th + 9, bw, 4);
++		return;
++	}
+ 	if (vol_msg[0]) {
+ 		strcpy(t, vol_msg);
+ 	} else if (vol_pct == 0) {
+@@ -499,13 +513,38 @@ static void show_vol(void)
+ 	vol_since = time(NULL);
+ }
+ 
++/*
++ * Low battery (docs/SLEEP-LOCK-PLAN.md step 5): the power micro reports 15, 11, 7, 3 (low) and 1 (critical). Once per level going down,
++ * without a charger, a warning stays 8 s in the volume popup; at 1 dsautolog shuts the DSi down cleanly about 20 s later.
++ * level 99 = charging: warn again next time.
++ */
++static void battery_warning(int level)
++{
++	static int warned = 99;
++
++	if (level >= 99 || level > 3) {
++		if (level >= 99)
++			warned = 99;
++		return;
++	}
++	if (level < 0 || level >= warned)
++		return;
++	warned = level;
++	bat_pct = level * 100 / 15;
++	snprintf(bat_msg, sizeof(bat_msg), level <= 1 ? "Critical: off soon" : "Battery low: plug in");
++	vol_secs = 8;
++	show_vol();
++}
++
+ static void poll_volume(void)
+ {
+ 	int level, pct, status;
+ 
+-	if (volwin && time(NULL) - vol_since >= VOL_SECONDS) {
++	if (volwin && time(NULL) - vol_since >= vol_secs) {
+ 		GrDestroyWindow(volwin);
+ 		volwin = 0;
++		bat_msg[0] = 0;
++		vol_secs = VOL_SECONDS;
+ 	}
+ 	if (!read_volume(&level, &pct, &status) || status == 5)
+ 		return;
+@@ -1146,8 +1185,8 @@ int main(int argc, char **argv)
+ 				reload_desktop = 0;
+ 				apply_desktop();
+ 			}
+-			if ((ticks % 100) == 1)		/* about every 30 s */
+-				poll_battery();
++			if ((ticks % 100) == 1 || (bat_level >= 0 && bat_level <= 3 && (ticks % 33) == 1))
++				poll_battery();		/* about every 30 s, every 10 s once low */
+ 			if ((ticks % 10) == 2)		/* about every 3 s: two cheap ioctls, no server round trip */
+ 				poll_wifi();
+ 			if ((ticks % 3) == 0)		/* about every second: the lid closed -> lock (with a PIN set) */
+-- 
+2.56.1
+

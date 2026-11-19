@@ -15,7 +15,9 @@ How to use DSLinux on the DSi XL: the buttons, the desktop, every program, Wi-Fi
 - **Exit desktop** returns to the text console; `/boot/desktop` starts it again.
 - **Screen off:** after 2 minutes without a touch or button the screens go dark, and at once when the lid closes; a touch or button
   (with the lid open) brings them back, without clicking or typing anything. Programs keep running. Settings > Screen off sets the time
-  (or never). At a critical battery without a charger the DSi shuts down cleanly by itself.
+  (or never). The backlights and the LCDs both go off.
+- **Low battery:** a popup under the taskbar says "Battery low: plug in" when the battery gets low, and "Critical: off soon" when it is
+  nearly empty; about 20 s later, without a charger, the DSi shuts down cleanly by itself.
 - **Lock:** Settings > Lock PIN sets a PIN (4-8 digits). With a PIN, closing the lid locks the desktop, and Start > Lock locks it now;
   type the PIN with the touch keyboard's digits or tap the keypad, then Enter / OK. There is no lock at boot. Forgot it: delete
   `/home/.lockpin` (over SSH, or on the PC: `debugfs -w -R "rm /home/.lockpin" ROOTFS.IMG`).

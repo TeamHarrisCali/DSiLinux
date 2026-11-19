@@ -12,7 +12,32 @@ boot): Settings > **Lock PIN** sets it (4-8 digits, twice; empty removes it); wi
 watches `/proc/dslid`), and **Start > Lock** locks now. The lock covers the whole top screen; digits from the touch keyboard or the
 on-screen keypad; wrong PINs wait 1, 2, 4 ... 30 s. Stored hashed in `/home/.lockpin`; a forgotten PIN: delete that file (SSH, or
 `debugfs -w -R "rm /home/.lockpin" ROOTFS.IMG` on the PC). It keeps out someone holding the DSi; SSH still works with the key.
-Not yet: switching the LCDs off too (more saving), a warning before the battery shut down, the text console lock, deep sleep (step 6).
+**w99j** (built, on the card, not yet tried on the DSi):
+- **The LCDs go off too**, not just the backlights, in the order the DSi's own System Menu uses (read in the user's dump, below).
+  If the display stopped sending its frame interrupt with the LCDs off (the keys and the lid are read on it), the kernel turns the
+  LCDs back on after a second, logs `lcdoff=0` and keeps only the backlights off until the next boot.
+- **Low-battery warning:** the popup under the taskbar shows "Battery low: plug in" for 8 s when the level drops to 3 without a
+  charger, and "Critical: off soon" at 1 (the clean shut down follows about 20 s later). Once per level; plugging in resets it.
+- `/proc/uptime` counts from boot (it showed the year-2000 date before).
+
+Not yet: the text console lock, deep sleep (step 6, findings below).
+
+## What the System Menu does (the user's dump, `title/00030017/484e4145`, 2026-11-18)
+
+Only findings are kept here; nothing from the dump is copied into the repo.
+- **LCD power** (the ARM9's SDK routine at 0x26c7610):
+  - **Off:** it asks the ARM7 to switch the backlights off (PM command 16, sent only while the LCDs are on), waits until at least 2
+    frames have passed since the last change, then clears POWCNT1 bit 0. It saves the frame counter.
+  - **On:** it refuses (unless forced) until 8 frames have passed since off, sets POWCNT1 bit 0, then sends the saved backlight state
+    to the ARM7.
+  - Because it counts frames while the LCDs are off, the frame interrupt keeps running then.
+- **Backlights:** power-chip register 0 bits 0x04 / 0x08 (w99f, the same code).
+- **Deep sleep:** not found yet.
+  - The ARM7 part has the BIOS Sleep wrapper (SWI 7), but no direct branch to it.
+  - The System Menu copies much of its ARM7 code into WRAM at run time (its literals point at 0x037xxxxx), so the caller has to be
+    found after mapping those copies.
+  - The routine near the interrupt registers (0x2f4c828) is a reset, not sleep.
+  - Next: map the ARM7's copy table and find the caller.
 
 ## Today (checked in the source)
 
