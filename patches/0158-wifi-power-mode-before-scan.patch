@@ -1,0 +1,44 @@
+From 488f3a5c4a594efef8e5629ad99695e7bb952cd1 Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 13:30:39 -0600
+Subject: [PATCH] DSi Wi-Fi: maximum-performance power mode before every scan
+ (x02)
+
+Later scans (the Wi-Fi window) found nothing on any channel: only the connect
+set the power mode. Log a non-zero scan-complete status.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ linux-2.6.x/arch/arm/mach-nds/dsiwifi.c | 9 ++++++++-
+ 1 file changed, 8 insertions(+), 1 deletion(-)
+
+diff --git a/linux-2.6.x/arch/arm/mach-nds/dsiwifi.c b/linux-2.6.x/arch/arm/mach-nds/dsiwifi.c
+index 8aeaaac0e..2d05917d2 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/dsiwifi.c
++++ b/linux-2.6.x/arch/arm/mach-nds/dsiwifi.c
+@@ -570,7 +570,9 @@ static void handle_pkt(unsigned int hdr, int *ev_scan_done)
+ 		bss_reports++;
+ 		bss_info(rx + 8, len - 2);
+ 		break;
+-	case WMI_SCAN_COMPLETE_EVENT:
++	case WMI_SCAN_COMPLETE_EVENT:			/* u32 status: 0 ok */
++		if (rx[8] | rx[9] | rx[10] | rx[11])
++			lg("  scan complete with status %u\n", rx[8] | (rx[9] << 8), 0, 0);
+ 		scan_done = 1;
+ 		if (ev_scan_done)
+ 			*ev_scan_done = 1;
+@@ -711,6 +713,11 @@ static noinline void wmi_scan(int *bad)
+ 	unsigned int v;
+ 
+ 	nnets = 0;
++	/* power mode: maximum performance before every scan (x02). Only the connect set it, so a scan from the Wi-Fi window some time
++	 * after power-on found nothing on any channel (x01: every later scan "0 networks"), the firmware's default power save having
++	 * put the radio to sleep */
++	b[0] = 2;
++	mbox_out(1, 1, WMI_SET_POWER_MODE_CMD, b, 1, bad);
+ 	v = 0x7F;
+ 	mbox_out(1, 1, WMI_TARGET_ERROR_REPORT_BITMASK_CMD, &v, 4, bad);
+ 	v = 0;
+-- 
+2.56.1
+

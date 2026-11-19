@@ -1477,3 +1477,11 @@ User (w99z): the rest works, Wi-Fi does not. Log: 7 attempts over 180 s (APs at 
 was not the answer: the firmware does not join at all. Every join today came 25-30 s (or a multiple) after the connect, and nothing is
 heard while waiting: with the scan periods at 0xFFFF (dswifi's values) the firmware scans only on an internal timer. x01, patch 0157,
 one change: while joining, fg_start_period 1 s and fg_end_period 5 s (the background period stays 0xFFFF).
+
+### x01: the Wi-Fi window's scans found nothing; full power before every scan (x02)
+
+User (x01): scanning brought up no networks. Log: the power-on scans worked (1, then 5 networks), every later scan (the Wi-Fi
+window, in the packet thread) completed at once with 0 reports on all channels, before any connect (so x01's change was not
+involved). Only do_connect set WMI_SET_POWER_MODE 2 (maximum performance); a scan some time after power-on runs under the
+firmware's default power save. An earlier log had the same pattern once ("0 networks", then 6 after a connect). x02, patch 0158:
+wmi_scan sets power mode 2 first; a scan-complete status other than 0 is logged.
