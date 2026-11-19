@@ -1,6 +1,11 @@
-# DSLinuxDSi
+# DSiLinux
 
-**Next steps, plans and open questions:** [docs/ROADMAP.md](docs/ROADMAP.md).
+**Linux on the Nintendo DSi, in DSi mode.** This project stems from [DSLinux](https://github.com/ipwndev/DSLinux), the uClinux port for
+the original Nintendo DS (2005-2008): everything here builds on that work and its authors. The DSi port itself (the DSi-mode boot, SD
+card, touchscreen, Wi-Fi chip, camera, desktop and apps) was made possible by AI: it was written with Claude (Anthropic) working
+alongside the owner of the console, from reading hardware documentation and the console's own behaviour to every patch and test.
+
+**Next steps, plans and open questions:** [docs/ROADMAP.md](docs/ROADMAP.md). How changes are made: [docs/DEV-PROCESS.md](docs/DEV-PROCESS.md).
 
 DSLinux (uClinux 2.6.14 for the Nintendo DS) made to run on a **Nintendo DSi XL in DSi mode**: 16 MB of RAM, the internal SD slot,
 the DSi touchscreen, hardware 3D, sound, microphone, cameras and Wi-Fi, with a Windows 95 style desktop and a set of apps and games.
