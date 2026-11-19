@@ -1524,3 +1524,9 @@ interrupts off is the candidate).
 The user suspected the Wi-Fi code was not used and authorized using it, with instructions for GitHub as long as it stays out of the
 repo. The firmware is used: the console's own HNCA (WLFIRM, 97,888 bytes) is /usr/lib/firmware/dsi-wifi.bin and uploads at every
 start. README now explains how to supply it (scripts/add-dsi-wifi-fw.sh); its old line "dumps were never read" is corrected.
+
+- **x05 verified (2026-11-19):** Wi-Fi joined at the first attempt, 25 s after the connect (-66 dBm), DHCP lease. x01-x04 had not
+  helped; w99w's driver joins. The scans' "status 16" (cancelled) is still there on channels 2-11: a separate, older issue that does
+  not stop joining.
+- The user's rule from here on (DEV-PROCESS.md): what we cannot get right ourselves may use the DSi's own firmware or code, supplied by
+  each owner from their console with a README guide and an install script; never Nintendo code in the repo or on GitHub.

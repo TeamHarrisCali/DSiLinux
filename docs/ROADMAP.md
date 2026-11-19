@@ -5,7 +5,7 @@ lists them, where each one stopped, and **every question still waiting for an an
 
 ## Where things stand
 
-- **On the card now: w99w** (built on w99v) (2026-11-19, not yet tried): BusyBox 1.36.1 in the ROM, hush as the interactive shell, 48 newer tools
+- **On the card now: x05** (2026-11-19, verified): Wi-Fi joins again (w99w's driver, first attempt, 25 s, DHCP), with the bug-review fixes (w99y), the 3-minute join window (w99z), BusyBox 1.36.1 + hush and the swapped tools (w99v, w99x). Before that, w99w (2026-11-19, not yet tried): BusyBox 1.36.1 in the ROM, hush as the interactive shell, 48 newer tools
   (BUSYBOX-HUSH-PLAN.md): hush verified. **w99w** (on the card, not yet tried) chooses the nearer of two access points. w99u: L = left click, R = right click. w99t (Windows 95 keyboard, safer Start menu): the user said it is good.
 - **w99t** (2026-11-19, not yet tried): the bottom-screen keyboard in the Windows 95 look; Start menu shorter and
   off the Start button, Shut down asks first. w99s (optimization) verified: 3D gears, Wi-Fi, SSH.

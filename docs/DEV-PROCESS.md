@@ -55,6 +55,10 @@ Each rule below answers one of those.
   and noinline helpers. `precheck.sh` finds this in seconds.
 - **`lg()` in dsiwifi.c takes at most three values.**
 - **File names** must not contain nand, bios, firmware or dsisd: `.gitignore` blocks them to protect the dumps.
+- **Nintendo's code (the user's rule, 2026-11-19):** what our own code cannot get right may use the DSi's own firmware or code, taken
+  from the owner's console at install time (as the Wi-Fi firmware: scripts/add-dsi-wifi-fw.sh). It is never put in the repo, the ROM or
+  on GitHub. Each such file gets an install script that checks it, a README section saying how to get it from your own console, and a
+  pre-push check that no Nintendo bytes are in the commits.
 - **The dumps:**
   - read them freely for behaviour;
   - never copy them, or anything console-unique, into the repo or the ROM;
