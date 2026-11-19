@@ -1318,3 +1318,20 @@ w99q, patch 0147 (dsiwifi.c):
 - CONNECTED logs the attempt number and seconds.
 
 The next card log shows which of these mattered.
+
+### w99q never connected; the first connect is what completes (w99r)
+
+User (w99q): "never connected". Card log: 14 attempts, every 10 s, each one dropped with a disconnect (answered "disconnected: reason
+3"). Each 10 s the firmware sent exactly 5 packets, none of them a BSS report even with filter 4. Read again, the old logs say the
+firmware completes the first connect after about 30 s; the "third try" was the 15 s retry schedule landing just after that. w99q
+cancelled the attempt every 10 s, so it never got there. No beacon reports while waiting means it is not listening: the scan
+parameters (dswifi's: foreground and background scan periods 0xFFFF, off) leave it no scan until some internal timer, about 30 s.
+w99r, patch 0148:
+- right before the connect, a forced scan of the AP's channel (scan_ap_channel: the same parameters as the bring-up scan, BSS
+  reports on, then off);
+- the pending attempt is never cancelled;
+- a retry, with that scan again, only after 30 s;
+- BSS filter 0 again;
+- the logging from w99q stays (the attempt bookkeeping in a noinline helper and do_connect's buffer static: gcc 4.0.4 crashed, "unrecognizable insn", twice).
+
+If the join is now quick, the log shows "CONNECTED ... attempt 1, N s".

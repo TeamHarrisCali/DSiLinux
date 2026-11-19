@@ -1,0 +1,129 @@
+From 3b1290fb1221898be81bcf8e8fd47624bed3214b Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 00:59:20 -0600
+Subject: [PATCH] DSi Wi-Fi: scan the AP's channel before joining, never cancel
+ (w99r)
+
+w99q's cancel-and-retry every 10 s never connected: the firmware completes the
+first connect after about 30 s, without listening meanwhile (scans off in the
+scan parameters). Scan the AP's channel right before the connect; keep the
+pending attempt; retry (with the scan) after 30 s; BSS filter 0 again. Attempt
+bookkeeping in a noinline helper and a static buffer (gcc 4.0.4 crashed).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ linux-2.6.x/arch/arm/mach-nds/dsiwifi.c | 73 ++++++++++++++++++-------
+ 1 file changed, 53 insertions(+), 20 deletions(-)
+
+diff --git a/linux-2.6.x/arch/arm/mach-nds/dsiwifi.c b/linux-2.6.x/arch/arm/mach-nds/dsiwifi.c
+index dec64e6b2..06d68197a 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/dsiwifi.c
++++ b/linux-2.6.x/arch/arm/mach-nds/dsiwifi.c
+@@ -994,32 +994,64 @@ static noinline void probe_name(const char *ssid, int *bad)
+ }
+ 
+ /*
+- * dswifi's wmi_connect() for an open network. w99q (the connect took three tries, about 30 s, at every boot; one boot gave up after
+- * 100 s because the retries stopped at 3): the BSS filter is dswifi's "current beacon" (4) while joining, back to none once connected
+- * (the beacon reports cost transfer time); a retry first tells the firmware to drop the previous attempt (disconnect), and retries go
+- * on every 10 s until it connects or the connect is cancelled (the Wi-Fi window gives up after 100 s). Every firmware message during
+- * the wait is logged.
++ * dswifi's wmi_connect() for an open network.
++ * Joining took about 30 s at every boot. w99q dropped the pending attempt before each retry (every 10 s) and never connected
++ * (14 attempts): the firmware completes the FIRST connect after about 30 s, the old "third try" was that. While it waits it sends no
++ * beacon report even with filter 4: it is not listening, because the scan parameters (dswifi's: foreground and background scans
++ * 0xFFFF, off) leave it no scan of its own until some internal timer. w99r: a scan of the AP's channel right before the connect
++ * (fresh beacons for the join), the pending attempt is never cancelled, a retry (again with that scan) only after 30 s, filter 0 as
++ * before. Every firmware message during the wait is logged; CONNECTED logs the attempt and the seconds.
+  */
+-static noinline void do_connect(void)
++/* the attempt's bookkeeping and log line (noinline: inside do_connect() gcc 4.0.4 crashed, "unrecognizable insn") */
++static noinline void connect_attempt_log(void)
+ {
+-	unsigned char b[64];
+-	struct net2 *n = 0;
+-	int i, bad = 0;
+-
+ 	if (conn_tries <= 1) {
+ 		conn_first = jiffies;
+ 	} else {
+-		int once = 0;
+-
+ 		lg("connect: attempt %u, %u s after the first; meanwhile the firmware sent %u packets",
+ 		   conn_tries, (unsigned int)((jiffies - conn_first) / HZ), rx_count - conn_rx0);
+-		lg(", %u of them BSS reports; dropping the previous attempt\n", bss_reports - conn_bss0, 0, 0);
+-		mbox_out(1, 1, WMI_DISCONNECT_CMD, 0, 0, &bad);
+-		pump(500, &once, &bad);			/* its answer (a disconnect event, logged) */
++		lg(", %u of them BSS reports\n", bss_reports - conn_bss0, 0, 0);
+ 	}
+ 	unknown_logged = 0;				/* log whatever the firmware says while joining */
+ 	conn_bss0 = bss_reports;
+ 	conn_rx0 = rx_count;
++}
++
++static noinline void scan_ap_channel(unsigned int mhz, int *bad)
++{
++	static unsigned char b[24];
++	int i;
++
++	memset(b, 0, sizeof(b));
++	for (i = 0; i < 6; i++)
++		b[i] = 0xFF;
++	b[6] = 20;					/* as scan_channels: 20 / 50 ms dwell, all BSS reports */
++	b[8] = 50;
++	b[10] = 3;
++	b[11] = 1;
++	mbox_out(1, 1, WMI_SET_SCAN_PARAMS_CMD, b, 20, bad);
++	memset(b, 0, sizeof(b));
++	b[0] = 1;
++	mbox_out(1, 1, WMI_SET_BSS_FILTER_CMD, b, 8, bad);
++	memset(b, 0, sizeof(b));
++	b[0] = 1;					/* force a foreground scan */
++	b[8] = 20;					/* home dwell time */
++	mbox_out(1, 1, WMI_START_SCAN_CMD, b, 20, bad);
++	scan_done = 0;
++	pump_for(1500, &scan_done, bad);
++	memset(b, 0, sizeof(b));			/* reports off again */
++	mbox_out(1, 1, WMI_SET_BSS_FILTER_CMD, b, 8, bad);
++	lg(scan_done ? "connect: channel %u scanned before joining\n" : "connect: channel %u scan before joining did not complete\n",
++	   wifi_mhz_to_channel(mhz), 0, 0);
++}
++
++static noinline void do_connect(void)
++{
++	static unsigned char b[64];		/* static: on the stack gcc 4.0.4 crashed here (w99r); only the packet thread runs this */
++	struct net2 *n = 0;
++	int i, bad = 0;
++
++	connect_attempt_log();
+ 	n = find_net();
+ 	if (!n)
+ 		return;
+@@ -1045,8 +1077,9 @@ static noinline void do_connect(void)
+ 			snprintf(line, sizeof(line), "connect: %s, any channel\n", n->ssid);
+ 		lgs(line);
+ 	}
+-	memset(b, 0, sizeof(b));				/* BSS filter 4, "current beacon", as dswifi while joining */
+-	b[0] = 4;
++	if (n->channel)						/* fresh beacons of the AP for the join */
++		scan_ap_channel(wifi_channel_to_mhz(n->channel), &bad);
++	memset(b, 0, sizeof(b));				/* BSS filter: none (dswifi uses 4; w99q tried it: no difference) */
+ 	mbox_out(1, 1, WMI_SET_BSS_FILTER_CMD, b, 8, &bad);
+ 	memset(b, 0, sizeof(b));				/* scan params 5, 200, 200, 200 */
+ 	for (i = 0; i < 6; i++)
+@@ -1163,9 +1196,9 @@ static int wthread(void *arg)
+ 		struct sk_buff *skb;
+ 		int i, bad = 0;
+ 
+-		/* no connect event 10 s after a connect: again, until it connects or is cancelled (do_connect drops the old attempt) */
+-		if (conn_at && !connected && time_after(jiffies, conn_at + 10 * HZ)) {
+-			lg("connect: no connect event after 10 s\n", 0, 0, 0);
++		/* no connect event 30 s after a connect: again (the first usually completes by then), until it connects or is cancelled */
++		if (conn_at && !connected && time_after(jiffies, conn_at + 30 * HZ)) {
++			lg("connect: no connect event after 30 s\n", 0, 0, 0);
+ 			conn_pending = 1;
+ 		}
+ 		if (filter_off_pending) {			/* connected: no more beacon reports (they cost transfer time) */
+-- 
+2.56.1
+
