@@ -1,0 +1,139 @@
+From 6d4d93bcec5574ea0321ff4310e115237775aa9d Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 00:27:32 -0600
+Subject: [PATCH] Deep sleep through BIOS SWI 7; report the wake flags (w99n)
+
+w99m's own HALTCNT = 0xC0 write came back at once (deep sleep: 0 s). Call the
+BIOS's Sleep (the same write from inside the BIOS); send IF/IF2 seen right
+after waking to the ARM9 for the kernel log.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ linux-2.6.x/arch/arm/mach-nds/arm7/arm7.h   |  1 +
+ linux-2.6.x/arch/arm/mach-nds/arm7/head.S   |  6 +++++
+ linux-2.6.x/arch/arm/mach-nds/arm7/main.c   | 25 +++++++++++++--------
+ linux-2.6.x/arch/arm/mach-nds/screensleep.c | 10 +++++++--
+ 4 files changed, 31 insertions(+), 11 deletions(-)
+
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/arm7.h b/linux-2.6.x/arch/arm/mach-nds/arm7/arm7.h
+index 1b8cb69db..b1ce2ccdc 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/arm7/arm7.h
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/arm7.h
+@@ -3,6 +3,7 @@
+ 
+ extern void swiDelay(u32 duration);
+ extern void swiWaitForVBlank(void);
++extern void swiSleep(void);
+ 
+ /*---------------------------------------------------------------------------------
+ 	IntrWait (swi 0x04)
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/head.S b/linux-2.6.x/arch/arm/mach-nds/arm7/head.S
+index dde54a881..153d349a6 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/arm7/head.S
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/head.S
+@@ -46,3 +46,9 @@ swiIntrWait:
+ swiWaitForVBlank:
+ 	swi	0x050000
+ 	bx	lr
++
++@ BIOS Sleep: in the DSi's bios7i it is only "strb 0xC0 to HALTCNT (0x4000301)" from inside the BIOS (deep sleep, main.c)
++.global swiSleep
++swiSleep:
++	swi	0x070000
++	bx	lr
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/main.c b/linux-2.6.x/arch/arm/mach-nds/arm7/main.c
+index 574cc36c5..35a5e086e 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/arm7/main.c
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/main.c
+@@ -92,12 +92,15 @@ int isDSPhat(void)
+ 	
+ /*
+  * Deep sleep (docs/SLEEP-LOCK-PLAN.md step 6) until the lid opens: libnds's sequence (its ARM7 power handler sleeps from the FIFO
+- * interrupt too), but without BIOS calls, which must not run in this handler (STAGE3: w98g, w99e). The DSi BIOS's Sleep (SWI 7) is only
+- * "HALTCNT = 0xC0" (read in the user's bios7i dump), so it is written here directly. Sleep stops the whole system, the ARM9 too; the ARM9
+- * waits halted (screensleep.c) for the "awake" message, holding the SD lock, so no card or Wi-Fi request is in flight.
++ * interrupt too). The DSi BIOS's Sleep (SWI 7) is only "HALTCNT = 0xC0" (the user's bios7i dump). w99m wrote HALTCNT from our own code:
++ * it came back at once ("deep sleep: 0 s"), as if the write were ignored outside the BIOS, so w99n calls SWI 7. A BIOS call from this
++ * handler is safe: the dispatcher (bios7i 0x8C) runs the function in SYS mode with the caller's I bit, still masked here (STAGE3, w99m).
++ * Sleep stops the whole system, the ARM9 too; the ARM9 waits halted (screensleep.c) for the "awake" message, holding the SD lock, so no
++ * card or Wi-Fi request is in flight. Right after waking, the pending interrupt flags (IF, IF2) go to the ARM9 (data 0x4xxxx-0x7xxxx)
++ * for the kernel log: what woke it.
+  */
+-#define HALTCNT		(*(volatile u8*)0x04000301)
+ #define NDS_IE2		(*(volatile u32*)0x04000218)	/* DSi: the second interrupt mask */
++#define NDS_IF2		(*(volatile u32*)0x0400021C)
+ #define IRQ_LID_OPEN	(1 << 22)			/* the hinge unfolding */
+ #define LID_CLOSED()	(XKEYS & (1 << 7))
+ 
+@@ -111,7 +114,7 @@ static void sleep_delay(u32 n)
+ 
+ static void arm7_sleep(void)
+ {
+-	u32 ie = NDS_IE, ie2 = NDS_IE2;
++	u32 ie = NDS_IE, ie2 = NDS_IE2, wif, wif2;
+ 	u8 pm = 0;
+ 	int pm_ok;
+ 
+@@ -127,16 +130,20 @@ static void arm7_sleep(void)
+ 	NDS_IE = IRQ_LID_OPEN;
+ 	NDS_IE2 = 0;
+ 	NDS_IF = IRQ_LID_OPEN;
+-	if (LID_CLOSED()) {
+-		HALTCNT = 0xC0;			/* sleep until IE & IF: the lid opens */
+-		asm volatile("nop\n\tnop" ::: "memory");
+-	}
++	if (LID_CLOSED())
++		swiSleep();			/* sleep until IE & IF: the lid opens */
++	wif = NDS_IF;
++	wif2 = NDS_IF2;
+ 	NDS_IF = IRQ_LID_OPEN;
+ 	sleep_delay(400000);			/* about 100 ms to settle, as libnds */
+ 	NDS_IE = ie;
+ 	NDS_IE2 = ie2;
+ 	if (pm_ok)
+ 		pm_xfer(POWER_CONTROL, pm, 0);
++	nds_fifo_send(FIFO_POWER_CMD(FIFO_POWER_CMD_SLEEP, 0x40000 | (wif & 0xffff)));
++	nds_fifo_send(FIFO_POWER_CMD(FIFO_POWER_CMD_SLEEP, 0x50000 | (wif >> 16)));
++	nds_fifo_send(FIFO_POWER_CMD(FIFO_POWER_CMD_SLEEP, 0x60000 | (wif2 & 0xffff)));
++	nds_fifo_send(FIFO_POWER_CMD(FIFO_POWER_CMD_SLEEP, 0x70000 | (wif2 >> 16)));
+ 	nds_fifo_send(FIFO_POWER_CMD(FIFO_POWER_CMD_SLEEP, 2));
+ }
+ 
+diff --git a/linux-2.6.x/arch/arm/mach-nds/screensleep.c b/linux-2.6.x/arch/arm/mach-nds/screensleep.c
+index fe2aba6aa..0e82fa967 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/screensleep.c
++++ b/linux-2.6.x/arch/arm/mach-nds/screensleep.c
+@@ -131,6 +131,7 @@ extern void dsisd_lock(void), dsisd_unlock(void);	/* drivers/block/dldi_c.c */
+ extern int dsisd_rtc_locked(unsigned char *out);	/* drivers/block/dldi_c.c: the clock chip, with the lock held */
+ extern void getnstimeofday(struct timespec *tv);	/* kernel/time.c (no header declares it in 2.6.14) */
+ static volatile int sleep_state;			/* from the ARM7: 1 asleep now, 2 awake, 3 refused */
++static unsigned int wake_if[4];				/* from the ARM7 just after waking: IF low/high, IF2 low/high */
+ unsigned int nds_sleeps;				/* deep sleeps since boot (/proc/dslid) */
+ 
+ static unsigned int bcd(unsigned char v)
+@@ -154,7 +155,11 @@ static long rtc_secs(void)
+ 
+ static void sleep_power_cb(u8 cmd, u32 data)
+ {
+-	if (cmd == FIFO_POWER_CMD_SLEEP)
++	if (cmd != FIFO_POWER_CMD_SLEEP)
++		return;
++	if ((data >> 16) >= 4 && (data >> 16) <= 7)
++		wake_if[(data >> 16) - 4] = data & 0xffff;
++	else
+ 		sleep_state = data;
+ }
+ 
+@@ -212,7 +217,8 @@ int nds_deep_sleep(void)
+ 			t1.tv_sec += slept;
+ 			do_settimeofday(&t1);
+ 		}
+-		printk(KERN_INFO "deep sleep: %ld s\n", slept > 0 ? slept : 0);
++		printk(KERN_INFO "deep sleep: %ld s; woken with IF %08x IF2 %08x\n", slept > 0 ? slept : 0,
++		       wake_if[0] | (wake_if[1] << 16), wake_if[2] | (wake_if[3] << 16));
+ 	} else {
+ 		printk(KERN_WARNING "deep sleep: %s\n", res == 3 ? "refused: the lid was open" : "the ARM7 did not answer in 1 s");
+ 	}
+-- 
+2.56.1
+

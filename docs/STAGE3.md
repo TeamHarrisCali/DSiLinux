@@ -1240,3 +1240,22 @@ moved. The card log was last saved 87 s after boot (Wi-Fi at DHCP) with nothing 
   - Stage messages in the kernel log ("deep sleep: ...").
   - dsautolog: stops "dssettings wifi auto" first; writes each step to /home/sleep.trace (fsync); saves the card log right before
     the sleep and after waking.
+
+### w99m slept "0 s"; BIOS Sleep instead of our own HALTCNT write (w99n)
+
+User (w99m): the trace (/home/sleep.trace) had every step, and the kernel log "deep sleep: 0 s" and "1 s" twice. The ARM7 answered
+"asleep" and then "awake" at once, and everything came back:
+- Wi-Fi reloaded its firmware and reconnected;
+- the lock screen came up;
+- the desktop worked;
+- a normal shut down followed.
+
+(The boot before had stopped at the text console: the crash guard after w99l's freeze, as designed.) So the write HALTCNT = 0xC0
+from our own ARM7 code returned without sleeping.
+- **The System Menu (user's dump):** its only BIOS Sleep is the wrapper at 0x2f0085a, with no caller in any of the three binaries
+  (raw byte search for Thumb `svc 7` and ARM `svc 0x070000`). No direct HALTCNT write either: the 0xC0 byte writes are SPI/I2C
+  control. Its sleep path stays unknown (relocated code, or no HALTCNT sleep at all).
+- **w99n, patch 0144:** the ARM7 calls BIOS SWI 7 (head.S swiSleep), the same write but made from inside the BIOS. GBA lore has
+  HALTCNT written by BIOS code; if the DSi ignores the write from elsewhere, that explains "0 s". It is safe from the handler (the
+  dispatcher keeps I masked, see w99m). Right after waking it sends IF and IF2 to the ARM9; the kernel prints
+  "deep sleep: N s; woken with IF ... IF2 ...".
