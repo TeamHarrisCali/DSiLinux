@@ -1,0 +1,40 @@
+From c501707280fb15e332f4f0871b0df52b810095f8 Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 13:50:02 -0600
+Subject: [PATCH] DSi Wi-Fi: scan control flags 0 as the System Menu (x04)
+
+From the user's dump: the System Menu's WMI code sets scan flags 0 (periods
+0xFFFF, dwell 20/50, ratio 3). dswifi's 1 (connect scan) had the firmware
+cancel every scan (status 16).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ linux-2.6.x/arch/arm/mach-nds/dsiwifi.c | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/linux-2.6.x/arch/arm/mach-nds/dsiwifi.c b/linux-2.6.x/arch/arm/mach-nds/dsiwifi.c
+index 126db2908..9521fdfa0 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/dsiwifi.c
++++ b/linux-2.6.x/arch/arm/mach-nds/dsiwifi.c
+@@ -683,7 +683,8 @@ static noinline void scan_channels(int *bad)
+ 		b[6] = 20;
+ 		b[8] = 50;
+ 		b[10] = 3;
+-		b[11] = 1;
++		b[11] = 0;	/* scan flags 0, as the DSi's own System Menu sets them (its WMI code, 0x2f41134 in the user's dump: periods 0xFFFF,
++				 * dwell 20 / 50 ms, ratio 3, flags 0). dswifi's 1 ("connect scan") had the firmware cancel every scan, status 16 (x04) */
+ 		mbox_out(1, 1, WMI_SET_SCAN_PARAMS_CMD, b, 20, bad);
+ 		memset(b, 0, sizeof(b));
+ 		b[0] = 1;					/* all BSSs */
+@@ -1038,7 +1039,7 @@ static noinline void scan_ap_channel(unsigned int mhz, int *bad)
+ 	b[6] = 20;					/* as scan_channels: 20 / 50 ms dwell, all BSS reports */
+ 	b[8] = 50;
+ 	b[10] = 3;
+-	b[11] = 1;
++	b[11] = 0;					/* flags 0, as the System Menu (x04) */
+ 	mbox_out(1, 1, WMI_SET_SCAN_PARAMS_CMD, b, 20, bad);
+ 	memset(b, 0, sizeof(b));
+ 	b[0] = 1;
+-- 
+2.56.1
+

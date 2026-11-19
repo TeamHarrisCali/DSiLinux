@@ -1493,3 +1493,21 @@ log line: every "scan complete" carries status 16, A_ECANCELED in the Atheros st
 the power-on scan's channels 2-11 too. So no scan ever ran: the networks listed came from beacons the radio heard passively on channel
 1 (the old "it only ever sees channel 1" from w98m-w98s). The x-series pre-join scan, which forces a foreground scan, did get reports.
 x03, patch 0159: scan_channels starts every scan with forceFgScan 1 (dswifi sends 0).
+
+### Forced scans still cancelled; Nintendo's scan flags from the dump (x04)
+
+User (x03): Wi-Fi still not working: "use bios/firmware... always reference it when working with the DSi". The x03 log: forceFgScan 1
+changed nothing, every channel but 1 still "scan complete" status 16. The user's dump:
+- **DSi Settings (HNBE)** has the connection setup, but it is modcrypted (header 0x1C bit 1), so it cannot be read directly.
+- **The System Menu (HNAE) ARM7i** has the Atheros WMI layer: strings "WMI CONTROL" and "sdio_wlan". The code is relocated, at file
+  address + 0x857ffc.
+  - WMI command send: 0x2f440f8 (wmi, buffer, command, sync).
+  - Builders: SET_SCAN_PARAMS (8) at 0x2f44234 (20 bytes, the ath6kl layout), SET_POWER_MODE (0x12) at 0x2f442d4, ADD_CIPHER_KEY
+    (0x16, 45 bytes), 0x18 (16 bytes), SYNCHRONIZE (4), CREATE_PSTREAM (5, 63 bytes), 0x49 (8 bytes), DISCONNECT (3), WMIX (0x2e).
+  - It has no START_SCAN or CONNECT: the System Menu does not scan or join by itself.
+  - Its only SET_SCAN_PARAMS call (0x2f41134, at initialisation): fg_start, fg_end and bg 0xFFFF, minact 0, maxact 20, pas 50,
+    short scan ratio 3, **scan control flags 0**. Then power mode 1.
+- **Ours (from dswifi):** flags 1 (CONNECT_SCAN) before every channel scan, so the firmware cancels the scan as a connect scan with
+  no connect.
+
+x04, patch 0160: scan_channels and the pre-join scan use flags 0; the connect keeps its own parameters.

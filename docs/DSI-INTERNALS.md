@@ -184,3 +184,13 @@ the count wrongly and never set RF register 1 (fixed in w97y, patch 0100). dump
 - **WPA2 Wi-Fi**: the Atheros firmware (HNCA) is available from the SDNAND copy without any decryption; BlocksDS's dswifi (MIT) shows the SDIO
   and WMI side.
 - **Exact hardware constants** (Wi-Fi calibration, RF type) can be checked against the flash dump instead of guessing, as for the channel bug.
+
+## The System Menu's Wi-Fi (WMI) code (read 2026-11-19, the user's dump)
+
+The System Menu's ARM7i (HNAE, not modcrypted) carries the Atheros WMI layer. Its code is relocated at run time: file address +
+0x857ffc.
+- WMI command send: 0x2f440f8 (wmi, buffer, command, sync flag).
+- SET_SCAN_PARAMS builder: 0x2f44234 (the ath6kl 20-byte layout).
+- At initialisation (0x2f41134) it sets periods 0xFFFF, dwell 20 / 50 ms, ratio 3, scan control flags 0, then power mode 1.
+- No START_SCAN or CONNECT in this copy.
+- DSi Settings (HNBE) does the connection setup but is modcrypted. dsiwifi.c follows these values (x04).
