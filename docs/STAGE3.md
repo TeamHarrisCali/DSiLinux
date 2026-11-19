@@ -1485,3 +1485,11 @@ window, in the packet thread) completed at once with 0 reports on all channels, 
 involved). Only do_connect set WMI_SET_POWER_MODE 2 (maximum performance); a scan some time after power-on runs under the
 firmware's default power save. An earlier log had the same pattern once ("0 networks", then 6 after a connect). x02, patch 0158:
 wmi_scan sets power mode 2 first; a scan-complete status other than 0 is logged.
+
+### Every scan was cancelled: force foreground scans (x03)
+
+User (x02): Scan with Wi-Fi already on lists nothing; Scan with Wi-Fi off (switching it on) does; a join ran past 40 s. x02's new
+log line: every "scan complete" carries status 16, A_ECANCELED in the Atheros status list (A_OK 0 ... A_EMSGSIZE 15, A_ECANCELED 16),
+the power-on scan's channels 2-11 too. So no scan ever ran: the networks listed came from beacons the radio heard passively on channel
+1 (the old "it only ever sees channel 1" from w98m-w98s). The x-series pre-join scan, which forces a foreground scan, did get reports.
+x03, patch 0159: scan_channels starts every scan with forceFgScan 1 (dswifi sends 0).

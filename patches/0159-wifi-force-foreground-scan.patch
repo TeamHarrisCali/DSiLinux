@@ -1,0 +1,40 @@
+From 6ad9ebebe18547fcac833e97037df5dbcbf6a9b5 Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 13:38:40 -0600
+Subject: [PATCH] DSi Wi-Fi: force foreground scans; every scan was cancelled
+ (x03)
+
+Each scan completed at once with status 16 (A_ECANCELED); the lists came from
+beacons heard passively on channel 1. forceFgScan 1 as in the pre-join scan.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ linux-2.6.x/arch/arm/mach-nds/dsiwifi.c | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/linux-2.6.x/arch/arm/mach-nds/dsiwifi.c b/linux-2.6.x/arch/arm/mach-nds/dsiwifi.c
+index 2d05917d2..126db2908 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/dsiwifi.c
++++ b/linux-2.6.x/arch/arm/mach-nds/dsiwifi.c
+@@ -572,7 +572,7 @@ static void handle_pkt(unsigned int hdr, int *ev_scan_done)
+ 		break;
+ 	case WMI_SCAN_COMPLETE_EVENT:			/* u32 status: 0 ok */
+ 		if (rx[8] | rx[9] | rx[10] | rx[11])
+-			lg("  scan complete with status %u\n", rx[8] | (rx[9] << 8), 0, 0);
++			lg("  scan complete with status %u (16: cancelled)\n", rx[8] | (rx[9] << 8), 0, 0);
+ 		scan_done = 1;
+ 		if (ev_scan_done)
+ 			*ev_scan_done = 1;
+@@ -689,6 +689,9 @@ static noinline void scan_channels(int *bad)
+ 		b[0] = 1;					/* all BSSs */
+ 		mbox_out(1, 1, WMI_SET_BSS_FILTER_CMD, b, 8, bad);
+ 		memset(b, 0, sizeof(b));
++		/* force a foreground scan (x03): without it (dswifi's 0) the firmware cancelled every scan at once, "scan complete" with
++		 * status 16 (A_ECANCELED) on every channel, and only what the radio heard passively on channel 1 was ever listed */
++		b[0] = 1;
+ 		b[8] = 20;					/* home dwell time */
+ 		mbox_out(1, 1, WMI_START_SCAN_CMD, b, 20, bad);
+ 		scan_done = 0;
+-- 
+2.56.1
+
