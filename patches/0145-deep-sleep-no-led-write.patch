@@ -1,0 +1,51 @@
+From 2cf3a15032edcae25cbc3753f39d110f155de937 Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 00:39:36 -0600
+Subject: [PATCH] Deep sleep: no LED-blink write before sleeping (w99o)
+
+w99n slept but the DSi then switched itself off. The System Menu never sets
+power-chip register 0 bit 0x10 (libnds's LED blink); only clear the amp bit.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ linux-2.6.x/arch/arm/mach-nds/arm7/main.c | 10 +++++++---
+ 1 file changed, 7 insertions(+), 3 deletions(-)
+
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/main.c b/linux-2.6.x/arch/arm/mach-nds/arm7/main.c
+index 35a5e086e..14cae3dd7 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/arm7/main.c
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/main.c
+@@ -98,6 +98,10 @@ int isDSPhat(void)
+  * Sleep stops the whole system, the ARM9 too; the ARM9 waits halted (screensleep.c) for the "awake" message, holding the SD lock, so no
+  * card or Wi-Fi request is in flight. Right after waking, the pending interrupt flags (IF, IF2) go to the ARM9 (data 0x4xxxx-0x7xxxx)
+  * for the kernel log: what woke it.
++ * w99n slept (the trace stopped at "writing deepsleep"), but the LEDs faded and the DSi switched off. It had written power-chip
++ * register 0 = 0x10 (libnds: "LED blink", everything else off). The DSi System Menu (user's dump, its register 0 helpers at 0x2f13294 /
++ * 0x2f132b8) only ever touches bits 0x01 (speaker amp), 0x04 / 0x08 (backlights) and 0x40 (power off), never 0x10; the DSi's power LED
++ * belongs to its power micro. So w99o only clears the amp bit and leaves the rest as it is.
+  */
+ #define NDS_IE2		(*(volatile u32*)0x04000218)	/* DSi: the second interrupt mask */
+ #define NDS_IF2		(*(volatile u32*)0x0400021C)
+@@ -124,8 +128,8 @@ static void arm7_sleep(void)
+ 	}
+ 	pm_ok = pm_xfer(0x80 | POWER_CONTROL, 0, &pm) && !(pm & POWER0_SYSTEM_POWER);
+ 	nds_fifo_send(FIFO_POWER_CMD(FIFO_POWER_CMD_SLEEP, 1));	/* the ARM9 halts now */
+-	if (pm_ok)
+-		pm_xfer(POWER_CONTROL, POWER0_LED_BLINK, 0);	/* speaker amp and backlights off, the power LED blinks (as libnds) */
++	if (pm_ok && (pm & POWER0_SOUND_AMP))
++		pm_xfer(POWER_CONTROL, pm & ~POWER0_SOUND_AMP, 0);	/* speaker amp off; backlights are off already */
+ 	sleep_delay(40000);			/* about 10 ms: the ARM9 is halted */
+ 	NDS_IE = IRQ_LID_OPEN;
+ 	NDS_IE2 = 0;
+@@ -138,7 +142,7 @@ static void arm7_sleep(void)
+ 	sleep_delay(400000);			/* about 100 ms to settle, as libnds */
+ 	NDS_IE = ie;
+ 	NDS_IE2 = ie2;
+-	if (pm_ok)
++	if (pm_ok && (pm & POWER0_SOUND_AMP))
+ 		pm_xfer(POWER_CONTROL, pm, 0);
+ 	nds_fifo_send(FIFO_POWER_CMD(FIFO_POWER_CMD_SLEEP, 0x40000 | (wif & 0xffff)));
+ 	nds_fifo_send(FIFO_POWER_CMD(FIFO_POWER_CMD_SLEEP, 0x50000 | (wif >> 16)));
+-- 
+2.56.1
+

@@ -1259,3 +1259,28 @@ from our own ARM7 code returned without sleeping.
   HALTCNT written by BIOS code; if the DSi ignores the write from elsewhere, that explains "0 s". It is safe from the handler (the
   dispatcher keeps I masked, see w99m). Right after waking it sends IF and IF2 to the ARM9; the kernel prints
   "deep sleep: N s; woken with IF ... IF2 ...".
+
+### w99n slept, then the DSi switched itself off (w99o)
+
+User (w99n): after `echo now > /tmp/sleep.request` the Wi-Fi and power LEDs got dimmer and dimmer, then the console was off. The trace
+ends at "log saved, writing deepsleep" (no "awake"): BIOS Sleep did stop the system this time (so the w99m write from our own code
+really was ignored). The fade is the power micro switching the DSi off.
+- **The System Menu (user's dump):**
+  - Its power-chip register 0 helpers (set 0x2f13294, clear 0x2f132b8) are only ever called with 0x01 (amp; PM commands 10/11),
+    0x04 / 0x08 / 0x0C (backlights; commands 4-9) and 0x40 (power off, command 14, after power micro register 0x11 = 2).
+    Never 0x10, the LED-blink bit libnds writes before sleep.
+  - The I2C driver: write 0x2f5884c, read 0x2f58b1c. Device 4 = the power micro (address table `7a 78 a0 e0 4a 40 90`, run address
+    0x37ac038 = file 0x2f5403c, so .data is relocated by +0x857ffc; device 4 has a 0x180 byte delay).
+  - Its power micro writes seen so far:
+    - 0x11 = 1 (reset) and 0x70 = 1 (reboot);
+    - 0x12 = 0 or 1 (in the reboot-to-title path);
+    - 0x11 = 2 (power off);
+    - bit 0 of 0x21;
+    - 0x30 bit 0 (Wi-Fi LED);
+    - 0x40 / 0x41.
+
+    None marks sleep.
+  - PM commands 1-3 only set an LED pattern state, played by a timer routine (0x2f13cc4 / 0x2f13b..).
+  - Its sleep path is still not found.
+- **w99o, patch 0145:** before sleeping the ARM7 only clears the amp bit (if set) and leaves register 0 otherwise as it is, then
+  restores it. One change at a time: if it now wakes on opening the lid, the LED-blink write was what made the power micro switch off.

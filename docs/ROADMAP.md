@@ -5,7 +5,8 @@ lists them, where each one stopped, and **every question still waiting for an an
 
 ## Where things stand
 
-- **On the card now: w99n** (2026-11-19): w99m's sleep ran every step and recovered cleanly but slept "0 s"; w99n sleeps through
+- **On the card now: w99o** (2026-11-19): w99n slept for real but the DSi then switched itself off; w99o no longer writes the LED-blink
+  bit before sleeping (the System Menu never does). Before that, w99n: w99m's sleep ran every step and recovered cleanly but slept "0 s"; w99n sleeps through
   BIOS SWI 7 and logs the wake reason. Before that, w99m: w99l's first try froze the desktop (two waits without a limit, now bounded; steps traced
   to `/home/sleep.trace`). **Deep sleep** (Settings > "Lid: sleep", or `echo now > /tmp/sleep.request` and close the
   lid within 30 s), not yet tried on the DSi. (w99k's `/boot/sleep` script was "Killed" at once: no memory for another shell; w99l

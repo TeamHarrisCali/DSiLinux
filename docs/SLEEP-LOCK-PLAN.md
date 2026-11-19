@@ -20,7 +20,11 @@ on-screen keypad; wrong PINs wait 1, 2, 4 ... 30 s. Stored hashed in `/home/.loc
   charger, and "Critical: off soon" at 1 (the clean shut down follows about 20 s later). Once per level; plugging in resets it.
 - `/proc/uptime` counts from boot (it showed the year-2000 date before).
 
-**w99n** (on the card, not yet tried): w99m ran every step and came back cleanly (Wi-Fi reconnected, lock screen, desktop), but
+**w99o** (on the card, not yet tried): w99n really slept (the trace stopped at "writing deepsleep"), but the LEDs faded and the DSi
+switched itself off. w99o drops the one thing the DSi System Menu never does (writing the old "LED blink" bit 0x10 of power-chip
+register 0); it only turns the speaker amp off. If it still switches off, the power micro needs a handshake still to be found in the dump.
+
+**w99n**: w99m ran every step and came back cleanly (Wi-Fi reconnected, lock screen, desktop), but
 slept "0 s": the ARM7's own write to HALTCNT returned at once. w99n makes the same write through BIOS Sleep (SWI 7), and the kernel log
 says what woke it ("woken with IF ... IF2 ...").
 
