@@ -1199,3 +1199,18 @@ User: "deep sleep please". w99k, patch 0141:
   - log again, and "dssettings wifi auto" if Wi-Fi was up and /home/wifi.auto exists.
 - **Settings:** a "Lid: off / sleep" button on the bottom row (lidsleep=1 in settings.conf, applied by `dssettings apply`). Test bed:
   fits, toggles.
+
+### w99k's /boot/sleep was killed; the sleep moves into dsautolog (w99l)
+
+User (w99k): `sleep 5; /boot/sleep` printed "Killed" right after the 5 s, and the DSi did not sleep. SIGKILL at the moment the script
+starts: the kernel could not load another shell for it (a flat binary needs its data and stack in one block; with the desktop and
+Wi-Fi up there was none big enough), or the out-of-memory killer. The kernel log was not available: SSH did not answer from the PC.
+w99l, patch 0142: no script. dsautolog does it in C:
+- udhcpc gets SIGTERM (found through /proc/PID/stat);
+- wlan0 goes down through SIOCSIFFLAGS;
+- sync, then the "sleep:" log lines (strftime, no `date`);
+- the "deepsleep" write;
+- after waking, `/boot/dssettings wifi auto` in the background, reaped with waitpid(WNOHANG) each tick.
+
+A test without lid sleep: `echo now > /tmp/sleep.request` (a shell built-in), then close the lid within 30 s (older requests are
+deleted). /boot/sleep removed from the ROM.

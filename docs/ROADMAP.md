@@ -5,8 +5,9 @@ lists them, where each one stopped, and **every question still waiting for an an
 
 ## Where things stand
 
-- **On the card now: w99k** (2026-11-18): **deep sleep** (Settings > "Lid: sleep", or `sleep 5; /boot/sleep` over SSH and close the
-  lid), not yet tried on the DSi. It includes w99j, also not yet tried:
+- **On the card now: w99l** (2026-11-18): **deep sleep** (Settings > "Lid: sleep", or `echo now > /tmp/sleep.request` and close the
+  lid within 30 s), not yet tried on the DSi. (w99k's `/boot/sleep` script was "Killed" at once: no memory for another shell; w99l
+  does the sleep inside dsautolog.) It includes w99j, also not yet tried:
   - the LCDs go off with the backlights (System Menu order, from the dump), with a guard that turns them back on if the display's
     frame interrupt stops;
   - a low-battery warning in the taskbar popup (level 3: "Battery low: plug in"; 1: "Critical: off soon");

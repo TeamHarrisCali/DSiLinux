@@ -1,0 +1,247 @@
+From ea237eb3f956c6e97b4a633019558031633edfb2 Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 23:59:40 -0600
+Subject: [PATCH] Deep sleep from dsautolog, not a script (w99l)
+
+w99k's /boot/sleep was killed at once on the DSi (no memory block for another
+shell with the desktop and Wi-Fi up). dsautolog now does it in C: SIGTERM to
+udhcpc, wlan0 down via SIOCSIFFLAGS, sync, log, 'deepsleep', then Wi-Fi Auto in
+the background. Test: 'echo now > /tmp/sleep.request', close the lid within
+30 s. /boot/sleep removed.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ vendors/Nintendo/DSI/Makefile    |   1 -
+ vendors/Nintendo/DSI/dsautolog.c | 141 ++++++++++++++++++++++++++++---
+ vendors/Nintendo/DSI/sleep       |  26 ------
+ 3 files changed, 131 insertions(+), 37 deletions(-)
+ delete mode 100755 vendors/Nintendo/DSI/sleep
+
+diff --git a/vendors/Nintendo/DSI/Makefile b/vendors/Nintendo/DSI/Makefile
+index d0dc60047..f9ce1f9da 100644
+--- a/vendors/Nintendo/DSI/Makefile
++++ b/vendors/Nintendo/DSI/Makefile
+@@ -118,7 +118,6 @@ romfs:
+ 	$(ROMFSINST) -p +x /boot/desktop-apps
+ 	$(ROMFSINST) -p +x /boot/session
+ 	$(ROMFSINST) -p +x /boot/shutdown
+-	$(ROMFSINST) -p +x /boot/sleep
+ 	$(ROMFSINST) -p +x /boot/gl
+ 	$(ROMFSINST) /$(FATFS)/linux/etc/issue
+ 	# copy some Nintendo specific files to romfs
+diff --git a/vendors/Nintendo/DSI/dsautolog.c b/vendors/Nintendo/DSI/dsautolog.c
+index e56dbab98..8c5b812e0 100644
+--- a/vendors/Nintendo/DSI/dsautolog.c
++++ b/vendors/Nintendo/DSI/dsautolog.c
+@@ -7,8 +7,11 @@
+  * Low battery (docs/SLEEP-LOCK-PLAN.md step 5): the DSi's power micro reports 15 (full), 11, 7, 3 (low), 1 (critical) and 0. At 1 or
+  * below, not charging, on two checks in a row (20 s), it runs /boot/shutdown (save the log, sync, power off) instead of letting the DSi
+  * lose power in the middle of a card write.
+- * Deep sleep (step 6): it reads /proc/dslid every second (cheap: no ARM7 request); when "lidsleep=1" (Settings > Lid closed: sleep)
+- * and the lid has stayed closed for 5 s, it runs /boot/sleep, which returns after the lid opens. Desktop or text console alike.
++ * Deep sleep (step 6): it reads /proc/dslid every second (cheap: no ARM7 request); when "lidsleep=1" (Settings > Lid: sleep) and the
++ * lid has stayed closed for 5 s, or when /tmp/sleep.request exists and the lid is closed (a test: "echo now > /tmp/sleep.request" is
++ * a shell built-in, then close the lid within 30 s), it puts the DSi to sleep itself (deep_sleep below). Desktop or text console alike.
++ * Done here, not in a script: with the desktop and Wi-Fi up, starting another shell (plus ifconfig, grep, killall, date) found no
++ * block of memory big enough and the kernel killed it (w99k's /boot/sleep: "Killed").
+  * Started by /boot/rc in the background; prints nothing (text from a background program would be drawn over the desktop).
+  * Built by scripts/build-tools.sh.
+  */
+@@ -23,6 +26,11 @@
+ #include <sys/types.h>
+ #include <sys/wait.h>
+ #include <sys/klog.h>
++#include <sys/ioctl.h>
++#include <sys/socket.h>
++#include <net/if.h>
++#include <signal.h>
++#include <dirent.h>
+ 
+ static const char *logs[] = {
+ 	"/tmp/desktop.log", "/tmp/dsnet.log", "/tmp/dsnet-dhcp.log", "/tmp/wifi-auto.log", "/tmp/wifi-ssh.log", "/tmp/clock.log",
+@@ -61,7 +69,7 @@ static int battery_critical(void)
+ 	return b >= 0 && b <= 1 && !c;
+ }
+ 
+-/* 1 when the lid is closed and lid sleep is on */
++/* 1 when the lid is closed and lid sleep is on; 2 when the lid is closed and a test sleep was asked for (/tmp/sleep.request) */
+ static int lid_sleep_wanted(void)
+ {
+ 	char b[96];
+@@ -74,7 +82,113 @@ static int lid_sleep_wanted(void)
+ 	if (n <= 0)
+ 		return 0;
+ 	b[n] = 0;
+-	return strstr(b, "lid=closed") && strstr(b, "lidsleep=1");
++	if (!strstr(b, "lid=closed"))
++		return 0;
++	if (access("/tmp/sleep.request", F_OK) == 0)
++		return 2;
++	return strstr(b, "lidsleep=1") ? 1 : 0;
++}
++
++static void logline(const char *what)
++{
++	FILE *f = fopen("/tmp/desktop.log", "a");
++	char t[16];
++	time_t now = time(NULL);
++
++	if (!f)
++		return;
++	strftime(t, sizeof(t), "%H:%M:%S", localtime(&now));
++	fprintf(f, "sleep: %s %s\n", t, what);
++	fclose(f);
++}
++
++/* wlan0's up flag: get (up < 0) or set it; returns 1 if it was up */
++static int wlan0_up(int up)
++{
++	struct ifreq ifr;
++	int s = socket(AF_INET, SOCK_DGRAM, 0), was = 0;
++
++	if (s < 0)
++		return 0;
++	memset(&ifr, 0, sizeof(ifr));
++	strncpy(ifr.ifr_name, "wlan0", IFNAMSIZ - 1);
++	if (ioctl(s, SIOCGIFFLAGS, &ifr) == 0) {
++		was = (ifr.ifr_flags & IFF_UP) != 0;
++		if (up >= 0 && was != up) {
++			if (up)
++				ifr.ifr_flags |= IFF_UP;
++			else
++				ifr.ifr_flags &= ~IFF_UP;
++			ioctl(s, SIOCSIFFLAGS, &ifr);	/* down: the driver gives the antenna back and stops its thread */
++		}
++	}
++	close(s);
++	return was;
++}
++
++/* SIGTERM to every process with this name (the DHCP client) */
++static void kill_named(const char *name)
++{
++	DIR *d = opendir("/proc");
++	struct dirent *e;
++	char path[40], buf[64];
++
++	if (!d)
++		return;
++	while ((e = readdir(d))) {
++		int fd, n, pid = atoi(e->d_name);
++
++		if (pid <= 0)
++			continue;
++		snprintf(path, sizeof(path), "/proc/%d/stat", pid);
++		fd = open(path, O_RDONLY);
++		if (fd < 0)
++			continue;
++		n = read(fd, buf, sizeof(buf) - 1);
++		close(fd);
++		if (n > 0) {
++			char *p;
++
++			buf[n] = 0;
++			p = strchr(buf, '(');
++			if (p && !strncmp(p + 1, name, strlen(name)) && p[1 + strlen(name)] == ')')
++				kill(pid, SIGTERM);
++		}
++	}
++	closedir(d);
++}
++
++/* Wi-Fi off, everything to the card, sleep until the lid opens, Wi-Fi Auto again (in the background) */
++static void deep_sleep(void)
++{
++	int wifi = wlan0_up(-1), fd, ok = 0;
++
++	if (wifi) {
++		kill_named("udhcpc");
++		wlan0_up(0);
++	}
++	logline(wifi ? "going to sleep (Wi-Fi was on)" : "going to sleep");
++	sync();
++	fd = open("/proc/dsisettings", O_WRONLY);
++	if (fd >= 0) {
++		ok = write(fd, "deepsleep\n", 10) == 10;	/* returns after the lid opens */
++		close(fd);
++	}
++	logline(ok ? "awake" : "refused (lid open?) or failed");
++	if (wifi && access("/home/wifi.auto", F_OK) == 0) {
++		pid_t pid = vfork();
++
++		if (pid == 0) {
++			int o = open("/tmp/wifi-auto.log", O_WRONLY | O_CREAT | O_TRUNC, 0644);
++
++			if (o >= 0) {
++				dup2(o, 1);
++				dup2(o, 2);
++			}
++			execl("/boot/dssettings", "/boot/dssettings", "wifi", "auto", (char *)0);
++			_exit(127);
++		}				/* not waited for: reaped in the main loop */
++	}
+ }
+ 
+ static void run(const char *path, const char *arg)
+@@ -112,13 +226,20 @@ int main(void)
+ 	}
+ 	last = signature();
+ 	for (;;) {
++		int w;
++		struct stat rs;
++
+ 		sleep(1);
+-		if (lid_sleep_wanted()) {
+-			if (++closed == 5) {
+-				run("/boot/sleep", (char *)0);	/* returns once the lid opens */
+-				closed = 0;
+-			}
+-		} else {
++		while (waitpid(-1, &w, WNOHANG) > 0)	/* the Wi-Fi Auto started after a sleep */
++			;
++		if (stat("/tmp/sleep.request", &rs) == 0 && time(NULL) - rs.st_mtime > 30)
++			unlink("/tmp/sleep.request");	/* a test request: the lid has 30 s to close */
++		w = lid_sleep_wanted();
++		if (w == 2 || (w == 1 && ++closed == 5)) {
++			unlink("/tmp/sleep.request");
++			deep_sleep();			/* returns once the lid opens */
++			closed = 0;
++		} else if (!w) {
+ 			closed = 0;
+ 		}
+ 		if (++tick < 10)
+diff --git a/vendors/Nintendo/DSI/sleep b/vendors/Nintendo/DSI/sleep
+deleted file mode 100755
+index 781103008..000000000
+--- a/vendors/Nintendo/DSI/sleep
++++ /dev/null
+@@ -1,26 +0,0 @@
+-#!/bin/sh
+-# Deep sleep while the lid is closed (docs/SLEEP-LOCK-PLAN.md step 6). dsautolog runs this when Settings > "Lid closed" is "sleep"
+-# (/proc/dslid lidsleep=1) and the lid has stayed closed for 5 seconds. By hand (over SSH): "sleep 5; /boot/sleep", then close the
+-# lid; it refuses with the lid open.
+-# The whole DSi stops (programs, the clock, SSH) until the lid opens. Before: Wi-Fi off (the chip may lose its firmware in sleep;
+-# a fresh start afterwards is the safe way) and everything written to the card. After: the clock moves on by the time slept (the kernel asks the clock chip), and Wi-Fi reconnects
+-# by itself if it was on and a network is set to Auto.
+-L=/tmp/desktop.log
+-[ -f /tmp/sleeping ] && exit 0
+-: > /tmp/sleeping
+-wifi=0
+-if ifconfig wlan0 2>/dev/null | grep -q " UP "; then
+-	wifi=1
+-	killall udhcpc 2>/dev/null
+-	ifconfig wlan0 down
+-fi
+-sync
+-echo "sleep: $(date '+%H:%M:%S') going to sleep (wifi was $wifi)" >> $L
+-sync
+-if echo deepsleep > /proc/dsisettings 2>/dev/null; then r=ok; else r=refused; fi
+-echo "sleep: $(date '+%H:%M:%S') awake ($r)" >> $L
+-rm -f /tmp/sleeping
+-if [ $wifi = 1 ] && [ -f /home/wifi.auto ] && [ -x /boot/dssettings ]; then
+-	/boot/dssettings wifi auto > /tmp/wifi-auto.log 2>&1 &
+-fi
+-exit 0
+-- 
+2.56.1
+

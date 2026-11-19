@@ -20,10 +20,13 @@ on-screen keypad; wrong PINs wait 1, 2, 4 ... 30 s. Stored hashed in `/home/.loc
   charger, and "Critical: off soon" at 1 (the clean shut down follows about 20 s later). Once per level; plugging in resets it.
 - `/proc/uptime` counts from boot (it showed the year-2000 date before).
 
-**w99k** (built, on the card, not yet tried on the DSi): **deep sleep (step 6)**, as the user asked ("deep sleep please",
-2026-11-18, which answers question E4):
-- **Settings > "Lid: off / sleep"** (bottom row; default off). With "sleep", once the lid has stayed closed for 5 s, `dsautolog`
-  runs `/boot/sleep`: Wi-Fi down if it was up, `sync`, then `echo deepsleep > /proc/dsisettings`, which returns when the lid opens.
+**w99l** (on the card, not yet tried on the DSi): **deep sleep (step 6)**, as the user asked ("deep sleep please", 2026-11-18,
+which answers question E4). w99k ran the sequence from a script, `/boot/sleep`; on the DSi it printed "Killed" at once. Starting
+another shell with the desktop and Wi-Fi up most likely found no block of memory big enough. w99l does it inside `dsautolog`,
+which is always running, so no program has to start before the sleep.
+- **Settings > "Lid: off / sleep"** (bottom row; default off). With "sleep", once the lid has stayed closed for 5 s, `dsautolog`:
+  takes Wi-Fi down if it was up (stops udhcpc, wlan0 down through the network ioctl), syncs, then writes `deepsleep` to
+  `/proc/dsisettings`, which returns when the lid opens.
   Afterwards the clock moves on by the time slept, and Wi-Fi reconnects by itself if it was on and a network is on Auto. Works from
   the desktop and the text console alike. With a PIN, the lock screen is already up (it starts 1 s after the lid closes).
 - **How:**
@@ -34,8 +37,9 @@ on-screen keypad; wrong PINs wait 1, 2, 4 ... 30 s. Stored hashed in `/home/.loc
   - Before: it refuses with the lid open, switches the speaker amp and backlights off and makes the LED blink (as libnds), and allows
     only "lid opened" to wake it.
   - After: about 100 ms to settle, then it restores everything and sends "awake".
-- **Test by hand over SSH** (lid sleep off): `sleep 5; /boot/sleep`, close the lid within 5 s, wait, open it. `cat /proc/dslid`
-  shows `sleeps=N`; the kernel log has `deep sleep: N s`; `/tmp/desktop.log` has the two "sleep:" lines.
+- **Test by hand** (lid sleep off): `echo now > /tmp/sleep.request` (a shell built-in: nothing new starts), then close the lid within
+  30 s; it sleeps within a second. Open it after a while. `cat /proc/dslid` shows `sleeps=N`; the kernel log has `deep sleep: N s`;
+  `/tmp/desktop.log` has the two "sleep:" lines.
 - **If it does not wake:** hold the power button (the power micro cuts the power by itself), then check the image on the PC
   (`scripts/rootfs-check.sh`). Nothing was being written: the disks were synced and the SD lock was held.
 - **Unknowns:**
