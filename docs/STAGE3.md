@@ -1294,3 +1294,27 @@ without the LED-blink write the power micro still switches the DSi off once the 
 - dssettings LID_BUTTON 0.
 
 The code stays for a later attempt (next steps in SLEEP-LOCK-PLAN.md).
+
+### Wi-Fi connect: three tries at every boot (w99q)
+
+The user chose Wi-Fi connect next. Card logs (w99l-w99o boots):
+- every boot sends the connect, hears nothing for 15 s, sends it again, nothing, and connects on the third (about 30 s);
+- one boot never connected: the retries stopped at 3, and the Wi-Fi window gave up at 100 s ("No answer from GuestNet");
+- the firmware is silent while waiting: no command error, no disconnect, no unknown event. Those would be logged, but the scan
+  had already used the 12 unknown-event lines.
+
+Compared with dswifi's wmi_connect (DSLinuxDSi-third-party/dswifi, arm7/twl/ath/wmi.twl.c): scan params (0xFFFF x3, 200, 200,
+3, flags 5, 200), channel params, synchronize 0x2008, power mode 2, pstream, WSC, disconnect timeout 5, keepalive and the connect
+command are the same byte for byte. Two differences:
+- dswifi sets the BSS filter to 4 ("current beacon") while joining; we set 0 (none).
+- dswifi never retries; we resent the connect on top of a pending one.
+
+w99q, patch 0147 (dsiwifi.c):
+- BSS filter 4 while joining, back to 0 once connected (filter_off_pending, in the thread);
+- a retry first sends WMI_DISCONNECT_CMD and waits 0.5 s;
+- retries every 10 s with no cap (the Wi-Fi window still cancels at 100 s);
+- each retry logs the time since the first attempt and the packets / BSS reports that arrived meanwhile;
+- the unknown-event log restarts at every attempt;
+- CONNECTED logs the attempt number and seconds.
+
+The next card log shows which of these mattered.

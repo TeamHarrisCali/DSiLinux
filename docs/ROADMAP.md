@@ -5,7 +5,10 @@ lists them, where each one stopped, and **every question still waiting for an an
 
 ## Where things stand
 
-- **On the card now: w99p** (2026-11-19): **deep sleep pinned** (the user's call): the ARM7 does sleep, but the DSi's power micro
+- **Wi-Fi connect (w99q, 2026-11-19, not yet tried):** every boot needed three connect attempts (about 30 s), and one gave up. w99q
+  joins as dswifi does (BSS filter 4 while joining), clears the firmware's previous attempt before a retry, retries every 10 s
+  without a cap, and logs everything the firmware says while joining.
+- **w99p** (2026-11-19): **deep sleep pinned** (the user's call): the ARM7 does sleep, but the DSi's power micro
   then switches the console off (w99n, w99o); w99p hides the Settings button and refuses it, details and next steps in
   SLEEP-LOCK-PLAN.md. Light sleep (screens off) is unchanged. History: w99n: w99m's sleep ran every step and recovered cleanly but slept "0 s"; w99n sleeps through
   BIOS SWI 7 and logs the wake reason. Before that, w99m: w99l's first try froze the desktop (two waits without a limit, now bounded; steps traced
@@ -139,7 +142,7 @@ Added 2026-11-18 at the user's request. Today it joins open networks, gets an ad
 | # | Item | Today | Idea | Check |
 |---|---|---|---|---|
 | 1 | **Speed** | about 17 KB/s (`wget` 2.3 MB in 2 min 15 s) | Two separate costs: the bus runs **1 bit wide** (the bring-up log says "bus 1-bit"; the chip can do 4) and data moves **one byte per command** (CMD52). 4-bit mode and CMD53 block transfers (up to 512 bytes per command) in the ARM7's SDIO code | the same `wget` many times faster |
-| 2 | **Connecting** | about 50 s: the chip answers only the third connect command | find why the first two are ignored (timing after the scan, a missing setup command); dswifi's order as the reference | joins within a few seconds |
+| 2 | **Connecting** | about 50 s: the chip answers only the third connect command | find why the first two are ignored (timing after the scan, a missing setup command); dswifi's order as the reference. **w99q** (untested): BSS filter 4 as dswifi, the previous attempt dropped before a retry, retries every 10 s without a cap, full logging | joins within a few seconds |
 | 3 | **WPA2** | built and the crypto verified on the DSi, but it has never joined a network (the hotspot was on a channel the old scan missed; w98v scans every channel) | a test on a WPA2 phone hotspot (2.4 GHz, channel 1-11). WorkNet cannot be the test: it asks for a username and password (WPA2-Enterprise) | DHCP and ping over WPA2 |
 | 4 | **Staying connected** | a dropped connection is not noticed or rejoined | rejoin after a disconnect event; signal strength in the tray; scan while connected | walk out of range and back: it rejoins by itself |
 | 5 | **Power** | the chip always runs at full power | its power-save mode while idle (ties in with the sleep plan) | longer battery life with Wi-Fi on |

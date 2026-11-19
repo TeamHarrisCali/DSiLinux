@@ -1,0 +1,112 @@
+From 7970310efa8146f1027e2b22da21d81b690631d6 Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 00:50:34 -0600
+Subject: [PATCH] DSi Wi-Fi: join like dswifi, retry cleanly, log the wait
+ (w99q)
+
+Every boot needed three connect attempts (about 30 s); one gave up after the
+third. BSS filter 4 (current beacon) while joining as dswifi, back to 0 once
+connected; a retry first drops the previous attempt (disconnect); retries
+every 10 s without a cap; firmware messages during the wait logged, and the
+attempt number and seconds on CONNECTED.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ linux-2.6.x/arch/arm/mach-nds/dsiwifi.c | 43 ++++++++++++++++++++++---
+ 1 file changed, 38 insertions(+), 5 deletions(-)
+
+diff --git a/linux-2.6.x/arch/arm/mach-nds/dsiwifi.c b/linux-2.6.x/arch/arm/mach-nds/dsiwifi.c
+index d0368ad03..dec64e6b2 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/dsiwifi.c
++++ b/linux-2.6.x/arch/arm/mach-nds/dsiwifi.c
+@@ -309,6 +309,9 @@ static char psk[64];				/* the passphrase (never logged; wiped at wlan0 down) */
+ static unsigned char pmk[32], ptk[48], anonce[32], snonce[32], ap_mac[6];
+ static unsigned long conn_at, health_at;	/* when the last connect was sent (0 = none pending), the last health check */
+ static int conn_tries;
++static unsigned long conn_first;		/* when the first connect of this request went out (the log: how long joining took) */
++static unsigned int conn_bss0, conn_rx0;	/* BSS reports and packets when it went out: what arrived while waiting */
++static volatile int filter_off_pending;		/* connected: BSS reports off again (in the thread, not in the event handler) */
+ static int connected;
+ static int unknown_logged;
+ 
+@@ -585,8 +588,10 @@ static void handle_pkt(unsigned int hdr, int *ev_scan_done)
+ 	case WMI_CONNECT_EVENT:				/* u16 channel (MHz), bssid[6], ... */
+ 		connected = 1;
+ 		conn_at = 0;
++		filter_off_pending = 1;
+ 		memcpy(ap_mac, rx + 10, 6);
+ 		lg("  CONNECTED on channel %u, BSSID ..:%02x:%02x\n", wifi_mhz_to_channel(rx[8] | (rx[9] << 8)), rx[14], rx[15]);
++		lg("  (connect attempt %u, %u s after the first)\n", conn_tries, conn_first ? (unsigned int)((jiffies - conn_first) / HZ) : 0, 0);
+ 		if (wpa2)
+ 			lg("  WPA2: waiting for the access point's handshake\n", 0, 0, 0);
+ 		else if (wdev)
+@@ -988,13 +993,33 @@ static noinline void probe_name(const char *ssid, int *bad)
+ 	mbox_out(1, 1, WMI_SET_PROBED_SSID_CMD, b, 35, bad);
+ }
+ 
+-/* dswifi's wmi_connect() for an open network */
++/*
++ * dswifi's wmi_connect() for an open network. w99q (the connect took three tries, about 30 s, at every boot; one boot gave up after
++ * 100 s because the retries stopped at 3): the BSS filter is dswifi's "current beacon" (4) while joining, back to none once connected
++ * (the beacon reports cost transfer time); a retry first tells the firmware to drop the previous attempt (disconnect), and retries go
++ * on every 10 s until it connects or the connect is cancelled (the Wi-Fi window gives up after 100 s). Every firmware message during
++ * the wait is logged.
++ */
+ static noinline void do_connect(void)
+ {
+ 	unsigned char b[64];
+ 	struct net2 *n = 0;
+ 	int i, bad = 0;
+ 
++	if (conn_tries <= 1) {
++		conn_first = jiffies;
++	} else {
++		int once = 0;
++
++		lg("connect: attempt %u, %u s after the first; meanwhile the firmware sent %u packets",
++		   conn_tries, (unsigned int)((jiffies - conn_first) / HZ), rx_count - conn_rx0);
++		lg(", %u of them BSS reports; dropping the previous attempt\n", bss_reports - conn_bss0, 0, 0);
++		mbox_out(1, 1, WMI_DISCONNECT_CMD, 0, 0, &bad);
++		pump(500, &once, &bad);			/* its answer (a disconnect event, logged) */
++	}
++	unknown_logged = 0;				/* log whatever the firmware says while joining */
++	conn_bss0 = bss_reports;
++	conn_rx0 = rx_count;
+ 	n = find_net();
+ 	if (!n)
+ 		return;
+@@ -1020,7 +1045,8 @@ static noinline void do_connect(void)
+ 			snprintf(line, sizeof(line), "connect: %s, any channel\n", n->ssid);
+ 		lgs(line);
+ 	}
+-	memset(b, 0, sizeof(b));				/* BSS filter: none (dswifi uses 4, "current beacon": a report per beacon) */
++	memset(b, 0, sizeof(b));				/* BSS filter 4, "current beacon", as dswifi while joining */
++	b[0] = 4;
+ 	mbox_out(1, 1, WMI_SET_BSS_FILTER_CMD, b, 8, &bad);
+ 	memset(b, 0, sizeof(b));				/* scan params 5, 200, 200, 200 */
+ 	for (i = 0; i < 6; i++)
+@@ -1137,11 +1163,18 @@ static int wthread(void *arg)
+ 		struct sk_buff *skb;
+ 		int i, bad = 0;
+ 
+-		/* no connect event 15 s after a connect: send it again (twice at most) */
+-		if (conn_at && !connected && time_after(jiffies, conn_at + 15 * HZ) && conn_tries < 3) {
+-			lg("connect: no connect event after 15 s (packets received so far %u): sending it again\n", rx_count, 0, 0);
++		/* no connect event 10 s after a connect: again, until it connects or is cancelled (do_connect drops the old attempt) */
++		if (conn_at && !connected && time_after(jiffies, conn_at + 10 * HZ)) {
++			lg("connect: no connect event after 10 s\n", 0, 0, 0);
+ 			conn_pending = 1;
+ 		}
++		if (filter_off_pending) {			/* connected: no more beacon reports (they cost transfer time) */
++			unsigned char fb[8];
++
++			filter_off_pending = 0;
++			memset(fb, 0, sizeof(fb));
++			mbox_out(1, 1, WMI_SET_BSS_FILTER_CMD, fb, 8, &bad);
++		}
+ 		/* every 3 s: the firmware's failure state (host interest +0x04, non-zero after a crash in the chip) */
+ 		if (cur_hi && time_after(jiffies, health_at + 3 * HZ)) {
+ 			unsigned int f = op(13, cur_hi + 0x04, 0, 0, 0, &bad);
+-- 
+2.56.1
+
