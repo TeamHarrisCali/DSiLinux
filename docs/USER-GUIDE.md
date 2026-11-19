@@ -26,7 +26,7 @@ How to use DSLinux on the DSi XL: the buttons, the desktop, every program, Wi-Fi
 
 ## Buttons and touch
 
-| Control | On the desktop | In the Game Boy emulator | In DOOM |
+| Control | On the desktop | (Game Boy, removed 2026-11-19) | In DOOM |
 |---|---|---|---|
 | d-pad | arrow keys | d-pad | move / turn |
 | A | Enter | A | fire (Enter in menus) |
@@ -66,19 +66,16 @@ itself to the new size; most other programs keep their layout.
 | Multimedia > Voice memos | `dsmemo` | buttons Rec / Stop / Play / < > / Del; memos are WAV files in `/home/memos` |
 | Multimedia > Sound test | `dsplay` | plays a scale; `dsplay file.wav` in the terminal plays a WAV |
 | Multimedia > 3D gears | `dsgl3d` | arrows turn, a = edge smoothing, c = culling, t = textured cube |
-| Games > 3D Dodge | `dsgame` | d-pad hops between the 9 cells; best score in `/home/dodge.best` |
 | Games > 3D Breakout | `dsarcade breakout` | pointer or left/right move the paddle, Enter / tap launches |
 | Games > Tron | `dsarcade tron` | left / right turn |
 | Games > 3D Maze | `dsarcade maze` | up / down walk, left / right turn, m = map; find the green cube |
-| Games > Game Boy | `dsgb` | pick a ROM from `/home/roms` (Enter or tap twice); buttons in the table above; saves as `.sav` next to the ROM |
 | Games > DOOM | `/home/doom/dsdoom` | shareware episode; buttons in the table above |
-| Games > Minesweeper, Tetris | `landmine`, `ntetris` | |
+| Games > Minesweeper | `landmine` | |
 | Puzzles > 2048, Sokoban, Sudoku, Life | `dsarcade ...` | arrows or swipes / taps; Sokoban: Space = undo, X / Y = level; Sudoku: tap a cell, then a digit; Life: tap or drag draws, Enter runs |
 | Network > Wi-Fi | `dssettings wifi` | the Wi-Fi window, see below (also a tap on the Wi-Fi bars in the tray) |
-| Network > Wi-Fi status, SSH server | `/boot/wifi-*` | see below |
-| Network > DSi Wi-Fi test | `/boot/wifi-dsi-test` | the DSi's own Wi-Fi chip (development, docs/ATHEROS-PLAN.md): needs the firmware file in the image (`scripts/add-dsi-wifi-fw.sh` on the PC); asks for a network name and password (empty password: an open network; WPA2: 8-63 characters, never written to the log), brings `wlan0` up, joins, DHCP, ping; result in the card log. `wlan0` stays up (`ifconfig wlan0 down` gives the antenna back to the DS Wi-Fi) |
+| Network > SSH server | `/boot/wifi-ssh` | see below |
 | System > Settings | `dssettings` | brightness, pointer speed, desktop colour / pattern / wallpaper (`/home/wallpapers`, photos), clock, info |
-| System > Bench, Save log | `dsbench`, `/boot/savelog` | |
+| System > Save log | `/boot/savelog` | |
 | (Terminal or SSH) | `dsfetch` | neofetch for the DSi: the system at a glance (`dsfetch -n`: no colours) |
 | (Terminal or SSH) | `memreport` | where the RAM goes: each program's memory, free memory by block size, the largest free block (a program needing more in one piece cannot start) |
 
@@ -90,13 +87,12 @@ sends four and ends by itself. (Up to w97y, pressing L and R together closed the
 
 ## Wi-Fi and SSH
 
-The DSi has two Wi-Fi chips sharing one antenna; the Wi-Fi window uses one at a time (button **DSi chip** / **DS chip**, key c):
+Wi-Fi uses the DSi's own chip. (The DSi also has the old DS chip, for open and WEP networks only; its support was removed on
+2026-11-19 to save memory, so the Wi-Fi window's **DS chip** button no longer finds a network.)
 
 - **DSi chip** (the default when its firmware file is installed, `scripts/add-dsi-wifi-fw.sh`): **open and WPA2 networks** on 2.4 GHz.
   Switching it on uploads its firmware and scans: up to a minute. Joining takes up to about a minute too. New (w98u), in development; joining an open network from the window works:
   its scan only sees networks on channel 1 so far, and WPA2 has not yet joined a network on the console (open networks work).
-- **DS chip**: **open or WEP networks** on 2.4 GHz (802.11b). A phone hotspot works if its security can be set to "None" (iPhones
-  cannot); a laptop hotspot works if it is open and allows 802.11b rates.
 
 Your PC must be on the same network for SSH.
 
@@ -109,10 +105,8 @@ Your PC must be on the same network for SSH.
    - **Auto** (key a) on a saved network: it is joined at every boot, in the background (up to a minute or two with the DSi chip);
      Auto again turns that off. The result is in the card log ("wifi auto: ...").
    - Keys: s or B = scan, w = Wi-Fi on/off, c = the other chip, a = auto at boot, f = forget, q / Esc = close.
-2. In the terminal: `/boot/wifi-scan` prints the same list (`cat /proc/dswifi` is the raw list), `/boot/wifi-connect` asks for name and key.
-   Tested: scan, connect, address by DHCP and `ping google.com` over a phone hotspot (open, 2.4 GHz) work (w97y).
-3. **Network > Wi-Fi status:** address, Wi-Fi state, routes. The tray shows the same at a glance.
-4. **Network > SSH server:** makes the host key once (about a minute) and starts the SSH server (inetd, which starts Dropbear for each
+2. The tray's Wi-Fi bars show the state at a glance (tap them for the details).
+3. **Network > SSH server:** makes the host key once (about a minute) and starts the SSH server (inetd, which starts Dropbear for each
    connection; from w98x, before that it never listened); it says "SSH server running" and the address, and runs until the DSi is
    switched off. Without a key, log in as root with the root password (DSLinux's default unless you changed it with `passwd`). Password logins are switched off as soon as
    `/home/.ssh/authorized_keys` exists (an RSA public key). The server is old; from a current PC:

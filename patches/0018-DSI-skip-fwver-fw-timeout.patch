@@ -1,0 +1,52 @@
+From 3e1646818353dcac2f6078928809e0ff0aaa6666 Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <noreply@example.invalid>
+Date: Tue, 10 Nov 2026 21:33:52 -0600
+Subject: [PATCH] DSI: skip fwver unless show_firmware_version_dsi=YES;
+ firmware MTD read times out after 5 s instead of waiting forever
+
+---
+ linux-2.6.x/drivers/mtd/devices/firmware.c | 10 ++++++++--
+ vendors/Nintendo/DSI/rc.common             |  6 ++++--
+ 2 files changed, 12 insertions(+), 4 deletions(-)
+
+diff --git a/linux-2.6.x/drivers/mtd/devices/firmware.c b/linux-2.6.x/drivers/mtd/devices/firmware.c
+index c7b221427..183c5c7a3 100644
+--- a/linux-2.6.x/drivers/mtd/devices/firmware.c
++++ b/linux-2.6.x/drivers/mtd/devices/firmware.c
+@@ -55,8 +55,14 @@ int firmware_read(struct mtd_info *mtd, loff_t from, size_t len,
+ 
+ 	nds_fifo_send(FIFO_FIRMWARE_CMD(FIFO_FIRMWARE_CMD_READ, 0));
+ 
+-	if(wait_event_interruptible(wait_queue, firmware_data_read)) {
+-		return -ERESTART;
++	/* never wait for the ARM7 forever (in DSi mode it may not answer) */
++	{
++		long left = wait_event_interruptible_timeout(wait_queue, firmware_data_read, 5 * HZ);
++
++		if (left == 0)
++			return -EIO;
++		if (left < 0)
++			return -ERESTART;
+ 	}
+ 
+ 	/* copy data to caller. Here better than in interrupt callback. */
+diff --git a/vendors/Nintendo/DSI/rc.common b/vendors/Nintendo/DSI/rc.common
+index b31881e77..ee6fad6db 100644
+--- a/vendors/Nintendo/DSI/rc.common
++++ b/vendors/Nintendo/DSI/rc.common
+@@ -179,8 +179,10 @@ else
+ 	echo "Extra terminals and gpm: off (extra_terminals is not YES)"
+ fi
+ 
+-# show firmware version if configured
+-[ "$show_firmware_version" = "YES" ] && fwver
++# DSLinuxDSi: the original runs fwver (reads the DS firmware version through the ARM7) when show_firmware_version is
++# YES, which is the default. In DSi mode that is where the boot stalled, so here it needs show_firmware_version_dsi="YES".
++echo "rc: firmware version"
++[ "$show_firmware_version_dsi" = "YES" ] && fwver
+ 
+ # run local startup script if it exists
+ [ -e /etc/rc.local ] && . /etc/rc.local
+-- 
+2.56.0
+

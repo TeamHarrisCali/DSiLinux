@@ -5,6 +5,11 @@ lists them, where each one stopped, and **every question still waiting for an an
 
 ## Where things stand
 
+- **How work is done from here on: [DEV-PROCESS.md](DEV-PROCESS.md)**: scripts/precheck.sh before every build, scripts/cardlog.sh to
+  read what the DSi recorded, one build per test cycle, risky features off by default.
+- **Optimization pass (w99s, 2026-11-19, built, not yet on the card):** about 477 KB more free RAM (smaller kernel and ROM, camera
+  and 3D buffers only while used), less idle polling, the old DS Wi-Fi chip and four apps (Bench, 3D Dodge, Tetris, Game Boy) removed.
+  Details and what is left in STAGE3.
 - **Wi-Fi connect (w99r, 2026-11-19, not yet tried):** joining took about 30 s at every boot. That is the firmware finishing the
   *first* connect, not "the third try": w99q's cancel-and-retry every 10 s never connected. The firmware does not listen while it
   waits (scans are off in the parameters dswifi uses). w99r scans the AP's channel right before the connect, never cancels a pending

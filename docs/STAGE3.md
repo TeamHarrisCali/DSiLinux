@@ -1335,3 +1335,52 @@ w99r, patch 0148:
 - the logging from w99q stays (the attempt bookkeeping in a noinline helper and do_connect's buffer static: gcc 4.0.4 crashed, "unrecognizable insn", twice).
 
 If the join is now quick, the log shows "CONNECTED ... attempt 1, N s".
+
+### Optimization pass and a development process (w99s, built, not yet on the card)
+
+User: "go through the entire project and optimize everything... devise a better plan of development". Three read-only audits
+(romfs contents, idle CPU, kernel size), then one batch. Every changed C file went through the new scripts/precheck.sh first.
+- **Measured on the build** (w99r to w99s):
+  - ROM image 3,419,648 to 2,931,200 bytes (477 KB less RAM held by the image);
+  - romfs 1,253,376 to 1,080,320;
+  - kernel text 1,509,156 to 1,440,792;
+  - kernel bss 506,020 to 270,360;
+  - ARM7 binary 46.9 KB to 32.6 KB (IWRAM).
+- **Kernel:**
+  - off: CONFIG_NDS_WIFI (the old DS chip; ARM7 wifi.o and its FIFO_WIFI cases now under #ifdef), NET_RADIO, INET_DIAG,
+    INET_TCP_DIAG, MTD_CHAR, HWMON, RTC (the PC CMOS driver, which poked 0x70/0x71 at boot);
+  - the DLDI stub dldi_s.o (32 KB placeholder plus buffers) is built only without CONFIG_NDS_DSISD;
+  - the camera's two frame buffers (192 KB) are allocated at the first frame and freed when the camera is switched off; the 3D
+    texture staging buffer (32 KB) at the first upload. kmalloc rounds each 96 KB frame up to 128 KB while the camera is in use.
+- **ROM:**
+  - removed: /boot/autolog, wifi-scan, wifi-connect, wifi-status, wifi-dsi-test, gl, and net-tools' arp and route (busybox's
+    route replaces it);
+  - busybox without vi, time, syslogd, telnetd, dos2unix and ipcalc;
+  - the /boot programs' data compressed (flthdr -d, flag 0x0a as busybox; their code still runs in place);
+  - finishrom deletes the retired files, because the romfs tree is not emptied between builds.
+- **Idle CPU:**
+  - dsautolog wakes every 10 s (was 1 s), reads the battery every 60 s (10 s once low), saves the card log at most once a
+    minute and otherwise every 30 min (was 5);
+  - dsdesk waits 1 s between ticks when no menu, tip or popup is open (was 0.3 s), with battery and Wi-Fi checks going by
+    the clock;
+  - the ARM7 skips the second touch-codec read when the status already says "not down", and polls the volume at 2.5 Hz (was 5);
+  - /proc/dsisettings no longer repeats its ARM7 request on the end-of-file read;
+  - the Wi-Fi receive path skips the 2 KB copy when there is no packet;
+  - the firmware health check runs every 30 s (was 3 s);
+  - logbody no longer runs the DS chip's ifconfig/iwconfig or /proc/dsiwifi (an ARM7 probe that switched the DS chip's power
+    and GPIO on every log save).
+- **Apps** (the user's choice): Bench, 3D Dodge, Tetris and Game Boy are removed from the Start menu. The next install deletes
+  them and the Game Boy ROMs (.gb / .gbc on the card and in /home/roms; .sav files kept).
+- **Not done yet** (each needs a test on the DSi):
+  - adaptive polling in the Wi-Fi packet thread (50-100 ARM7 requests a second while idle), or the SDIO card interrupt;
+  - building the card log in C inside dsautolog instead of savelog's ~65 program starts;
+  - sound buffers (192 KB) on demand;
+  - FAT/VFAT (51 KB, only for booting without ROOTFS.IMG);
+  - sysfs.
+- **Process** (docs/DEV-PROCESS.md):
+  - scripts/precheck.sh compiles a kernel file alone in the container in about a second (the ARM7 side as a whole), syntax-checks
+    the desktop programs and tools, and refuses file names .gitignore would block;
+  - scripts/cardlog.sh summarizes the card log and the sleep trace;
+  - release.sh ends with "SAFE TO REMOVE the card".
+  - precheck found patches/0018-DSI-skip-fwver-firmware-timeout.patch, never committed because its name contains "firmware";
+    renamed 0018-DSI-skip-fwver-fw-timeout.patch.

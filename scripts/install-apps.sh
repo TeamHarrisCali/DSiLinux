@@ -7,7 +7,10 @@
 . "$(dirname "$0")/card.sh"
 if [ "$1" = "-i" ]; then IMG="$2"; shift 2; fi
 cd "$(dirname "$0")/.."
-APPS="dsarcade dsgb dsmemo dsgl3d dscam dsgame ntetris landmine dsbench dsgx dsplay dsnotes dsfiles nxclock dslock"
+APPS="dsarcade dsmemo dsgl3d dscam landmine dsgx dsplay dsnotes dsfiles nxclock dslock"
+# removed at the user's choice (2026-11-19): Bench, 3D Dodge, Tetris, Game Boy. Deleted from the image at the next install, and the
+# Game Boy ROMs (sd:/linux/*.gb, *.gbc) with them
+RETIRED="dsbench dsgame ntetris dsgb"
 # DSLinux programs patched by this project, written as built (no RAM flag: code and data stay two smaller blocks, easier to find in
 # fragmented memory); scripts/fix-stacks.sh then sets their stacks
 SYSAPPS="tar nano"
@@ -25,6 +28,17 @@ scripts/in-container.sh "arm-linux-elf-flthdr -r $(for a in $APPS; do printf '/o
 CMDS=$(mktemp)
 for a in $APPS $SYSAPPS; do
 	printf 'rm /usr/bin/%s\nwrite %s/%s /usr/bin/%s\nsif /usr/bin/%s mode 0100755\n' $a "$STAGE" $a $a $a >> "$CMDS"
+done
+for a in $RETIRED; do
+	printf 'rm /usr/bin/%s\n' $a >> "$CMDS"
+done
+# the Game Boy ROMs in the image (/home/roms; their .sav saves are kept)
+for g in $(debugfs -R "ls -p /home/roms" "$IMG" 2>/dev/null | awk -F/ '$6 ~ /\.gbc?$/ {print $6}'); do
+	printf 'rm /home/roms/%s\n' "$g" >> "$CMDS"
+	echo "removing the Game Boy ROM /home/roms/$g (Game Boy app retired)"
+done
+for g in "$(dirname "$IMG")"/*.gb "$(dirname "$IMG")"/*.gbc; do
+	[ -f "$g" ] && { rm -f "$g"; echo "removed the Game Boy ROM $(basename "$g") (Game Boy app retired)"; }
 done
 debugfs -w -f "$CMDS" "$IMG" > /dev/null 2>&1
 rm -f "$CMDS"

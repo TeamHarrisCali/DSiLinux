@@ -1,0 +1,766 @@
+From cf0bc62e8b85d9bb76c3f1ad0de1f5e072995a7e Mon Sep 17 00:00:00 2001
+From: TeamHarrisCali <34009957+TeamHarrisCali@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 01:22:11 -0600
+Subject: [PATCH] Optimization pass: 477 KB more free RAM, less idle polling
+ (w99s)
+
+Kernel: old DS Wi-Fi (NDS_WIFI, ARM7 wifi.o under #ifdef), NET_RADIO, INET_DIAG,
+MTD_CHAR, HWMON and the PC RTC off; DLDI stub only without DSISD; camera frame
+buffers and 3D texture staging allocated on demand. ROM: retired boot scripts,
+net-tools arp/route (busybox route), busybox vi/time/syslogd/telnetd/dos2unix/
+ipcalc removed; /boot program data compressed. Idle: dsautolog 10 s tick, battery
+60 s, log saves at most once a minute / every 30 min; dsdesk 1 s idle wait;
+ARM7 single touch read when up, volume 2.5 Hz; no repeated ARM7 request on
+/proc/dsisettings EOF; no empty Wi-Fi rx copy; health check 30 s; logbody drops
+the DS chip probes. Start menu: Bench, 3D Dodge, Tetris, Game Boy removed.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ linux-2.6.x/arch/arm/mach-nds/Makefile        |  4 +--
+ linux-2.6.x/arch/arm/mach-nds/arm7/dsitouch.c |  8 +++--
+ linux-2.6.x/arch/arm/mach-nds/arm7/dsivol.c   |  4 +--
+ linux-2.6.x/arch/arm/mach-nds/arm7/main.c     |  4 +++
+ linux-2.6.x/arch/arm/mach-nds/dsiwifi.c       |  4 +--
+ linux-2.6.x/arch/arm/mach-nds/volume.c        |  4 +++
+ linux-2.6.x/drivers/block/Makefile            |  6 +++-
+ linux-2.6.x/drivers/block/dldi_c.c            |  8 ++++-
+ linux-2.6.x/drivers/video/ndsfb.c             | 34 +++++++++++++++----
+ user/microwin/src/demos/nanox/dsdesk.c        | 34 +++++++++++--------
+ vendors/Nintendo/DSI/Makefile                 | 12 +++----
+ vendors/Nintendo/DSI/config.linux-2.6.x       | 34 ++++++-------------
+ vendors/Nintendo/DSI/config.vendor            | 18 +++++-----
+ vendors/Nintendo/DSI/dsautolog.c              | 23 ++++++++++---
+ vendors/Nintendo/DSI/logbody                  |  7 ----
+ vendors/Nintendo/DSI/rc                       |  7 ++--
+ 16 files changed, 124 insertions(+), 87 deletions(-)
+
+diff --git a/linux-2.6.x/arch/arm/mach-nds/Makefile b/linux-2.6.x/arch/arm/mach-nds/Makefile
+index 9798af6be..f492bf0c5 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/Makefile
++++ b/linux-2.6.x/arch/arm/mach-nds/Makefile
+@@ -21,7 +21,7 @@ extra-y += arm7/time.o
+ extra-y += arm7/spi.o
+ extra-y += arm7/sound.o
+ extra-y += arm7/microphone.o
+-extra-y += arm7/wifi.o
++extra-$(CONFIG_NDS_WIFI) += arm7/wifi.o
+ extra-y += arm7/divide.o
+ extra-y += arm7/sdmmc.o
+ extra-y += arm7/dsitouch.o
+@@ -40,7 +40,7 @@ $(obj)/arm7.bin: $(obj)/arm7.elf
+ 	$(OBJCOPY) -O binary $(obj)/arm7.elf $(obj)/arm7.bin
+ 	rm -f $(obj)/head.o
+ 
+-arm7obj = $(obj)/arm7/head.o $(obj)/arm7/main.o $(obj)/arm7/time.o $(obj)/arm7/spi.o $(obj)/arm7/sound.o $(obj)/arm7/microphone.o $(obj)/arm7/wifi.o $(obj)/arm7/divide.o $(obj)/arm7/sdmmc.o $(obj)/arm7/dsitouch.o $(obj)/arm7/dsivol.o $(obj)/arm7/dsicam.o $(obj)/arm7/wifiprobe.o $(obj)/arm7/twlwifi.o
++arm7obj = $(obj)/arm7/head.o $(obj)/arm7/main.o $(obj)/arm7/time.o $(obj)/arm7/spi.o $(obj)/arm7/sound.o $(obj)/arm7/microphone.o $(if $(CONFIG_NDS_WIFI),$(obj)/arm7/wifi.o) $(obj)/arm7/divide.o $(obj)/arm7/sdmmc.o $(obj)/arm7/dsitouch.o $(obj)/arm7/dsivol.o $(obj)/arm7/dsicam.o $(obj)/arm7/wifiprobe.o $(obj)/arm7/twlwifi.o
+ 
+ $(obj)/arm7.elf: $(arm7obj) $(src)/arm7/arm7.lds
+ 	$(LD) -nostartfiles -nostdlib -o $(obj)/arm7.elf $(arm7obj) -T $(src)/arm7/arm7.lds
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/dsitouch.c b/linux-2.6.x/arch/arm/mach-nds/arm7/dsitouch.c
+index dfeb69f25..95b32280e 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/arm7/dsitouch.c
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/dsitouch.c
+@@ -187,11 +187,15 @@ int dsitouch_active(void)
+ int dsitouch_pen_down(void)
+ {
+ 	u8 status = cdc_read(CDC_TOUCHCNT, R_STATUS);
+-	u8 pen = cdc_read(CDC_TOUCHCNT, R_PEN_DOWN);
+-	int down = (status & 0xC0) != 0x40 && !(pen & 0x02);
++	u8 pen;
++	int down;
+ 
+ 	st_pen_calls++;
+ 	st_status = status;
++	if ((status & 0xC0) == 0x40)		/* not down, whatever the pen register says: one SPI read per frame instead of two */
++		return 0;
++	pen = cdc_read(CDC_TOUCHCNT, R_PEN_DOWN);
++	down = !(pen & 0x02);
+ 	st_penreg = pen;
+ 	if (down)
+ 		st_pen_true++;
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/dsivol.c b/linux-2.6.x/arch/arm/mach-nds/arm7/dsivol.c
+index 0b5c46d2e..e6187565c 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/arm7/dsivol.c
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/dsivol.c
+@@ -207,10 +207,10 @@ void dsivol_poll(void)
+ 	static int count;
+ 	int v;
+ 
+-	if (++count < 12)
++	if (++count < 24)		/* 2.5 times a second (was 5): an I2C read with deliberate delays each time */
+ 		return;
+ 	if (mic_running()) {		/* a recording is more important than the volume popup: the I2C read takes ms */
+-		count = 11;
++		count = 23;	/* try again next frame */
+ 		return;
+ 	}
+ 	count = 0;
+diff --git a/linux-2.6.x/arch/arm/mach-nds/arm7/main.c b/linux-2.6.x/arch/arm/mach-nds/arm7/main.c
+index 14cae3dd7..b9c5472b7 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/arm7/main.c
++++ b/linux-2.6.x/arch/arm/mach-nds/arm7/main.c
+@@ -300,6 +300,7 @@ static void recieveFIFOCommand(void)
+ 				break;
+ 			}
+ 			break;
++#ifdef CONFIG_NDS_WIFI	/* the old DS Wi-Fi chip (removed 2026-11-19: the DSi chip is used) */
+ 		case FIFO_WIFI:
+ 			cmd = FIFO_WIFI_GET_CMD(data);
+ 			switch (cmd) {
+@@ -384,6 +385,7 @@ static void recieveFIFOCommand(void)
+ 				Wifi_GetAPMode();
+ 				break;
+ 			}
++#endif
+ 		}
+ 	}
+ }
+@@ -481,12 +483,14 @@ void InterruptHandler(void)
+ 		wif &= ~IRQ_VBLANK;
+ 	}
+ 
++#ifdef CONFIG_NDS_WIFI
+ 	if (wif & IRQ_TIMER0) {
+ 		/* Acknowledge Interrupt */
+ 		NDS_IF = IRQ_TIMER0;
+ 		wif &= ~IRQ_TIMER0;
+ 		wifi_timer_handler();
+ 	}
++#endif
+ 	
+ 	if (wif & IRQ_TIMER3) {
+ 		/* Acknowlege Interrupt, send interrupt to mic */
+diff --git a/linux-2.6.x/arch/arm/mach-nds/dsiwifi.c b/linux-2.6.x/arch/arm/mach-nds/dsiwifi.c
+index 06d68197a..132977470 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/dsiwifi.c
++++ b/linux-2.6.x/arch/arm/mach-nds/dsiwifi.c
+@@ -1208,8 +1208,8 @@ static int wthread(void *arg)
+ 			memset(fb, 0, sizeof(fb));
+ 			mbox_out(1, 1, WMI_SET_BSS_FILTER_CMD, fb, 8, &bad);
+ 		}
+-		/* every 3 s: the firmware's failure state (host interest +0x04, non-zero after a crash in the chip) */
+-		if (cur_hi && time_after(jiffies, health_at + 3 * HZ)) {
++		/* every 30 s: the firmware's failure state (host interest +0x04, non-zero after a crash in the chip) */
++		if (cur_hi && time_after(jiffies, health_at + 30 * HZ)) {	/* every 30 s (was 3 s: an SDIO read each time) */
+ 			unsigned int f = op(13, cur_hi + 0x04, 0, 0, 0, &bad);
+ 
+ 			health_at = jiffies;
+diff --git a/linux-2.6.x/arch/arm/mach-nds/volume.c b/linux-2.6.x/arch/arm/mach-nds/volume.c
+index e088562c8..426a84f0b 100644
+--- a/linux-2.6.x/arch/arm/mach-nds/volume.c
++++ b/linux-2.6.x/arch/arm/mach-nds/volume.c
+@@ -113,6 +113,10 @@ static int settings_read_proc(char *page, char **start, off_t off, int count, in
+ 	unsigned int o[3] = { 0xffffffff, 0xffffffff, 0xffffffff };
+ 	int len, bat, chg, vol, bl;
+ 
++	if (off > 0) {			/* the read after the line (end of file): no second ARM7 request (3 I2C reads) for nothing */
++		*eof = 1;
++		return 0;
++	}
+ 	if (dsisd_pm(0, 0, o) != 0)
+ 		o[0] = o[1] = o[2] = 0xffffffff;
+ 	bat = o[0] == 0xffffffff ? -1 : (int)(o[0] & 15);
+diff --git a/linux-2.6.x/drivers/block/Makefile b/linux-2.6.x/drivers/block/Makefile
+index 581783a9d..8ffa53b5a 100644
+--- a/linux-2.6.x/drivers/block/Makefile
++++ b/linux-2.6.x/drivers/block/Makefile
+@@ -14,7 +14,11 @@
+ #
+ 
+ obj-y	:= elevator.o ll_rw_blk.o ioctl.o genhd.o scsi_ioctl.o
+-dldi-y  := dldi_c.o dldi_s.o
++dldi-y  := dldi_c.o
++# the DLDI stub (32 KB placeholder for a slot-1 driver, 4 KB buffers): unused with the DSi's own SD path (2026-11-19, 37 KB RAM)
++ifneq ($(CONFIG_NDS_DSISD),y)
++dldi-y  += dldi_s.o
++endif
+ 
+ obj-$(CONFIG_IOSCHED_NOOP)	+= noop-iosched.o
+ obj-$(CONFIG_IOSCHED_AS)	+= as-iosched.o
+diff --git a/linux-2.6.x/drivers/block/dldi_c.c b/linux-2.6.x/drivers/block/dldi_c.c
+index ef0c195ec..25b80f30e 100644
+--- a/linux-2.6.x/drivers/block/dldi_c.c
++++ b/linux-2.6.x/drivers/block/dldi_c.c
+@@ -53,6 +53,7 @@ struct IO_INTERFACE_STRUCT {
+ 	FN_MEDIUM_SHUTDOWN	fn_shutdown ;
+ } ;
+ 
++#ifndef CONFIG_NDS_DSISD	/* the DLDI stub (dldi_s.S) is only built without the DSi's own SD path */
+ extern struct IO_INTERFACE_STRUCT _io_dldi;
+ 
+ struct dldi_params {
+@@ -70,6 +71,7 @@ extern struct dldi_params _param_dldi;
+ extern int _call_dldi(void);
+ 
+ extern char _buf_dldi[];
++#endif
+ 
+ /*
+  * Minor number.
+@@ -336,7 +338,7 @@ int dsisd_twlop_rx(unsigned int op, unsigned int addr, unsigned int arg, const u
+ 		out[3 + i] = sd_block.touch[i];
+ 		out[11 + i] = sd_block.diag[i];
+ 	}
+-	if (op == 12 && ret == 0 && rxbuf)		/* a received mailbox packet */
++	if (op == 12 && ret == 0 && rxbuf && sd_block.info[1] != 5)	/* a received mailbox packet (5 = none: nothing to copy) */
+ 		memcpy(rxbuf, sd_block.data, sizeof(sd_block.data));
+ 	up(&sd_mutex);
+ 	return ret;
+@@ -738,6 +740,7 @@ static void dldi_transfer(struct dldi_dev *dev, unsigned long sector,
+ 	dsisd_transfer(sector, nsect, buffer, write);
+ 	return;
+ #endif
++#ifndef CONFIG_NDS_DSISD
+ 	while (nsect > 0) {
+ 		sectors = nsect;
+ 		if (sectors > (BUF_SIZE/SECTOR_SIZE))
+@@ -768,6 +771,7 @@ static void dldi_transfer(struct dldi_dev *dev, unsigned long sector,
+ 		nsect  -= sectors;
+ 		buffer += (sectors * SECTOR_SIZE);
+ 	}
++#endif
+ }
+ 
+ /*
+@@ -1067,12 +1071,14 @@ static void dldi_exit(void)
+ 		return;
+ 	cancel_delayed_work(&dev->dldi_work);
+ 
++#ifndef CONFIG_NDS_DSISD
+ 	/* Shutdown the interface */
+ 	_param_dldi.function = _io_dldi.fn_shutdown;
+ 	ret = _call_dldi();
+ 	if (ret == 0) {
+ 		printk(KERN_ERR "dldi: fn_shutdown failure\n");
+ 	}
++#endif
+ 
+ 	if (dev->gd) {
+ 		del_gendisk(dev->gd);
+diff --git a/linux-2.6.x/drivers/video/ndsfb.c b/linux-2.6.x/drivers/video/ndsfb.c
+index 7c2725f5d..177730068 100644
+--- a/linux-2.6.x/drivers/video/ndsfb.c
++++ b/linux-2.6.x/drivers/video/ndsfb.c
+@@ -269,7 +269,7 @@ static volatile unsigned int ndsfb_vblank_count;
+  * and a picture that is being drawn then loses scanlines (black lines across it). The vertical blank gap is about 4 ms; a program
+  * cannot hit it reliably, so it hands the data over and this interrupt does the copy at the very start of the gap. */
+ #define TEX_STAGE_BYTES	32768
+-static u32 tex_stage[TEX_STAGE_BYTES / 4];
++static u32 *tex_stage;		/* allocated at the first texture upload (2026-11-19: 32 KB of RAM only for programs that use 3D) */
+ static volatile unsigned int tex_pend_bytes, tex_pend_off;
+ 
+ static void ndsfb_tex_commit(void)
+@@ -474,8 +474,11 @@ extern int dsisd_camera_cmd(unsigned int sub, unsigned int arg, unsigned int *va
+ #define NDMA_BDELAY(n)	(*(volatile u32 *)(0x04004114 + (n) * 0x1C))
+ #define NDMA_CR(n)	(*(volatile u32 *)(0x0400411C + (n) * 0x1C))
+ 
+-/* two frame buffers: while the user program gets one, the next frame is already being captured into the other */
+-static u16 cam_frame[2][CAM_FRAME_W * CAM_FRAME_H] __attribute__((aligned(32)));
++/* two frame buffers: while the user program gets one, the next frame is already being captured into the other. Allocated at the
++ * first frame and freed when the camera is switched off (2026-11-19: 192 KB of RAM was reserved all the time; kmalloc gives page
++ * aligned blocks, so the 32 byte DMA alignment holds) */
++#define CAM_FRAME_BYTES	(CAM_FRAME_W * CAM_FRAME_H * 2)
++static u16 *cam_frame[2];
+ static int cam_cur;			/* the buffer being filled by the running capture */
+ static int cam_armed;			/* a capture is running (or finished and not yet collected) */
+ static unsigned long cam_t_arm_us, cam_t_done_us;
+@@ -497,7 +500,7 @@ static void cam_arm(int b)
+ 	REG_CAM_CNT |= CAM_CNT_FORMAT_RGB | 3;		/* RGB out, 4 scanlines per block */
+ 	REG_CAM_CNT |= CAM_CNT_FLUSH;
+ 	REG_CAM_CNT |= CAM_CNT_ENABLE;
+-	dmac_flush_range((unsigned long)cam_frame[b], (unsigned long)cam_frame[b] + sizeof(cam_frame[b]));
++	dmac_flush_range((unsigned long)cam_frame[b], (unsigned long)cam_frame[b] + CAM_FRAME_BYTES);
+ 	NDMA_SRC(CAM_NDMA) = 0x04004204;		/* REG_CAM_DATA */
+ 	NDMA_DEST(CAM_NDMA) = (u32)cam_frame[b];
+ 	NDMA_LENGTH(CAM_NDMA) = (CAM_FRAME_W * CAM_FRAME_H) >> 1;
+@@ -533,6 +536,9 @@ static void ndsfb_cam_off(void)
+ 	udelay(200);
+ 	cam_preview_set = 0;
+ 	cam_disarm();
++	kfree(cam_frame[0]);			/* the frame buffers go back until the camera is used again */
++	kfree(cam_frame[1]);
++	cam_frame[0] = cam_frame[1] = NULL;
+ }
+ 
+ static int ndsfb_cam_cmd(struct ndsfb_cam __user *arg)
+@@ -608,6 +614,20 @@ static int ndsfb_cam_frame(void __user *dst)
+ 		}
+ 		cam_preview_set = 1;
+ 	}
++	if (!cam_frame[0] || !cam_frame[1]) {
++		kfree(cam_frame[0]);
++		kfree(cam_frame[1]);
++		cam_frame[0] = kmalloc(CAM_FRAME_BYTES, GFP_KERNEL);
++		cam_frame[1] = kmalloc(CAM_FRAME_BYTES, GFP_KERNEL);
++		if (!cam_frame[0] || !cam_frame[1]) {
++			kfree(cam_frame[0]);
++			kfree(cam_frame[1]);
++			cam_frame[0] = cam_frame[1] = NULL;
++			printk(KERN_WARNING "ndsfb: no memory for the camera's frame buffers\n");
++			ret = -ENOMEM;
++			goto out;
++		}
++	}
+ 	if (!cam_armed)
+ 		cam_arm(cam_cur);
+ 	/* wait for the capture. Frames come about every 66 ms; sleep for most of it, then poll closely, so the next capture is
+@@ -634,10 +654,10 @@ static int ndsfb_cam_frame(void __user *dst)
+ 	filled = cam_cur;
+ 	cam_cur ^= 1;
+ 	cam_arm(cam_cur);			/* the next frame starts at once, into the other buffer */
+-	dmac_flush_range((unsigned long)cam_frame[filled], (unsigned long)cam_frame[filled] + sizeof(cam_frame[filled]));
++	dmac_flush_range((unsigned long)cam_frame[filled], (unsigned long)cam_frame[filled] + CAM_FRAME_BYTES);
+ 	for (i = 0; i < CAM_FRAME_W * CAM_FRAME_H; i++)
+ 		cam_frame[filled][i] |= 0x8000;		/* opaque: the frame is used as a texture and as a frame buffer picture */
+-	if (copy_to_user(dst, cam_frame[filled], sizeof(cam_frame[filled])))
++	if (copy_to_user(dst, cam_frame[filled], CAM_FRAME_BYTES))
+ 		ret = -EFAULT;
+ out:
+ 	up(&cam_mutex);
+@@ -660,6 +680,8 @@ static int ndsfb_gx_texload_vbl(struct ndsfb_gx_tex __user *arg)
+ 	wait_event_timeout(ndsfb_flip_wq, !tex_pend_bytes, HZ / 10);
+ 	if (tex_pend_bytes)
+ 		return -ETIMEDOUT;
++	if (!tex_stage && !(tex_stage = kmalloc(TEX_STAGE_BYTES, GFP_KERNEL)))
++		return -ENOMEM;
+ 	if (copy_from_user(tex_stage, (void __user *)t.data, t.bytes))
+ 		return -EFAULT;
+ 	tex_pend_off = t.offset;
+diff --git a/user/microwin/src/demos/nanox/dsdesk.c b/user/microwin/src/demos/nanox/dsdesk.c
+index 5dfb427e7..62a19be71 100644
+--- a/user/microwin/src/demos/nanox/dsdesk.c
++++ b/user/microwin/src/demos/nanox/dsdesk.c
+@@ -47,14 +47,11 @@ static const struct item multimedia[] = {
+ 	{ "3D gears", "/usr/bin/dsgl3d" },
+ };
+ static const struct item games[] = {
+-	{ "3D Dodge", "/usr/bin/dsgame" },
+ 	{ "3D Breakout", "/usr/bin/dsarcade", "breakout" },
+ 	{ "Tron", "/usr/bin/dsarcade", "tron" },
+ 	{ "3D Maze", "/usr/bin/dsarcade", "maze" },
+-	{ "Game Boy", "/usr/bin/dsgb" },
+ 	{ "DOOM", "/home/doom/dsdoom" },
+ 	{ "Minesweeper", "/usr/bin/landmine" },
+-	{ "Tetris", "/usr/bin/ntetris" },
+ };
+ static const struct item puzzles[] = {
+ 	{ "2048", "/usr/bin/dsarcade", "2048" },
+@@ -64,13 +61,10 @@ static const struct item puzzles[] = {
+ };
+ static const struct item network_items[] = {
+ 	{ "Wi-Fi", "/boot/dssettings", "wifi" },
+-	{ "Wi-Fi status", "/boot/nxterm", "/boot/wifi-status" },
+ 	{ "SSH server", "/boot/nxterm", "/boot/wifi-ssh" },
+-	{ "DSi Wi-Fi test", "/boot/nxterm", "/boot/wifi-dsi-test" },
+ };
+ static const struct item system_items[] = {
+ 	{ "Settings", "/boot/dssettings" },
+-	{ "Bench", "/usr/bin/dsbench" },
+ 	{ "Save log", "/boot/savelog" },
+ };
+ #define COUNT(a)	((int)(sizeof(a) / sizeof((a)[0])))
+@@ -1076,7 +1070,9 @@ int main(int argc, char **argv)
+ 		int changed = 0;
+ 		static int ticks, last_min = -1, check_focus;
+ 
+-		GrGetNextEventTimeout(&ev, 300);
++		/* 0.3 s while a menu, tip or the volume popup is open, else 1 s: three times fewer wake-ups and server round trips when
++		 * idle (2026-11-19 audit); the periodic checks below go by the clock, not by the number of ticks */
++		GrGetNextEventTimeout(&ev, (menu_open || tipwin || volwin) ? 300 : 1000);
+ 		switch (ev.type) {
+ 		case GR_EVENT_TYPE_CHLD_UPDATE:
+ 			if (ev.update.utype == GR_UPDATE_ACTIVATE)
+@@ -1179,18 +1175,26 @@ int main(int argc, char **argv)
+ 			}
+ 			break;
+ 		case GR_EVENT_TYPE_TIMEOUT:
+-			/* quiet for 0.3 s: do the slow things that need an answer from the server */
++			/* quiet for a while: do the slow things that need an answer from the server */
+ 			ticks++;
+ 			if (reload_desktop) {
+ 				reload_desktop = 0;
+ 				apply_desktop();
+ 			}
+-			if ((ticks % 100) == 1 || (bat_level >= 0 && bat_level <= 3 && (ticks % 33) == 1))
+-				poll_battery();		/* about every 30 s, every 10 s once low */
+-			if ((ticks % 10) == 2)		/* about every 3 s: two cheap ioctls, no server round trip */
+-				poll_wifi();
+-			if ((ticks % 3) == 0)		/* about every second: the lid closed -> lock (with a PIN set) */
+-				poll_lid();
++			{
++				static time_t last_bat, last_wifi;
++				time_t t = time(NULL);
++
++				if (!last_bat || t - last_bat >= ((bat_level >= 0 && bat_level <= 3) ? 10 : 30)) {
++					last_bat = t;
++					poll_battery();	/* every 30 s, every 10 s once low */
++				}
++				if (t - last_wifi >= 3) {
++					last_wifi = t;
++					poll_wifi();	/* every 3 s: two cheap ioctls, no server round trip */
++				}
++			}
++			poll_lid();			/* at most a second apart: the lid closed -> lock (with a PIN set); cheap */
+ 			poll_volume();
+ 			if (tipwin && time(NULL) - tip_since >= TIP_SECONDS)
+ 				hide_tip();
+@@ -1202,7 +1206,7 @@ int main(int argc, char **argv)
+ 				refresh_windows();
+ 				changed = 1;
+ 				check_focus = 0;
+-			} else if (check_focus || (ticks & 3) == 0) {
++			} else if (check_focus || !(menu_open || tipwin || volwin) || (ticks & 3) == 0) {
+ 				GR_WINDOW_ID f = GrGetFocus();
+ 
+ 				check_focus = 0;
+diff --git a/vendors/Nintendo/DSI/Makefile b/vendors/Nintendo/DSI/Makefile
+index f9ce1f9da..80c586caf 100644
+--- a/vendors/Nintendo/DSI/Makefile
++++ b/vendors/Nintendo/DSI/Makefile
+@@ -107,18 +107,12 @@ romfs:
+ 	$(ROMFSINST) /boot/rc.common
+ 	$(ROMFSINST) /boot/rc.fat
+ 	$(ROMFSINST) -p +x /boot/savelog
+-	$(ROMFSINST) -p +x /boot/autolog
+ 	$(ROMFSINST) -p +x /boot/logbody
+-	$(ROMFSINST) -p +x /boot/wifi-scan
+-	$(ROMFSINST) -p +x /boot/wifi-connect
+-	$(ROMFSINST) -p +x /boot/wifi-status
+ 	$(ROMFSINST) -p +x /boot/wifi-ssh
+-	$(ROMFSINST) -p +x /boot/wifi-dsi-test
+ 	$(ROMFSINST) -p +x /boot/desktop
+ 	$(ROMFSINST) -p +x /boot/desktop-apps
+ 	$(ROMFSINST) -p +x /boot/session
+ 	$(ROMFSINST) -p +x /boot/shutdown
+-	$(ROMFSINST) -p +x /boot/gl
+ 	$(ROMFSINST) /$(FATFS)/linux/etc/issue
+ 	# copy some Nintendo specific files to romfs
+ 	$(ROMFSINST) $(NDS_COMMON)/rc.common /$(FATFS)/linux/etc/rc.common
+@@ -170,6 +164,12 @@ finishrom:
+ 	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/dssettings $(ROMFSDIR)/boot/dssettings
+ 	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/cmp $(ROMFSDIR)/boot/cmp
+ 	-rm -f $(addprefix $(ROMFSDIR)/boot/,dsnotes dsfiles dsbench dsgl3d dsgx dsplay dsmemo dsgame dsarcade dsgb dscam landmine ntetris dslock)
++	# Retired 2026-11-19 (optimization pass, docs/STAGE3.md): the old DS Wi-Fi tools, a test tool, the shell autolog, gl, and
++	# net-tools' arp/route (busybox's route replaces it). The romfs tree is not emptied between builds, so they are removed here.
++	-rm -f $(addprefix $(ROMFSDIR)/boot/,autolog wifi-scan wifi-connect wifi-status wifi-dsi-test gl) $(ROMFSDIR)/sbin/arp $(ROMFSDIR)/sbin/route
++	# Compress the data area of the /boot programs too (their code still runs in place from the ROM; the data is copied to RAM at
++	# start either way): about 45 KB less ROM, i.e. RAM
++	$(CROSS)flthdr -d $(addprefix $(ROMFSDIR)/boot/,nano-X nxterm nanowm dsdesk dssettings cmp)
+ 	-cp -p $(ROMFSDIR)/$(FATFS)/linux/usr/bin/madplay $(ROMFSDIR)/$(OPTDIR)
+ 	# Compress the data area of these programs
+ 	$(CROSS)flthdr -d $(ROMFSDIR)/$(OPTDIR)/*
+diff --git a/vendors/Nintendo/DSI/config.linux-2.6.x b/vendors/Nintendo/DSI/config.linux-2.6.x
+index 66d1ad5e6..c1d058828 100644
+--- a/vendors/Nintendo/DSI/config.linux-2.6.x
++++ b/vendors/Nintendo/DSI/config.linux-2.6.x
+@@ -1,7 +1,7 @@
+ #
+ # Automatically generated make config: don't edit
+ # Linux kernel version: 2.6.14-hsc0
+-# Mon Jun 29 18:11:46 2009
++# Thu Nov 19 07:12:37 2026
+ #
+ CONFIG_ARM=y
+ # CONFIG_MMU is not set
+@@ -97,10 +97,10 @@ CONFIG_FLASH_SIZE=0x00800000
+ # Nintendo DS Options
+ #
+ CONFIG_NDS_DSI=y
+-CONFIG_NDS_DSISD=y
+ # CONFIG_NDS_DSI_FASTCPU is not set
+-# CONFIG_NDS_DSISD_WRITE is not set
++CONFIG_NDS_DSISD=y
+ CONFIG_NDS_DSISD_LOGFILE=y
++# CONFIG_NDS_DSISD_WRITE is not set
+ # CONFIG_NDS_DSISD_TOUCHDIAG is not set
+ # CONFIG_NDS_TEXT_CONSOLE is not set
+ # CONFIG_NDS_FASTGBA is not set
+@@ -212,8 +212,7 @@ CONFIG_IP_FIB_HASH=y
+ # CONFIG_INET_ESP is not set
+ # CONFIG_INET_IPCOMP is not set
+ # CONFIG_INET_TUNNEL is not set
+-CONFIG_INET_DIAG=y
+-CONFIG_INET_TCP_DIAG=y
++# CONFIG_INET_DIAG is not set
+ # CONFIG_TCP_CONG_ADVANCED is not set
+ CONFIG_TCP_CONG_BIC=y
+ # CONFIG_IPV6 is not set
+@@ -277,7 +276,7 @@ CONFIG_MTD_PARTITIONS=y
+ #
+ # User Modules And Translation Layers
+ #
+-CONFIG_MTD_CHAR=y
++# CONFIG_MTD_CHAR is not set
+ # CONFIG_MTD_BLOCK is not set
+ CONFIG_MTD_BLOCK_RO=y
+ # CONFIG_FTL is not set
+@@ -426,20 +425,7 @@ CONFIG_TUN=y
+ #
+ # Wireless LAN (non-hamradio)
+ #
+-CONFIG_NET_RADIO=y
+-
+-#
+-# Obsolete Wireless cards support (pre-802.11)
+-#
+-# CONFIG_STRIP is not set
+-# CONFIG_AIRO is not set
+-# CONFIG_ATMEL is not set
+-
+-#
+-# Nintendo DS Wireless interface (802.11)
+-#
+-CONFIG_NDS_WIFI=y
+-# CONFIG_HOSTAP is not set
++# CONFIG_NET_RADIO is not set
+ 
+ #
+ # Wan interfaces
+@@ -529,7 +515,7 @@ CONFIG_LEGACY_PTY_COUNT=16
+ #
+ # CONFIG_WATCHDOG is not set
+ # CONFIG_NVRAM is not set
+-CONFIG_RTC=y
++# CONFIG_RTC is not set
+ # CONFIG_DTLK is not set
+ # CONFIG_R3964 is not set
+ 
+@@ -550,9 +536,8 @@ CONFIG_RTC=y
+ #
+ # Hardware Monitoring support
+ #
+-CONFIG_HWMON=y
++# CONFIG_HWMON is not set
+ # CONFIG_HWMON_VID is not set
+-# CONFIG_HWMON_DEBUG_CHIP is not set
+ 
+ #
+ # Misc devices
+@@ -636,7 +621,6 @@ CONFIG_SND_PCM=y
+ CONFIG_SND_OSSEMUL=y
+ CONFIG_SND_MIXER_OSS=y
+ CONFIG_SND_PCM_OSS=y
+-# CONFIG_SND_RTCTIMER is not set
+ # CONFIG_SND_VERBOSE_PRINTK is not set
+ # CONFIG_SND_DEBUG is not set
+ 
+@@ -679,6 +663,8 @@ CONFIG_USB_ARCH_HAS_HCD=y
+ # File systems
+ #
+ CONFIG_EXT2_FS=y
++# CONFIG_EXT2_FS_XATTR is not set
++# CONFIG_EXT2_FS_XIP is not set
+ # CONFIG_EXT3_FS is not set
+ # CONFIG_JBD is not set
+ # CONFIG_REISERFS_FS is not set
+diff --git a/vendors/Nintendo/DSI/config.vendor b/vendors/Nintendo/DSI/config.vendor
+index 162c78e7b..73460f088 100644
+--- a/vendors/Nintendo/DSI/config.vendor
++++ b/vendors/Nintendo/DSI/config.vendor
+@@ -361,14 +361,14 @@ CONFIG_USER_BUSYBOX_EXPR=y
+ #
+ # Net-tools
+ #
+-CONFIG_USER_NET_TOOLS_ARP=y
++# CONFIG_USER_NET_TOOLS_ARP is not set
+ # CONFIG_USER_NET_TOOLS_HOSTNAME is not set
+ # CONFIG_USER_NET_TOOLS_IFCONFIG is not set
+ # CONFIG_USER_NET_TOOLS_NAMEIF is not set
+ CONFIG_USER_NET_TOOLS_NETSTAT=y
+ # CONFIG_USER_NET_TOOLS_PLIPCONFIG is not set
+ # CONFIG_USER_NET_TOOLS_RARP is not set
+-CONFIG_USER_NET_TOOLS_ROUTE=y
++# CONFIG_USER_NET_TOOLS_ROUTE is not set
+ # CONFIG_USER_NET_TOOLS_SLATTACH is not set
+ # CONFIG_USER_NET_TOOLS_MII_TOOL is not set
+ # CONFIG_USER_NET_TOOLS_MII_TOOL_FEC is not set
+@@ -680,7 +680,7 @@ CONFIG_USER_BUSYBOX_DELUSER=y
+ CONFIG_USER_BUSYBOX_DF=y
+ # CONFIG_USER_BUSYBOX_DIRNAME is not set
+ CONFIG_USER_BUSYBOX_DMESG=y
+-CONFIG_USER_BUSYBOX_DOS2UNIX=y
++# CONFIG_USER_BUSYBOX_DOS2UNIX is not set
+ # CONFIG_USER_BUSYBOX_DPKG is not set
+ # CONFIG_USER_BUSYBOX_DPKG_DEB is not set
+ # CONFIG_USER_BUSYBOX_DUTMP is not set
+@@ -745,7 +745,7 @@ CONFIG_USER_BUSYBOX_IFCONFIG_STATUS=y
+ # CONFIG_USER_BUSYBOX_2_6_MODULES is not set
+ # CONFIG_USER_BUSYBOX_INSMOD_VERSION_CHECKING is not set
+ # CONFIG_USER_BUSYBOX_IPADDR is not set
+-CONFIG_USER_BUSYBOX_IPCALC=y
++# CONFIG_USER_BUSYBOX_IPCALC is not set
+ CONFIG_USER_BUSYBOX_IPCALC_FANCY=y
+ # CONFIG_USER_BUSYBOX_IPLINK is not set
+ # CONFIG_USER_BUSYBOX_IPROUTE is not set
+@@ -813,7 +813,7 @@ CONFIG_USER_BUSYBOX_POWEROFF=y
+ # CONFIG_USER_BUSYBOX_RESET is not set
+ # CONFIG_USER_BUSYBOX_RM is not set
+ # CONFIG_USER_BUSYBOX_RMDIR is not set
+-# CONFIG_USER_BUSYBOX_ROUTE is not set
++CONFIG_USER_BUSYBOX_ROUTE=y
+ # CONFIG_USER_BUSYBOX_RPM2CPIO is not set
+ # CONFIG_USER_BUSYBOX_RUN_PARTS is not set
+ # CONFIG_USER_BUSYBOX_RX is not set
+@@ -852,7 +852,7 @@ CONFIG_USER_BUSYBOX_SLEEP=y
+ # CONFIG_USER_BUSYBOX_SWAPONOFF is not set
+ # CONFIG_USER_BUSYBOX_SYNC is not set
+ # CONFIG_USER_BUSYBOX_SYSCTL is not set
+-CONFIG_USER_BUSYBOX_SYSLOGD=y
++# CONFIG_USER_BUSYBOX_SYSLOGD is not set
+ CONFIG_USER_BUSYBOX_ROTATE_LOGFILE=y
+ # CONFIG_USER_BUSYBOX_REMOTE_LOG is not set
+ # CONFIG_USER_BUSYBOX_IPC_SYSLOG is not set
+@@ -860,12 +860,12 @@ CONFIG_USER_BUSYBOX_ROTATE_LOGFILE=y
+ # CONFIG_USER_BUSYBOX_TAR is not set
+ # CONFIG_USER_BUSYBOX_TEE is not set
+ # CONFIG_USER_BUSYBOX_TELNET is not set
+-CONFIG_USER_BUSYBOX_TELNETD=y
++# CONFIG_USER_BUSYBOX_TELNETD is not set
+ CONFIG_USER_BUSYBOX_TELNETD_INETD=y
+ CONFIG_USER_BUSYBOX_TEST=y
+ # CONFIG_USER_BUSYBOX_TEST_64 is not set
+ # CONFIG_USER_BUSYBOX_TFTP is not set
+-CONFIG_USER_BUSYBOX_TIME=y
++# CONFIG_USER_BUSYBOX_TIME is not set
+ # CONFIG_USER_BUSYBOX_TOP is not set
+ # CONFIG_USER_BUSYBOX_TOUCH is not set
+ # CONFIG_USER_BUSYBOX_TR is not set
+@@ -889,7 +889,7 @@ CONFIG_USER_BUSYBOX_UNIX2DOS=y
+ # CONFIG_USER_BUSYBOX_UUENCODE is not set
+ # CONFIG_USER_BUSYBOX_UNZIP is not set
+ # CONFIG_USER_BUSYBOX_VCONFIG is not set
+-CONFIG_USER_BUSYBOX_VI=y
++# CONFIG_USER_BUSYBOX_VI is not set
+ CONFIG_USER_BUSYBOX_VI_COLON=y
+ CONFIG_USER_BUSYBOX_VI_YANKMARK=y
+ CONFIG_USER_BUSYBOX_VI_SEARCH=y
+diff --git a/vendors/Nintendo/DSI/dsautolog.c b/vendors/Nintendo/DSI/dsautolog.c
+index 32b703a56..530b2fb1b 100644
+--- a/vendors/Nintendo/DSI/dsautolog.c
++++ b/vendors/Nintendo/DSI/dsautolog.c
+@@ -1,5 +1,5 @@
+ /*
+- * dsautolog - keeps sd:/linux/DSILOG.TXT up to date: runs "/boot/savelog quiet" when something changed, at most every 10 seconds.
++ * dsautolog - keeps sd:/linux/DSILOG.TXT up to date: runs "/boot/savelog quiet" when something changed, at most once a minute.
+  * Replaces the /boot/autolog shell loop, which cost about 650 KB all the time (a shell plus the "sleep" it ran, memreport w99b) and
+  * started savelog every 10 s: two more shells and some twenty programs each time, several copied from the card into RAM, even when
+  * nothing had changed. Here a change means: the kernel's messages (a checksum) or the size or time of one of the logs savelog
+@@ -59,6 +59,8 @@ static unsigned long signature(void)
+ }
+ 
+ /* 1 when the battery is critical and not charging (from /proc/dsisettings) */
++static int bat_level = -1;		/* the last level read (-1 unknown) */
++
+ static int battery_critical(void)
+ {
+ 	FILE *f = fopen("/proc/dsisettings", "r");
+@@ -69,6 +71,7 @@ static int battery_critical(void)
+ 	if (fscanf(f, "battery=%d charger=%d", &b, &c) < 2)
+ 		b = -1;
+ 	fclose(f);
++	bat_level = c ? 15 : b;
+ 	return b >= 0 && b <= 1 && !c;
+ }
+ 
+@@ -286,7 +289,7 @@ static void save(void)
+ int main(void)
+ {
+ 	unsigned long last = 0, sig;
+-	int low = 0, tick = 0, closed = 0;
++	int low = 0, tick = 0, closed = 0, slow = 0;
+ 	time_t saved = time(NULL);
+ 	int fd = open("/dev/null", O_RDWR);
+ 
+@@ -302,7 +305,13 @@ int main(void)
+ 		int w;
+ 		struct stat rs;
+ 
+-		sleep(1);
++		/*
++		 * Less work while idle (the 2026-11-19 audit): with deep sleep off nothing needs a 1 s tick, so it wakes every 10 s; the
++		 * battery (an ARM7 request with 3 power-chip reads) is read every 60 s, every 10 s once it is low (3 or less); the card log
++		 * is saved at most once a minute when something changed, and otherwise every 30 minutes (was every 5: almost every save
++		 * wrote the card, since packet counters and free memory always change).
++		 */
++		sleep(DEEP_SLEEP ? 1 : 10);
+ 		while (waitpid(-1, &w, WNOHANG) > 0)	/* the Wi-Fi Auto started after a sleep */
+ 			;
+ 		if (stat("/tmp/sleep.request", &rs) == 0 && time(NULL) - rs.st_mtime > 30)
+@@ -315,9 +324,12 @@ int main(void)
+ 		} else if (!w) {
+ 			closed = 0;
+ 		}
+-		if (++tick < 10)
++		if (DEEP_SLEEP && ++tick < 10)
+ 			continue;
+ 		tick = 0;
++		if (bat_level > 3 && ++slow < 6)
++			goto log;
++		slow = 0;
+ 		if (battery_critical()) {
+ 			if (++low == 2) {
+ 				FILE *f = fopen("/tmp/desktop.log", "a");
+@@ -331,8 +343,9 @@ int main(void)
+ 		} else {
+ 			low = 0;
+ 		}
++	log:
+ 		sig = signature();
+-		if (sig != last || time(NULL) - saved >= 300) {
++		if ((sig != last && time(NULL) - saved >= 60) || time(NULL) - saved >= 1800) {
+ 			save();
+ 			last = signature();	/* what savelog itself changed does not count */
+ 			saved = time(NULL);
+diff --git a/vendors/Nintendo/DSI/logbody b/vendors/Nintendo/DSI/logbody
+index 6d57d0dcc..1e084b49a 100644
+--- a/vendors/Nintendo/DSI/logbody
++++ b/vendors/Nintendo/DSI/logbody
+@@ -10,16 +10,11 @@ echo "--- desktop.log ---"
+ [ -f /tmp/desktop.log ] && /usr/bin/cat /tmp/desktop.log
+ echo "--- /home/doom/dsdoom.log ---"
+ [ -f /home/doom/dsdoom.log ] && /usr/bin/cat /home/doom/dsdoom.log
+-echo "--- network (nds) ---"
+-ifconfig nds 2>&1
+-iwconfig nds 2>&1
+ echo "--- wlan0 (DSi Wi-Fi chip) ---"
+ ifconfig wlan0 2>&1
+ [ -f /home/wlan0-test.log ] && /usr/bin/cat /home/wlan0-test.log
+ echo "--- /proc/dsiwifi2 (DSi Wi-Fi chip test) ---"
+ /usr/bin/cat /proc/dsiwifi2 2>&1
+-echo "--- /proc/dswifistat (joining) ---"
+-/usr/bin/cat /proc/dswifistat 2>&1
+ echo "--- Wi-Fi window (dsnet.log, DHCP) ---"
+ [ -f /tmp/dsnet.log ] && /usr/bin/cat /tmp/dsnet.log
+ [ -f /tmp/wifi-auto.log ] && /usr/bin/cat /tmp/wifi-auto.log
+@@ -31,8 +26,6 @@ echo "--- /proc/net/arp ---"
+ /usr/bin/cat /proc/net/arp 2>&1
+ echo "--- /proc/dsimic (microphone counters) ---"
+ /usr/bin/cat /proc/dsimic 2>&1
+-echo "--- /proc/dsiwifi (Wi-Fi hardware probe) ---"
+-/usr/bin/cat /proc/dsiwifi 2>&1
+ echo "--- /proc/dsivolume ---"
+ /usr/bin/cat /proc/dsivolume 2>&1
+ echo "--- /proc/meminfo ---"
+diff --git a/vendors/Nintendo/DSI/rc b/vendors/Nintendo/DSI/rc
+index 4bbf0614f..90adc874f 100644
+--- a/vendors/Nintendo/DSI/rc
++++ b/vendors/Nintendo/DSI/rc
+@@ -66,13 +66,10 @@ then
+ fi
+ # the first login shell (tty1) starts the desktop (/boot/session, through /etc/profile)
+ echo boot > /tmp/.boot-session
+-# keep the card log up to date: dsautolog (a small program on the card: saves when something changed) or, with an older image, the
+-# /boot/autolog shell loop (about 650 KB of shells all the time)
++# keep the card log up to date: dsautolog (a small program on the card: saves when something changed; the shell loop it replaced,
++# /boot/autolog, is gone since 2026-11-19)
+ # (msh runs "a && b &" in the foreground, so start it with a plain command in an if)
+ if [ -x /usr/bin/dsautolog ]
+ then
+ 	/usr/bin/dsautolog &
+-elif [ -x /boot/autolog ]
+-then
+-	/boot/autolog &
+ fi
+-- 
+2.56.1
+

@@ -58,7 +58,7 @@ if [ -n "$PREV" ]; then
 fi
 
 [ $NOCARD = 1 ] && { echo "done (card skipped)"; exit 0; }
-echo "== 5. card"
+echo "== 5. card   (CARD IN USE: do not remove it until SAFE TO REMOVE below)"
 if ! card_present; then
 	echo "card not in the PC: copy $ROM later and run scripts/install-apps.sh (the games and accessories now live in ROOTFS.IMG)"
 	exit 0
@@ -81,3 +81,10 @@ scripts/fix-stacks.sh -i "$CARD/linux/ROOTFS.IMG" | tail -1
 scripts/install-terminfo.sh -i "$CARD/linux/ROOTFS.IMG" | tail -1
 scripts/set-timezone.sh -i "$CARD/linux/ROOTFS.IMG" --if-missing
 ls "$CARD"/*.nds | xargs -n1 basename
+sync
+if scripts/rootfs-check.sh "$CARD/linux/ROOTFS.IMG" > /dev/null; then
+	echo "== SAFE TO REMOVE the card ($TAG installed, image clean, written out)"
+else
+	echo "== ROOTFS.IMG HAS ERRORS: leave the card in (scripts/rootfs-check.sh -y repairs it)"
+	exit 1
+fi
