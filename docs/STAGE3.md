@@ -1427,3 +1427,5 @@ access points on channel 1, one at -55 dBm and one at -79. The power-on scan was
 and heard only the far one; do_connect chose the AP before its channel scan, so every attempt (20) went to the -79 one, which
 never answered. w99w, patch 0153: the channel scan comes first, then the AP is chosen again (nets[] is kept per BSSID with the best
 signal, so the near one wins).
+
+- **w99w verified (2026-11-19):** Wi-Fi joined, SSH in. Over SSH from the PC: hush (arithmetic, functions, local, $(), subshells, loops, case, jobs) and the new tools (awk, sed, sort/uniq, sha256sum, tar czf/tzf) work; free: 7.6 MB free of 12.8 MB with the desktop, Wi-Fi and SSH up. Found: head -N / -c needs FEATURE_FANCY_HEAD; grep, ls and the other names the old BusyBox 1.00 provides are still its versions (no -a for grep).
